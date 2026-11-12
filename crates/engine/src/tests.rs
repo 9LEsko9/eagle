@@ -533,6 +533,26 @@ fn next_applies_pending_policy_and_preserves_pause() {
 }
 
 #[test]
+fn successive_commands_use_reset_track_before_new_audio_is_rendered() {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let shared = Arc::new(Shared::default());
+    let mut worker = Worker::new(Config::default(), shared.clone(), commands, events);
+    worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+    worker.output = Some(Output::offline(44100).0);
+    shared.track.store(0, Ordering::Release);
+    for expected in [1, 2] {
+        shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+        worker.command(Command::Next);
+        assert_eq!(worker.decode_index, expected);
+    }
+    shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+    worker.command(Command::Seek(Duration::from_millis(100)));
+    assert_eq!(worker.decode_index, 2);
+    assert_eq!(worker.restart_position, Duration::from_millis(100));
+}
+
+#[test]
 fn policy_change_preserves_each_protected_short_track_tail() {
     let (_, commands) = mpsc::channel();
     let (events, _) = mpsc::sync_channel(128);

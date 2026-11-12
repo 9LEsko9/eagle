@@ -265,6 +265,18 @@ mod tests {
             .dispatch_event(slint::platform::WindowEvent::KeyReleased { text: " ".into() });
         assert_eq!(*toggles.borrow(), 1);
         let fixture = rows.row_data(0).unwrap();
+        rows.push(fixture.clone());
+        let played_rows = Rc::new(RefCell::new(Vec::new()));
+        ui.global::<Actions>().on_play_row({
+            let played_rows = played_rows.clone();
+            move |index| played_rows.borrow_mut().push(index)
+        });
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Первый трек, Исполнитель")
+            .nth(1)
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(&*played_rows.borrow(), &[1]);
         ui.global::<Library>()
             .set_tracks(Rc::new(VecModel::from(vec![fixture; 5000])).into());
         slint::platform::update_timers_and_animations();

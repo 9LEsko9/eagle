@@ -18,6 +18,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const RESET_THRESHOLD: usize = 32;
 const LIKED_ALBUMS: &str = "liked_albums:yandex";
 const LIKED_ARTISTS: &str = "liked_artists:yandex";
+const ACCOUNT_UID: &str = "account_uid:yandex";
 
 fn names(artists: &[Artist]) -> String {
     artists
@@ -125,6 +126,8 @@ pub enum Command {
     /// Artwork for on-screen items, by UI key (`t:` track, `a:` album, `r:` artist).
     Thumbnails(Vec<String>),
     Play(TrackId),
+    /// Play the exact visible row, including duplicate track IDs.
+    PlayRow(usize),
     PlayAll(bool),
     TogglePlay,
     Pause,
@@ -279,6 +282,23 @@ fn initial_queue(rows: &[LibraryItem], selected: usize) -> Result<(Vec<Arc<Track
         })
         .collect();
     Ok((queue, current))
+}
+
+fn select_play_all(
+    rows: &[LibraryItem],
+    shuffle: bool,
+    mut key: impl FnMut(usize) -> u64,
+) -> Option<usize> {
+    let available = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.track.availability == Availability::Available)
+        .map(|(index, _)| index);
+    if shuffle {
+        available.min_by_key(|index| key(*index))
+    } else {
+        available.into_iter().next()
+    }
 }
 
 fn upcoming(queue: &[Arc<Track>], current: usize, repeat: Repeat) -> Vec<Arc<Track>> {
@@ -594,15 +614,51 @@ impl Worker {
                         Ok(CatalogReply::Cover(target, id, cover)) => {
                             (self.emit)(Event::Cover(target, id, cover))
                         }
-                        Ok(CatalogReply::Account) => {
+                        Ok(CatalogReply::Account(changed)) => {
+                            if changed {
+                                self.reset_account_view()?;
+                            }
                             (self.emit)(Event::Account);
                             self.background(Command::SyncCollections)?;
                             self.background(Command::SyncLibrary)?;
                         }
                         Ok(CatalogReply::Synced) => {
+                            let liked = {
+                                let db = self.store.read()?;
+                                let mut stmt = db.prepare("SELECT id FROM likes")?;
+                                let ids = stmt
+                                    .query_map([], |row| row.get::<_, String>(0))?
+                                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                                ids.into_iter()
+                                    .filter_map(|id| id.parse().ok())
+                                    .collect::<HashSet<TrackId>>()
+                            };
+                            self.queue_likes = liked;
+                            let mut rows = self.rows.clone();
+                            for row in &mut rows {
+                                row.liked = self.queue_likes.contains(&row.track.id);
+                            }
+                            self.publish(rows);
+                            let player_liked = self
+                                .player
+                                .track
+                                .as_ref()
+                                .is_some_and(|track| self.queue_likes.contains(&track.id));
+                            Arc::make_mut(&mut self.player).liked = player_liked;
+                            (self.emit)(Event::Player(self.player.clone()));
                             if self.view == View::Library {
                                 // View-bound, so a reply racing a navigation is discarded.
                                 self.request(Command::Library)?;
+                            }
+                        }
+                        Ok(CatalogReply::AlbumsSynced) => {
+                            if self.view == View::Albums {
+                                self.request(Command::Albums)?;
+                            }
+                        }
+                        Ok(CatalogReply::ArtistsSynced) => {
+                            if self.view == View::Artists {
+                                self.request(Command::Artists)?;
                             }
                         }
                         Err(message) if generation == 0 => {
@@ -618,6 +674,30 @@ impl Worker {
         self.catalog.take();
         if let Some(worker) = self.catalog_worker.take() {
             let _ = worker.join();
+        }
+        Ok(())
+    }
+    fn reset_account_view(&mut self) -> Result<()> {
+        self.queue_likes.clear();
+        Arc::make_mut(&mut self.player).liked = false;
+        (self.emit)(Event::Player(self.player.clone()));
+        let mut rows = self.rows.clone();
+        for row in &mut rows {
+            row.liked = false;
+        }
+        self.publish(rows);
+        (self.emit)(Event::Collections(Vec::new()));
+        match self.view {
+            View::Library => self.request(Command::Library)?,
+            View::Albums => self.request(Command::Albums)?,
+            View::Artists => self.request(Command::Artists)?,
+            View::Album | View::Artist => {
+                (self.emit)(Event::Header(Header::default()));
+            }
+            View::Playlist => {
+                self.command(Command::Open(View::Library))?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -683,12 +763,23 @@ impl Worker {
             Arc::make_mut(&mut self.player).liked = liked;
             (self.emit)(Event::Player(self.player.clone()));
         }
-        if let Some(index) = self.rows.iter().position(|r| r.track.id == id) {
-            self.rows[index].liked = liked;
-            (self.emit)(Event::Library(vec![LibraryDelta::Update {
-                index,
-                item: self.rows[index].clone(),
-            }]));
+        let updates = self
+            .rows
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                if row.track.id != id {
+                    return None;
+                }
+                row.liked = liked;
+                Some(LibraryDelta::Update {
+                    index,
+                    item: row.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if !updates.is_empty() {
+            (self.emit)(Event::Library(updates));
         }
     }
     /// Maps UI keys to cover jobs using what is currently listed.
@@ -852,13 +943,12 @@ impl Worker {
             }
             Command::PlayAll(shuffle) => {
                 Arc::make_mut(&mut self.player).shuffle = shuffle;
-                let track = self
-                    .rows
-                    .iter()
-                    .find(|r| r.track.availability == Availability::Available)
-                    .map(|r| r.track.id.clone());
-                if let Some(id) = track {
-                    self.command(Command::Play(id))?;
+                use std::hash::{BuildHasher, RandomState};
+                let random = RandomState::new();
+                if let Some(index) =
+                    select_play_all(&self.rows, shuffle, |index| random.hash_one(index))
+                {
+                    self.play_row(index)?;
                 }
             }
             Command::Play(id) => {
@@ -867,37 +957,9 @@ impl Worker {
                     .iter()
                     .position(|r| r.track.id == id)
                     .ok_or("трек не найден в текущем списке")?;
-                let (queue, selected) = initial_queue(&self.rows, index)?;
-                self.queue = queue;
-                self.queue_original = self.queue.clone();
-                let track = self.queue[selected].clone();
-                self.queue_likes = self
-                    .rows
-                    .iter()
-                    .filter(|r| r.liked)
-                    .map(|r| r.track.id.clone())
-                    .collect();
-                if self.player.shuffle {
-                    use std::hash::{BuildHasher, RandomState};
-                    let selected = self
-                        .queue
-                        .iter()
-                        .position(|t| Arc::ptr_eq(t, &track))
-                        .ok_or("трек недоступен")?;
-                    self.queue.remove(selected);
-                    let random = RandomState::new();
-                    self.queue.sort_by_cached_key(|t| random.hash_one(&t.id));
-                    self.queue.insert(0, track);
-                    self.current = 0;
-                } else {
-                    self.current = self
-                        .queue
-                        .iter()
-                        .position(|t| t.id == track.id)
-                        .ok_or("трек недоступен")?;
-                }
-                self.play_current()?;
+                self.play_row(index)?;
             }
+            Command::PlayRow(index) => self.play_row(index)?,
             Command::Next => {
                 if let Some(engine) = &self.engine {
                     engine.next()?;
@@ -996,6 +1058,29 @@ impl Worker {
             Command::Shutdown => {}
         }
         Ok(())
+    }
+    fn play_row(&mut self, index: usize) -> Result<()> {
+        let (queue, selected) = initial_queue(&self.rows, index)?;
+        self.queue = queue;
+        self.queue_original = self.queue.clone();
+        let track = self.queue[selected].clone();
+        self.queue_likes = self
+            .rows
+            .iter()
+            .filter(|r| r.liked)
+            .map(|r| r.track.id.clone())
+            .collect();
+        if self.player.shuffle {
+            use std::hash::{BuildHasher, RandomState};
+            self.queue.remove(selected);
+            let random = RandomState::new();
+            self.queue.sort_by_cached_key(|t| random.hash_one(&t.id));
+            self.queue.insert(0, track);
+            self.current = 0;
+        } else {
+            self.current = selected;
+        }
+        self.play_current()
     }
     fn configure_playback(&self) -> Result<()> {
         if let Some(engine) = &self.engine {
@@ -1135,6 +1220,8 @@ enum CatalogReply {
     PlaylistChanged(Vec<Collection>, Option<Playlist>, Option<TrackId>),
     PlaylistFailed(String),
     Synced,
+    AlbumsSynced,
+    ArtistsSynced,
     Cards(Vec<Card>),
     Page {
         items: Vec<LibraryItem>,
@@ -1149,7 +1236,7 @@ enum CatalogReply {
     Cover(CoverTarget, TrackId, Arc<eagle_palette::Cover>),
     Tracks(Vec<LibraryItem>, String),
     Liked(TrackId, bool),
-    Account,
+    Account(bool),
 }
 struct Catalog {
     covers: RefCell<VecDeque<(TrackId, Arc<eagle_palette::Cover>)>>,
@@ -1238,13 +1325,31 @@ impl Catalog {
     fn sync_step(&self, state: &mut SyncState) -> Result<(Option<CatalogReply>, bool)> {
         match state.step {
             0 => {
-                crate::music::sync_playlists(&self.store, self.provider.as_ref())?;
+                let reply = match crate::music::sync_playlists(&self.store, self.provider.as_ref())
+                {
+                    Ok(()) => Some(self.command(Command::Collections)?),
+                    Err(error) => {
+                        log::warn!(error = error.to_string().as_str(); "playlist sync failed");
+                        None
+                    }
+                };
                 state.step = 1;
-                Ok((Some(self.command(Command::Collections)?), false))
+                Ok((reply, false))
             }
             1 => {
-                let page = self.provider.likes(state.cursor.as_deref())?;
-                self.store.put_tracks(&page.items)?;
+                let page = match self.provider.likes(state.cursor.as_deref()) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
+                        state.step = 3;
+                        return Ok((None, false));
+                    }
+                };
+                if let Err(error) = self.store.put_tracks(&page.items) {
+                    log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
+                    state.step = 3;
+                    return Ok((None, false));
+                }
                 state
                     .ids
                     .extend(page.items.iter().map(|track| track.id.to_string()));
@@ -1255,32 +1360,43 @@ impl Catalog {
                 Ok((None, false))
             }
             2 => {
-                self.store.replace_likes(std::mem::take(&mut state.ids))?;
                 state.step = 3;
-                Ok((Some(CatalogReply::Synced), false))
+                match self.store.replace_likes(std::mem::take(&mut state.ids)) {
+                    Ok(()) => Ok((Some(CatalogReply::Synced), false)),
+                    Err(error) => {
+                        log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
+                        Ok((None, false))
+                    }
+                }
             }
             3 => {
-                match self.provider.liked_albums() {
-                    Ok(albums) => self
-                        .store
-                        .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?,
-                    Err(error) => {
-                        log::warn!(error = error.to_string().as_str(); "liked albums sync failed")
+                let reply = match self.provider.liked_albums() {
+                    Ok(albums) => {
+                        self.store
+                            .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?;
+                        Some(CatalogReply::AlbumsSynced)
                     }
-                }
+                    Err(error) => {
+                        log::warn!(error = error.to_string().as_str(); "liked albums sync failed");
+                        None
+                    }
+                };
                 state.step = 4;
-                Ok((None, false))
+                Ok((reply, false))
             }
             _ => {
-                match self.provider.liked_artists() {
-                    Ok(artists) => self
-                        .store
-                        .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?,
-                    Err(error) => {
-                        log::warn!(error = error.to_string().as_str(); "liked artists sync failed")
+                let reply = match self.provider.liked_artists() {
+                    Ok(artists) => {
+                        self.store
+                            .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?;
+                        Some(CatalogReply::ArtistsSynced)
                     }
-                }
-                Ok((None, true))
+                    Err(error) => {
+                        log::warn!(error = error.to_string().as_str(); "liked artists sync failed");
+                        None
+                    }
+                };
+                Ok((reply, true))
             }
         }
     }
@@ -1320,6 +1436,31 @@ impl Catalog {
         }
     }
 
+    fn switch_account(&self, uid: &str) -> Result<bool> {
+        let uid = uid.to_owned();
+        Ok(self.store.write(move |connection| {
+            let tx = connection.transaction()?;
+            let same: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1 AND value=?2)",
+                [ACCOUNT_UID, uid.as_str()],
+                |row| row.get(0),
+            )?;
+            if !same {
+                tx.execute("DELETE FROM likes WHERE id LIKE 'yandex:%'", [])?;
+                tx.execute("DELETE FROM playlists WHERE id LIKE 'yandex:%'", [])?;
+                tx.execute(
+                    "DELETE FROM settings WHERE key IN (?1, ?2)",
+                    [LIKED_ALBUMS, LIKED_ARTISTS],
+                )?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO settings VALUES (?1, ?2)",
+                    [ACCOUNT_UID, uid.as_str()],
+                )?;
+            }
+            tx.commit()?;
+            Ok(!same)
+        })?)
+    }
     fn library(&self) -> Result<CatalogReply> {
         let rows = {
             let c = self.store.read()?;
@@ -1405,7 +1546,7 @@ impl Catalog {
             }
             Command::Library => self.library(),
             Command::Restore => Ok(match self.provider.account() {
-                Ok(_) => CatalogReply::Account,
+                Ok(account) => CatalogReply::Account(self.switch_account(&account.id)?),
                 Err(_) => CatalogReply::Unchanged,
             }),
             Command::SyncCollections => {
@@ -1587,8 +1728,8 @@ impl Catalog {
                 )
             }
             Command::Login(token) => {
-                self.provider.login(token)?;
-                Ok(CatalogReply::Account)
+                let account = self.provider.login(token)?;
+                Ok(CatalogReply::Account(self.switch_account(&account.id)?))
             }
             Command::Like(id) => {
                 let liked = !self.store.read()?.query_row(
@@ -1837,6 +1978,58 @@ mod delta_tests {
         worker.catalog_worker.take().unwrap().join().unwrap();
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn account_change_resets_player_queue_and_visible_likes() {
+        let root = std::env::temp_dir().join(format!("eagle-account-view-{}", std::process::id()));
+        let (events_tx, events_rx) = mpsc::channel();
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(
+            root.clone(),
+            Arc::new(move |event| {
+                let _ = events_tx.send(event);
+            }),
+            tx,
+        )
+        .unwrap();
+        worker.view = View::Search;
+        let item = row(1, true);
+        worker.rows = vec![item.clone(), item.clone()];
+        worker.queue_likes.insert(item.track.id.clone());
+        Arc::make_mut(&mut worker.player).track = Some(item.track);
+        Arc::make_mut(&mut worker.player).liked = true;
+        worker.reset_account_view().unwrap();
+        assert!(worker.queue_likes.is_empty());
+        assert!(!worker.player.liked);
+        assert!(worker.rows.iter().all(|row| !row.liked));
+        let id = worker.rows[0].track.id.clone();
+        worker.apply_liked(id.clone(), true);
+        assert!(worker.player.liked);
+        assert!(worker.rows.iter().all(|row| row.liked));
+        worker.apply_liked(id, false);
+        assert!(!worker.player.liked);
+        assert!(worker.rows.iter().all(|row| !row.liked));
+        assert!(
+            events_rx
+                .try_iter()
+                .any(|event| matches!(event, Event::Player(state) if !state.liked))
+        );
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn play_all_shuffle_can_select_nonfirst_available_row() {
+        let rows = vec![row(1, false), row(2, false), row(1, false)];
+        assert_eq!(select_play_all(&rows, false, |_| 0), Some(0));
+        assert_eq!(
+            select_play_all(&rows, true, |i| if i == 2 { 0 } else { 1 }),
+            Some(2)
+        );
+        let (queue, index) = initial_queue(&rows, 2).unwrap();
+        assert_eq!(index, 2);
+        assert!(Arc::ptr_eq(&queue[index], &rows[2].track));
     }
     #[test]
     fn playback_indices_survive_shuffle_and_duplicate_track_ids() {
@@ -2099,6 +2292,9 @@ mod sync_tests {
             }
         }
         fn playlists(&self, _: Option<&str>) -> std::result::Result<Page<Playlist>, ProviderError> {
+            if self.fail && self.empty {
+                return Err(ProviderError::Network);
+            }
             Ok(Page {
                 items: vec![],
                 next: None,
@@ -2137,6 +2333,12 @@ mod sync_tests {
                 items: vec![track],
                 next: (cursor.is_none()).then(|| "next".to_string()),
             })
+        }
+        fn liked_albums(&self) -> std::result::Result<Vec<Album>, ProviderError> {
+            Ok(vec![])
+        }
+        fn liked_artists(&self) -> std::result::Result<Vec<Artist>, ProviderError> {
+            Ok(vec![])
         }
         fn set_liked(&self, _: &TrackId, _: bool) -> std::result::Result<(), ProviderError> {
             Ok(())
@@ -2271,6 +2473,105 @@ mod sync_tests {
         assert!(delete.contains("удалён в Яндекс Музыке"));
     }
     #[test]
+    fn account_switch_clears_only_private_cache_and_preserves_same_account() {
+        let c = catalog(false);
+        c.store.replace_likes(vec!["yandex:1".into()]).unwrap();
+        c.store
+            .put_json("playlists", "yandex:1_2", "{}".into())
+            .unwrap();
+        c.store.put_setting(LIKED_ALBUMS, "[]".into()).unwrap();
+        c.store.put_setting(LIKED_ARTISTS, "[]".into()).unwrap();
+        c.store.put_setting("unrelated", "kept".into()).unwrap();
+        assert!(c.switch_account("1").unwrap());
+        let db = c.store.read().unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM playlists", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(c.store.setting(LIKED_ALBUMS).unwrap().is_none());
+        assert!(c.store.setting(LIKED_ARTISTS).unwrap().is_none());
+        assert_eq!(
+            c.store.setting("unrelated").unwrap().as_deref(),
+            Some("kept")
+        );
+        c.store.replace_likes(vec!["yandex:2".into()]).unwrap();
+        assert!(!c.switch_account("1").unwrap());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(c.switch_account("2").unwrap());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn playlist_failure_does_not_block_likes_and_collection_events() {
+        let mut c = catalog(false);
+        c.provider = Arc::new(Fixture {
+            fail: true,
+            empty: true,
+            gate: None,
+            calls: Arc::default(),
+        });
+        c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+        let mut state = SyncState::default();
+        assert!(c.sync_step(&mut state).unwrap().0.is_none());
+        assert_eq!(state.step, 1);
+        c.sync_step(&mut state).unwrap();
+        assert!(matches!(
+            c.sync_step(&mut state).unwrap().0,
+            Some(CatalogReply::Synced)
+        ));
+        assert!(matches!(
+            c.sync_step(&mut state).unwrap().0,
+            Some(CatalogReply::AlbumsSynced)
+        ));
+        let (reply, done) = c.sync_step(&mut state).unwrap();
+        assert!(done && matches!(reply, Some(CatalogReply::ArtistsSynced)));
+        assert_eq!(
+            c.store
+                .read()
+                .unwrap()
+                .query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn likes_publication_failure_still_syncs_albums_and_artists() {
+        let c = catalog(false);
+        c.store
+            .write(|db| {
+                db.execute("DROP TABLE likes", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let mut state = SyncState {
+            step: 2,
+            ..SyncState::default()
+        };
+        assert!(c.sync_step(&mut state).unwrap().0.is_none());
+        assert_eq!(state.step, 3);
+        assert!(matches!(
+            c.sync_step(&mut state).unwrap().0,
+            Some(CatalogReply::AlbumsSynced)
+        ));
+        assert!(matches!(
+            c.sync_step(&mut state).unwrap().0,
+            Some(CatalogReply::ArtistsSynced)
+        ));
+    }
+    #[test]
     fn catalog_drains_commands_and_cancels_old_account_sync() {
         let mut c = catalog(false);
         let gate = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
@@ -2301,16 +2602,15 @@ mod sync_tests {
         while seen.len() < 2 {
             if let Message::Catalog(generation, _) =
                 reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                && generation != 0
             {
-                if generation != 0 {
-                    if generation == 10 {
-                        println!(
-                            "catalog command latency after page release: {:?}",
-                            released.elapsed()
-                        );
-                    }
-                    seen.push(generation);
+                if generation == 10 {
+                    println!(
+                        "catalog command latency after page release: {:?}",
+                        released.elapsed()
+                    );
                 }
+                seen.push(generation);
             }
         }
         assert_eq!(seen, [10, 11]);
@@ -2454,7 +2754,15 @@ mod sync_tests {
             };
             assert_eq!(count(), 1);
             if fail {
-                assert!(c.sync_step(&mut state).is_err());
+                assert!(c.sync_step(&mut state).unwrap().0.is_none());
+                assert_eq!(state.step, 3);
+                assert_eq!(count(), 1);
+                assert!(matches!(
+                    c.sync_step(&mut state).unwrap().0,
+                    Some(CatalogReply::AlbumsSynced)
+                ));
+                let (reply, done) = c.sync_step(&mut state).unwrap();
+                assert!(done && matches!(reply, Some(CatalogReply::ArtistsSynced)));
                 assert_eq!(count(), 1);
             } else {
                 c.sync_step(&mut state).unwrap();

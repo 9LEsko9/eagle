@@ -26,13 +26,13 @@ export component TrackRowView inherits Rectangle {
     border-radius: 8px;
     accessible-role: list-item;
     accessible-label: item.title + ", " + item.artist;
-    accessible-action-default => { if item.available { Actions.play(item.id); } }
+    accessible-action-default => { if item.available { Actions.play-row(root.number - 1); } }
     background: root.lit ? Theme.t.surf : transparent;
     border-width: focus.has-focus ? 2px : 0px;
     border-color: Theme.t.tx;
     forward-focus: focus;
-    focus := FocusScope { key-pressed(e) => { if e.text == "\n" && root.item.available { Actions.play(root.item.id); return accept; } return reject; } }
-    touch := TouchArea { clicked => { focus.focus(); } double-clicked => { if root.item.available { Actions.play(root.item.id); } } }
+    focus := FocusScope { key-pressed(e) => { if e.text == "\n" && root.item.available { Actions.play-row(root.number - 1); return accept; } return reject; } }
+    touch := TouchArea { clicked => { focus.focus(); } double-clicked => { if root.item.available { Actions.play-row(root.number - 1); } } }
     HorizontalLayout {
         padding-left: TrackColumns.inset;
         padding-right: TrackColumns.inset;
@@ -59,7 +59,7 @@ export component TrackRowView inherits Rectangle {
                 icon-size: 14px;
                 label: @tr("Играть трек");
                 reveal: root.lit;
-                clicked => { if root.item.available { Actions.play(root.item.id); } }
+                clicked => { if root.item.available { Actions.play-row(root.number - 1); } }
             }
         }
         if Ui.list-covers : Rectangle {

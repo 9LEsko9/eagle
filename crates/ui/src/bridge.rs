@@ -537,6 +537,12 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         }
     });
     let tx = sender.clone();
+    actions.on_play_row(move |index| {
+        if let Ok(index) = usize::try_from(index) {
+            let _ = tx.send(Command::PlayRow(index));
+        }
+    });
+    let tx = sender.clone();
     let weak = ui.as_weak();
     actions.on_like(move |id| {
         let Ok(parsed) = id.parse() else {

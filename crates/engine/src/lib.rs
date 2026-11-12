@@ -109,6 +109,10 @@ struct Shared {
     policy_track: AtomicU32,
     policy_consumed: AtomicU64,
     occurrence: AtomicU64,
+    reset_track: AtomicU32,
+    reset_occurrence: AtomicU64,
+    reset_position: AtomicU64,
+    frame_generation: AtomicU32,
     pending_interrupts: AtomicU32,
     device: std::sync::Mutex<Option<String>>,
     observer_stop: AtomicBool,
@@ -144,6 +148,10 @@ impl Default for Shared {
             policy_track: AtomicU32::new(u32::MAX),
             policy_consumed: AtomicU64::new(0),
             occurrence: AtomicU64::new(0),
+            reset_track: AtomicU32::new(0),
+            reset_occurrence: AtomicU64::new(0),
+            reset_position: AtomicU64::new(0),
+            frame_generation: AtomicU32::new(0),
             pending_interrupts: AtomicU32::new(0),
             device: std::sync::Mutex::new(None),
             observer_stop: AtomicBool::new(false),
@@ -517,8 +525,20 @@ impl Worker {
             let frames = self.shared.position.load(Ordering::Relaxed);
             let at = self.shared.audible_at.load(Ordering::Relaxed);
             let consumed = self.shared.consumed.load(Ordering::Relaxed);
+            let frame_generation = self.shared.frame_generation.load(Ordering::Relaxed);
             if self.shared.sequence.load(Ordering::Acquire) != seq {
                 continue;
+            }
+            if frame_generation != self.shared.generation.load(Ordering::Acquire) {
+                let track = self.shared.reset_track.load(Ordering::Relaxed);
+                return ((track as usize) < self.sources.len()).then(|| PositionAnchor {
+                    track,
+                    position: Duration::from_nanos(
+                        self.shared.reset_position.load(Ordering::Relaxed),
+                    ),
+                    audible_at: Instant::now(),
+                    state: self.state,
+                });
             }
             if track == u32::MAX {
                 return None;
@@ -576,6 +596,16 @@ impl Worker {
                 .store(revision, Ordering::Release);
             self.shared.policy_ack.store(revision, Ordering::Release);
         }
+        self.shared
+            .reset_track
+            .store(index as u32, Ordering::Relaxed);
+        self.shared
+            .reset_occurrence
+            .store(self.occurrence, Ordering::Relaxed);
+        self.shared.reset_position.store(
+            position.as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.timeline.clear();
         self.produced_frames = self.shared.consumed.load(Ordering::Acquire);
