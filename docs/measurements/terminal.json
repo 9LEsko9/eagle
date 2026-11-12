@@ -1,0 +1,26 @@
+{
+  "pause_seek_resume_next": {
+    "exit": 0,
+    "terminal_restored": true,
+    "last_stats": [
+      0,
+      0
+    ]
+  },
+  "quit": {
+    "exit": 0,
+    "terminal_restored": true,
+    "last_stats": [
+      88064,
+      0
+    ]
+  },
+  "error": {
+    "exit": 1,
+    "terminal_restored": true,
+    "last_stats": [
+      11025,
+      0
+    ]
+  }
+}

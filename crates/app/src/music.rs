@@ -127,7 +127,12 @@ fn parse_range(value: &str) -> Result<(u64, u64, u64)> {
     }
     Ok((a, b, total))
 }
-fn metadata(store: &Store, net: &Client, root: &Path, track: &eagle_core::Track) -> Result<()> {
+pub(crate) fn metadata(
+    store: &Store,
+    net: &Client,
+    root: &Path,
+    track: &eagle_core::Track,
+) -> Result<()> {
     store.put_track(track)?;
     let Some(cover) = &track.cover else {
         return Ok(());
@@ -213,6 +218,9 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         println!("Аккаунт: {}, Plus: {}", a.id, a.subscription);
         return Ok(());
     }
+    if command == "play" {
+        return crate::playback::run(tail, root, net);
+    }
     let store = Store::open(root)?;
     let tid =
         || -> Result<TrackId> { Ok(tail.first().ok_or("укажите provider:id")?.parse()?) };
@@ -239,43 +247,6 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
                         " [недоступен]"
                     }
                 );
-            }
-        }
-        "play" => {
-            let id = tid()?;
-            let q = if tail.iter().any(|a| a == "--standard") {
-                Quality::Standard
-            } else {
-                Quality::High
-            };
-            let cache = Cache::open(&root.join("audio"), LIMIT * 4, &store)?;
-            let path = audio(&store, &cache, &net, &id, q, || {
-                if id.provider() != provider.name() {
-                    return Err("провайдер ещё не реализован".into());
-                }
-                let track = provider
-                    .track(&id)
-                    .map_err(|e| format!("метаданные трека: {e}"))?;
-                if let Err(e) = metadata(&store, &net, root, &track) {
-                    eprintln!("Обложка: {e}");
-                }
-                Ok(provider
-                    .resolve_stream(&id, q)
-                    .map_err(|e| format!("получение аудиоссылки: {e}"))?)
-            })?;
-            if tail.iter().any(|a| a == "--save")
-                && cache.map(&id, q)?.is_some_and(|m| m.complete())
-            {
-                cache.pin(&store, &id, q, true)?;
-            }
-            log::info!(target:"eagle_app",provider=id.provider(),track_id=id.local();"playback");
-            let stats = net.stats();
-            println!(
-                "Сеть: {} запросов, {} байт ответов",
-                stats.requests, stats.response_bytes
-            );
-            if !tail.iter().any(|a| a == "--download-only") {
-                eagle_engine::play(&path)?;
             }
         }
         "likes" => {

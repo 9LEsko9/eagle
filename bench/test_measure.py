@@ -94,3 +94,14 @@ class WakeupDeltaTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class AudioMatrixTests(unittest.TestCase):
+    def test_only_monotonic_audio_and_http_counters_are_compared(self):
+        import audio_matrix
+        self.assertEqual(audio_matrix.stats_delta((100, 0, 10, 1, 20),
+                                                  (200, 0, 20, 2, 50)),
+                         [100, 0, 10, 1, 30])
+        with self.assertRaises(ValueError):
+            audio_matrix.stats_delta((100, 1, 10, 1, 20), (200, 0, 20, 2, 50))
+        match = audio_matrix.STATS.search('Статистика: consumed=123 underruns=0 callbacks=3 requests=2 bytes=600 rate=48000')
+        self.assertEqual(tuple(map(int, match.groups())), (123, 0, 3, 2, 600, 48000))

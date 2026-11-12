@@ -1,0 +1,4 @@
+window,scenario,os,arch,track_id,duration_seconds,cpu_percent_one_core,phys_footprint_bytes,http_requests,response_body_bytes,package_idle_wakeups,interrupt_wakeups
+1,playback,Darwin,arm64,yandex:128582477,60.01802470799885,1.2065821118292939,5554848,0,0,0,2
+2,playback,Darwin,arm64,yandex:128582477,60.017303500004346,1.182984045592699,5554848,0,0,0,2
+3,playback,Darwin,arm64,yandex:128582477,60.00440362500376,1.1946804429221671,5620384,0,0,0,2

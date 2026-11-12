@@ -4,10 +4,11 @@ use eagle_core::{Quality, Track, TrackId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -262,6 +263,24 @@ impl RangeMap {
 pub struct Cache {
     root: PathBuf,
     pub limit: u64,
+    leases: Arc<Mutex<HashMap<PathBuf, usize>>>,
+}
+
+/// Prevents LRU eviction until the active reader is dropped.
+pub struct CacheLease {
+    path: PathBuf,
+    leases: Arc<Mutex<HashMap<PathBuf, usize>>>,
+}
+impl Drop for CacheLease {
+    fn drop(&mut self) {
+        let mut leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = leases.get_mut(&self.path) {
+            *count -= 1;
+            if *count == 0 {
+                leases.remove(&self.path);
+            }
+        }
+    }
 }
 impl Cache {
     pub fn open(root: &Path, limit: u64, store: &Store) -> Result<Self, Error> {
@@ -269,6 +288,7 @@ impl Cache {
         let cache = Self {
             root: root.to_owned(),
             limit,
+            leases: Arc::default(),
         };
         // The disk is authoritative after DB loss. Invalid maps never become cache hits.
         for entry in fs::read_dir(root)? {
@@ -314,6 +334,19 @@ impl Cache {
             }
         }
         Ok(cache)
+    }
+    pub fn lease(&self, id: &TrackId, q: Quality) -> CacheLease {
+        let path = self.path(id, q);
+        *self
+            .leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(path.clone())
+            .or_default() += 1;
+        CacheLease {
+            path,
+            leases: self.leases.clone(),
+        }
     }
     pub fn path(&self, id: &TrackId, q: Quality) -> PathBuf {
         self.root
@@ -394,6 +427,25 @@ impl Cache {
         let pinned = map.pinned;
         store.write(move|c|{c.execute("INSERT INTO cache VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id,quality) DO UPDATE SET size=excluded.size,pinned=excluded.pinned",params![id,q,path,size,now(),pinned])?;Ok(())})
     }
+    /// Publish ranges already written and synced by the streaming downloader.
+    pub fn publish(
+        &self,
+        store: &Store,
+        id: &TrackId,
+        q: Quality,
+        map: &RangeMap,
+    ) -> Result<(), Error> {
+        if !map.valid(fs::metadata(self.path(id, q))?.len()) {
+            return Err(Error::Corrupt);
+        }
+        let previous = self
+            .map(id, q)?
+            .map_or(0, |m| m.ranges.iter().map(|(a, b)| b - a).sum::<u64>());
+        let size = map.ranges.iter().map(|(a, b)| b - a).sum::<u64>();
+        self.make_room(store, size.saturating_sub(previous), id, q)?;
+        self.save_map(id, q, map)?;
+        self.index(store, id, q, map)
+    }
     pub fn lookup(
         &self,
         store: &Store,
@@ -451,6 +503,7 @@ impl Cache {
         current: &TrackId,
         q: Quality,
     ) -> Result<(), Error> {
+        let leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
         let c = store.read()?;
         let mut total = u64::try_from(c.query_row(
             "SELECT COALESCE(SUM(size),0) FROM cache",
@@ -479,6 +532,9 @@ impl Cache {
             } else {
                 Quality::Standard
             };
+            if leases.contains_key(&self.path(&tid, quality_enum)) {
+                continue;
+            }
             for path in [
                 self.path(&tid, quality_enum),
                 self.sidecar(&tid, quality_enum),
@@ -519,6 +575,32 @@ mod tests {
                 .as_nanos(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+    #[test]
+    fn active_leases_protect_lru_until_the_last_reader_drops() {
+        let d = dir();
+        let store = Store::open(&d).unwrap();
+        let cache = Cache::open(&d.join("audio"), 4, &store).unwrap();
+        let a = "yandex:1".parse().unwrap();
+        let b = "yandex:2".parse().unwrap();
+        cache
+            .write_chunk(&store, &a, Quality::High, &mut RangeMap::new(4), 0, b"test")
+            .unwrap();
+        let first = cache.lease(&a, Quality::High);
+        let second = cache.lease(&a, Quality::High);
+        drop(first);
+        assert!(matches!(
+            cache.write_chunk(&store, &b, Quality::High, &mut RangeMap::new(4), 0, b"next"),
+            Err(Error::CacheFull)
+        ));
+        assert!(!cache.map(&a, Quality::High).unwrap().unwrap().pinned);
+        drop(second);
+        cache
+            .write_chunk(&store, &b, Quality::High, &mut RangeMap::new(4), 0, b"next")
+            .unwrap();
+        assert!(cache.lookup(&store, &a, Quality::High).unwrap().is_none());
+        drop(store);
+        fs::remove_dir_all(d).unwrap();
     }
     #[test]
     fn lru_evicts_unpinned_and_full_cache_preserves_pins() {

@@ -4,6 +4,7 @@
 //! Shared process entry point.
 
 pub mod music;
+mod playback;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logger =

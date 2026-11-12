@@ -31,8 +31,5 @@ strip = false
 [profile.dev.package.symphonia-bundle-mp3]
 opt-level = 3
 
-[profile.dev.package.rodio]
-opt-level = 3
-
 [profile.dev.package.eagle-engine]
 opt-level = 3

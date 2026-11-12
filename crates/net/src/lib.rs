@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Two blocking workers, priority/FIFO scheduling and bounded HTTP responses.
 use eagle_core::{SignedUrl, Token};
+pub mod growing;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
@@ -18,6 +19,10 @@ pub enum Priority {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("ETag или размер файла изменился; повторите воспроизведение")]
+    Changed,
+    #[error("{0}")]
+    Source(&'static str),
     #[error("HTTP {0}")]
     Status(u16),
     #[error("ошибка сети или таймаут")]
@@ -50,6 +55,18 @@ impl Request {
             limit: 16 * 1024 * 1024,
         }
     }
+}
+pub struct ResponseHead {
+    pub status: u16,
+    pub content_range: Option<String>,
+    pub etag: Option<String>,
+    pub content_length: Option<u64>,
+}
+/// Streaming body consumers run on a network worker, never the audio thread.
+pub trait BodySink: Send + Sync {
+    fn begin(&self, head: &ResponseHead) -> Result<(), Error>;
+    fn write(&self, bytes: &[u8]) -> Result<(), Error>;
+    fn limit(&self) -> u64;
 }
 pub struct Response {
     pub status: u16,
@@ -142,8 +159,25 @@ impl Client {
     pub fn request(
         &self,
         priority: Priority,
+        request: Request,
+        refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
+    ) -> Result<Response, Error> {
+        self.perform(priority, request, refresh, None)
+    }
+    pub fn request_into(
+        &self,
+        priority: Priority,
+        request: Request,
+        sink: Arc<dyn BodySink>,
+    ) -> Result<Response, Error> {
+        self.perform(priority, request, None, Some(sink))
+    }
+    fn perform(
+        &self,
+        priority: Priority,
         mut request: Request,
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
+        sink: Option<Arc<dyn BodySink>>,
     ) -> Result<Response, Error> {
         for attempt in 0..4 {
             // Refresh happens outside workers to avoid deadlock if the hook uses this client.
@@ -156,6 +190,7 @@ impl Client {
             let range = request.range;
             let limit = request.limit;
             let counters = self.counters.clone();
+            let sink = sink.clone();
             {
                 let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
                 if s.stopping {
@@ -168,6 +203,14 @@ impl Client {
                     let result = (|| {
                         let mut current =
                             url::Url::parse(url.expose()).map_err(|_| Error::Network)?;
+                        if !matches!(current.scheme(), "http" | "https")
+                            || !current.username().is_empty()
+                            || current.password().is_some()
+                        {
+                            return Err(Error::Source(
+                                "ожидается HTTP(S)-URL без встроенного пароля",
+                            ));
+                        }
                         for redirect in 0..=5 {
                             counters.requests.fetch_add(1, Ordering::Relaxed);
                             let mut req = agent
@@ -226,6 +269,44 @@ impl Client {
 
                             let content_range = response.header("Content-Range").map(str::to_owned);
                             let etag = response.header("ETag").map(str::to_owned);
+                            if let Some(sink) = &sink {
+                                sink.begin(&ResponseHead {
+                                    status,
+                                    content_range: content_range.clone(),
+                                    etag: etag.clone(),
+                                    content_length: response
+                                        .header("Content-Length")
+                                        .and_then(|s| s.parse().ok()),
+                                })?;
+                                let max = if status == 206 {
+                                    limit as u64
+                                } else {
+                                    sink.limit()
+                                };
+                                let mut reader = response.into_reader();
+                                let mut buffer = [0u8; 64 * 1024];
+                                let mut total = 0u64;
+                                loop {
+                                    let n = reader.read(&mut buffer).map_err(|_| Error::Network)?;
+                                    counters
+                                        .response_bytes
+                                        .fetch_add(n as u64, Ordering::Relaxed);
+                                    if n == 0 {
+                                        break;
+                                    }
+                                    total += n as u64;
+                                    if total > max {
+                                        return Err(Error::TooLarge);
+                                    }
+                                    sink.write(&buffer[..n])?;
+                                }
+                                return Ok(Response {
+                                    status,
+                                    bytes: Vec::new(),
+                                    content_range,
+                                    etag,
+                                });
+                            }
                             let mut bytes = Vec::new();
                             let read_result = response
                                 .into_reader()

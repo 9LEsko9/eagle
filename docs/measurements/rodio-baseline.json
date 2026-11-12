@@ -1,0 +1,19 @@
+{
+  "source_commit": "922e55b",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13), aarch64-apple-darwin, Homebrew",
+  "host": "Mac14,15, Apple M2, 8589934592 bytes RAM",
+  "kernel": "Darwin 27.2.0",
+  "profile": "release, workspace LTO fat, codegen-units=1, panic=abort",
+  "binary_sha256": "dbf499e9313a72eba8013b0ffe5fc4d48af5c54995c46f0e05a57d064c0cdfbb",
+  "audio_sha256": "956852ef0a9da62cd3cf389b13d816d0a836e806bdf4f06047b7a7ee92758967",
+  "warmup_seconds": 2,
+  "windows": 3,
+  "window_seconds": 60,
+  "track": "yandex:128582477",
+  "transport": "complete cache, zero HTTP",
+  "command": "python3 bench/measure.py --scenario playback --track yandex:128582477 --seconds 60 --data-dir <existing-cache> --binary <rodio-release-binary>",
+  "cpu_time_units": "Mach ticks converted with mach_timebase_info; sampler test passes against process_time",
+  "memory_metric": "phys_footprint_bytes at end of window",
+  "load": "normal macOS desktop; unrelated user applications not controlled",
+  "wakeups": "process CPU wakeups, not radio wakeups"
+}
