@@ -6,8 +6,33 @@ allow = ["GPL-3.0-only", "GPL-3.0-or-later", "MIT", "Apache-2.0", "Apache-2.0 WI
 
 [bans]
 multiple-versions = "warn"
-deny = [{ name = "tracing" }]
+# Slint/winit and AccessKit use tracing internally; eagle code continues to use log.
+deny = [{ name = "tracing", wrappers = ["winit", "softbuffer", "calloop", "tiny-xlib", "zbus"] }]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# Permissive licenses of Slint's Windows clipboard and build-time image dependencies.
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]
+[[licenses.exceptions]]
+name = "libfuzzer-sys"
+allow = ["NCSA"]
+
+[advisories]
+# No patched versions exist. Keep these explicit while Slint 1.17 is pinned;
+# remove each exception when its upstream dependency is migrated.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive compile-time macro dependency; no patched release" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is transitive through the pinned UI dependency graph; migrate upstream" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is transitive through Slint's SVG/font stack; migrate upstream to harfrust" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is transitive through Slint's font stack; migrate upstream to skrifa" },
+    { id = "RUSTSEC-2026-0371", reason = "AccessKit/Slint use zbus 5; names move into zbus 6 requires upstream migration" },
+    { id = "RUSTSEC-2026-0370", reason = "AccessKit/Slint use zbus 5; wire format moves into zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "AccessKit/Slint use zbus 5; derive macros move into zbus 6" },
+]

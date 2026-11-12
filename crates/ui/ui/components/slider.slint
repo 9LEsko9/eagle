@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme } from "../globals/theme.slint";
+export component SeekSlider inherits Rectangle {
+    in property <float> value;
+    in property <string> label;
+    in property <color> fg: Theme.t.tx;
+    callback changed(float);
+    min-width: 64px; height: 28px;
+    accessible-role: slider; accessible-label: label; accessible-value: round(value * 100);
+    accessible-action-increment => { root.changed(min(1, root.value + 0.02)); }
+    accessible-action-decrement => { root.changed(max(0, root.value - 0.02)); }
+    forward-focus: focus;
+    border-width: focus.has-focus ? 2px : 0px; border-color: fg;
+    Rectangle { y: 12px; height: 4px; background: Theme.t.ln; }
+    Rectangle { y: 12px; height: 4px; width: parent.width * min(1, max(0, root.value)); background: root.fg; }
+    focus := FocusScope { key-pressed(e) => {
+        if e.text == Key.LeftArrow || e.text == Key.DownArrow { root.changed(max(0, root.value - 0.02)); return accept; }
+        if e.text == Key.RightArrow || e.text == Key.UpArrow { root.changed(min(1, root.value + 0.02)); return accept; }
+        return reject;
+    } }
+    TouchArea {
+        clicked => { focus.focus(); root.changed(min(1, max(0, self.mouse-x / self.width))); }
+        moved => { if self.pressed { root.changed(min(1, max(0, self.mouse-x / self.width))); } }
+    }
+}

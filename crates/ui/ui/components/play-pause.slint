@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion } from "../globals/theme.slint";
+export component PlayPause inherits Rectangle {
+    in property <bool> playing;
+    in property <color> fg: Theme.t.tx;
+    callback clicked();
+    width: 44px; height: 44px;
+    private property <float> t: playing ? 1 : 0;
+    animate t { duration: Motion.base; easing: ease-out; }
+    accessible-role: button; accessible-label: playing ? @tr("Пауза") : @tr("Играть");
+    accessible-action-default => { root.clicked(); }
+    border-width: focus.has-focus ? 2px : 0px; border-color: fg;
+    forward-focus: focus;
+    Path {
+        width: 20px; height: 20px; x: 12px; y: 12px;
+        viewbox-width: 16; viewbox-height: 16; fill: root.fg;
+        MoveTo { x: 3; y: 1; }
+        LineTo { x: 8.5 - 1.5 * root.t; y: 4.15 - 3.15 * root.t; }
+        LineTo { x: 8.5 - 1.5 * root.t; y: 11.85 + 3.15 * root.t; }
+        LineTo { x: 3; y: 15; }
+        Close { }
+        MoveTo { x: 8.5 + 0.5 * root.t; y: 4.15 - 3.15 * root.t; }
+        LineTo { x: 14 - root.t; y: 8 - 7 * root.t; }
+        LineTo { x: 14 - root.t; y: 8 + 7 * root.t; }
+        LineTo { x: 8.5 + 0.5 * root.t; y: 11.85 + 3.15 * root.t; }
+        Close { }
+    }
+    focus := FocusScope { key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; } }
+    TouchArea { clicked => { focus.focus(); root.clicked(); } }
+}

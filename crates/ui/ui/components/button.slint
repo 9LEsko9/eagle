@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion, Type } from "../globals/theme.slint";
+export component TextButton inherits Rectangle {
+    out property <bool> hovered: touch.has-hover;
+    in property <bool> align-left;
+    in property <bool> primary;
+    in property <string> text;
+    in property <bool> active;
+    in property <color> foreground: Theme.t.tx;
+    callback clicked();
+    min-width: 44px;
+    height: 40px;
+    horizontal-stretch: 0;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.clicked(); }
+    forward-focus: focus;
+    border-radius: primary ? 18px : 6px;
+    background: primary ? Theme.t.tx : touch.has-hover || active ? Theme.t.surf : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: foreground;
+    animate background { duration: Motion.fast; }
+    Text { text: root.text; color: root.primary ? Theme.t.bg : root.foreground; font-size: Type.body; font-weight: 500; horizontal-alignment: root.align-left ? left : center; x: root.align-left ? 10px : 0px; width: root.width - (root.align-left ? 20px : 0px); vertical-alignment: center; }
+    focus := FocusScope {
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
+    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+}

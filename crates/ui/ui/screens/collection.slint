@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { ListView, LineEdit } from "std-widgets.slint";
+import { Theme, Type } from "../globals/theme.slint";
+import { Library, Ui, Actions, Route } from "../globals/bridge.slint";
+import { TrackRowView } from "../components/track-row.slint";
+import { TextButton } from "../components/button.slint";
+export component CollectionScreen inherits VerticalLayout {
+    spacing: 24px;
+    HorizontalLayout {
+        spacing: 24px;
+        if Library.cover.width > 0 && (Ui.route == Route.album || Ui.route == Route.playlist) : Image { source: Library.cover; width: Ui.panel-open ? 112px : 148px; height: self.width; image-fit: contain; }
+        VerticalLayout {
+            spacing: 6px; alignment: end;
+            if Library.title != "" : Text { text: Ui.route == Route.album ? @tr("Альбом") : @tr("Плейлист"); color: Theme.t.tx2; font-size: 13px * Type.scale; }
+            Text { text: Library.title != "" ? Library.title : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека"); color: Theme.t.tx; font-size: 32px * Type.scale; font-weight: 700; overflow: elide; }
+            if Library.tracks.length > 0 : Text { text: @tr("{n} трек" | "{n} треков" % Library.tracks.length) + ", " + @tr("{n} минута" | "{n} минут" % floor(Library.length / 60)); color: Theme.t.tx2; font-size: 13px * Type.scale; }
+            if Library.tracks.length > 0 : HorizontalLayout {
+                spacing: 10px; padding-top: 10px; alignment: start;
+                TextButton { text: @tr("Слушать"); primary: true; width: 112px; clicked => { Actions.play-all(false); } }
+                TextButton { text: @tr("Перемешать"); width: 128px; clicked => { Actions.play-all(true); } }
+            }
+        }
+    }
+    if Ui.route == Route.search : LineEdit { init => { self.focus(); } placeholder-text: @tr("Трек или исполнитель"); accepted(text) => { Actions.search(text); } }
+    if Ui.busy : Text { text: @tr("Загрузка…"); color: Theme.t.tx2; height: 28px; }
+    if Library.tracks.length == 0 && !Ui.busy : Text { text: Ui.route == Route.search ? @tr("Введите запрос и нажмите Enter") : @tr("В медиатеке пока пусто. Войдите и найдите первый трек."); color: Theme.t.tx2; wrap: word-wrap; }
+    VerticalLayout {
+        spacing: 6px;
+        if Library.tracks.length > 0 : HorizontalLayout {
+            height: 32px; padding-left: 10px; padding-right: 8px; spacing: 12px;
+            Text { text: "#"; width: 40px; horizontal-alignment: center; color: Theme.t.tx2; font-size: Type.small; }
+            Text { text: @tr("Название"); color: Theme.t.tx2; font-size: Type.small; }
+            Text { text: @tr("Время"); width: 48px; horizontal-alignment: right; color: Theme.t.tx2; font-size: Type.small; }
+        }
+        ListView { for item[index] in Library.tracks : TrackRowView { item: item; number: index + 1; } }
+    }
+}

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion } from "../globals/theme.slint";
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <image> active-icon;
+    in property <bool> show-mark: true;
+    in property <string> label;
+    in property <color> fg: Theme.t.tx;
+    in property <bool> active;
+    in property <bool> reveal: true;
+    out property <bool> hovered: touch.has-hover;
+    out property <bool> focused: focus.has-focus;
+    callback clicked();
+    width: 40px; height: 40px;
+    accessible-role: button; accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+    forward-focus: focus;
+    border-width: focus.has-focus ? 2px : 0px; border-color: fg;
+    background: touch.has-hover ? Theme.t.surf : transparent;
+    animate background { duration: Motion.fast; }
+    Image { source: root.active && root.active-icon.width > 0 ? root.active-icon : root.icon; colorize: root.fg; width: 20px; height: 20px; x: 10px; y: 10px; opacity: root.reveal || root.focused || root.hovered ? (root.active ? 1 : 0.75) : 0; }
+    if active && show-mark : Rectangle { width: 4px; height: 4px; border-radius: 2px; x: 18px; y: 34px; background: root.fg; }
+    focus := FocusScope { key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; } }
+    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+}

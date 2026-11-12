@@ -11,3 +11,5 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 eagle-app = { path = "../app" }
+eagle-ui = { path = "../ui" }
+eagle-platform = { path = "../platform" }

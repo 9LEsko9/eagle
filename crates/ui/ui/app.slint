@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import "fonts/Inter-subset.ttf";
+import { LineEdit, ListView } from "std-widgets.slint";
+import { Theme, ThemeMode, Type, Motion } from "globals/theme.slint";
+import { Player, Library, Ui, Actions, Route } from "globals/bridge.slint";
+import { TextButton } from "components/button.slint";
+import { CollectionScreen } from "screens/collection.slint";
+import { PlayerBar } from "player/player-bar.slint";
+import { NowPlayingPanel } from "player/now-playing-panel.slint";
+export { Theme, ThemeMode, Motion, Type, Player, Library, Ui, Actions, Route }
+export component DesktopWindow inherits Window {
+    title: "eagle";
+    preferred-width: 1280px; preferred-height: 880px; min-width: 800px; min-height: 480px;
+    background: Theme.t.bg;
+    default-font-family: "Inter";
+    default-font-size: Type.body;
+    keys := FocusScope {
+    VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            spacing: 0;
+            VerticalLayout {
+                width: 200px; padding-left: 16px; padding-right: 16px; padding-top: 28px; padding-bottom: 24px; spacing: 2px;
+                Text { text: "eagle"; color: Theme.t.tx; font-size: 19px; font-weight: 600; height: 44px; }
+                TextButton { align-left: true; text: @tr("Медиатека"); active: Ui.route == Route.library; clicked => { Actions.open(Route.library); } }
+                TextButton { align-left: true; text: @tr("Поиск"); active: Ui.route == Route.search; clicked => { Actions.open(Route.search); } }
+                TextButton { align-left: true; text: @tr("Войти"); active: Ui.route == Route.login; clicked => { Actions.open(Route.login); } }
+                Text { text: @tr("Плейлисты"); color: Theme.t.tx2; font-size: Type.small; height: 44px; vertical-alignment: bottom; }
+                ListView {
+                    vertical-stretch: 1; min-height: 0px;
+                    for playlist in Library.playlists : TextButton { text: playlist.title; active: Ui.route == Route.playlist && playlist.title == Library.title; align-left: true; height: 32px; clicked => { Actions.collection(Route.playlist, playlist.id); } }
+                }
+                TextButton { align-left: true; text: @tr("Настройки"); clicked => { Actions.open(Route.settings); } }
+            }
+            VerticalLayout {
+                padding-left: 40px; padding-right: 40px; padding-top: 40px; padding-bottom: 32px; spacing: 24px;
+                if Ui.route == Route.library || Ui.route == Route.search || Ui.route == Route.album || Ui.route == Route.playlist : CollectionScreen { }
+                if Ui.route == Route.login : VerticalLayout {
+                    spacing: 16px;
+                    Text { text: @tr("Вход в Яндекс"); color: Theme.t.tx; font-size: 24px; }
+                    Text { text: Ui.signed-in ? @tr("Вход выполнен") : @tr("Введите токен Яндекса. Он сохранится в системном хранилище секретов."); color: Theme.t.tx2; wrap: word-wrap; }
+                    token := LineEdit { placeholder-text: @tr("Токен"); input-type: password; accepted(text) => { Actions.login(text); self.text = ""; } }
+                    TextButton { text: @tr("Войти"); clicked => { Actions.login(token.text); token.text = ""; } }
+                    Text { text: @tr("VK пока недоступен: провайдер не подключён."); color: Theme.t.tx2; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+                if Ui.route == Route.settings : VerticalLayout {
+                    spacing: 12px;
+                    Text { text: @tr("Оформление"); color: Theme.t.tx; font-size: 24px; }
+                    TextButton { text: @tr("Авто"); clicked => { Theme.mode = ThemeMode.auto; } }
+                    TextButton { text: @tr("Графит"); clicked => { Theme.mode = ThemeMode.graphite; } }
+                    TextButton { text: @tr("Бумага"); clicked => { Theme.mode = ThemeMode.paper; } }
+                    TextButton { text: @tr("OLED"); clicked => { Theme.mode = ThemeMode.oled; } }
+                    Text { text: @tr("Цвет обложки"); color: Theme.t.tx; }
+                    HorizontalLayout {
+                        TextButton { text: @tr("Выкл"); clicked => { Theme.tint = 0; } }
+                        TextButton { text: @tr("Мягкий"); clicked => { Theme.tint = 1; } }
+                        TextButton { text: @tr("Яркий"); clicked => { Theme.tint = 2; } }
+                    }
+                    TextButton { text: @tr("Уменьшить движение"); active: Motion.reduced; clicked => { Motion.reduced = !Motion.reduced; } }
+                    HorizontalLayout {
+                        TextButton { text: @tr("Мельче"); clicked => { Type.scale = max(0.8, Type.scale - 0.1); } }
+                        TextButton { text: @tr("Крупнее"); clicked => { Type.scale = min(1.8, Type.scale + 0.1); } }
+                    }
+                    Text { text: @tr("При закрытии окна приложение выходит."); color: Theme.t.tx2; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+                if Ui.error != "" : Text { text: Ui.error; color: Theme.t.tx; wrap: word-wrap; }
+            }
+            NowPlayingPanel { }
+        }
+        PlayerBar { }
+    }
+        key-pressed(e) => {
+            if e.text == " " { Actions.toggle-play(); return accept; }
+            if e.text == Key.LeftArrow { Actions.seek(max(0, Player.shown - 5)); return accept; }
+            if e.text == Key.RightArrow { Actions.seek(min(Player.length, Player.shown + 5)); return accept; }
+            if e.text == Key.UpArrow { Actions.set-volume(min(1, Player.volume + 0.05)); return accept; }
+            if e.text == Key.DownArrow { Actions.set-volume(max(0, Player.volume - 0.05)); return accept; }
+            if e.modifiers.control && e.text == "f" { Actions.open(Route.search); return accept; }
+            if e.text == Key.Escape { Ui.panel-open = false; return accept; }
+            return reject;
+        }
+    }
+    forward-focus: keys;
+}

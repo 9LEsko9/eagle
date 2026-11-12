@@ -1,0 +1,17 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: ru\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+msgid "{n} трек"
+msgid_plural "{n} треков"
+msgstr[0] "{n} трек"
+msgstr[1] "{n} трека"
+msgstr[2] "{n} треков"
+
+msgid "{n} минута"
+msgid_plural "{n} минут"
+msgstr[0] "{n} минута"
+msgstr[1] "{n} минуты"
+msgstr[2] "{n} минут"
