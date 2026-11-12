@@ -1,6 +1,28 @@
-[package]
-name = "eagle"
+# SPDX-FileCopyrightText: 2026 eagle contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/providers/yandex", "crates/providers/vk", "crates/net", "crates/store", "crates/engine", "crates/palette", "crates/platform", "crates/app", "crates/ui", "crates/cli", "crates/desktop", "xtask"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "GPL-3.0-or-later"
 
-[dependencies]
+[workspace.dependencies]
+thiserror = "2"
+log = "0.4"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false

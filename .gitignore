@@ -1,0 +1,11 @@
+/target/
+/.claude/
+/CLAUDE.md
+/CLAUDE.local.md
+
+.env
+.env.*
+!.env.example
+/config.local.toml
+/bench/results/*.csv
+__pycache__/

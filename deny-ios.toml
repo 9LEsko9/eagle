@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 eagle contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[graph]
+targets = ["aarch64-apple-ios"]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "MPL-2.0", "Unicode-3.0", "CDLA-Permissive-2.0", "LicenseRef-Slint-Royalty-free-2.0"]
+
+# Own crates carry EXCEPTIONS.md; third-party GPL is not allowed.
+[[licenses.exceptions]]
+name = "eagle-ui"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-net"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-core"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-app"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-platform"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-desktop"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-cli"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-engine"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-palette"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-store"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-vk"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "eagle-yandex"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "xtask"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[bans]
+multiple-versions = "warn"
+deny = [{ name = "tracing" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
