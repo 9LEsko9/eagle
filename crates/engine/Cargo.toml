@@ -8,3 +8,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
+
+[dependencies]
+eagle-core = { path = "../core" }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-aac", "symphonia-flac"] }

@@ -3,6 +3,8 @@
 
 //! Shared process entry point.
 
+pub mod music;
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logger =
         eagle_platform::logging::Logger::init(&eagle_platform::logging::default_directory()?)?;
@@ -19,6 +21,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
+    let root = eagle_platform::logging::default_directory()?
+        .parent()
+        .ok_or("missing data directory")?
+        .to_owned();
+    if std::env::args().any(|arg| arg == "--bench-store") {
+        return music::bench_store(&root);
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    music::run(&args, &root)?;
     logger.flush()?;
     Ok(())
 }

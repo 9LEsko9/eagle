@@ -186,6 +186,10 @@ impl Filter {
     }
 
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // ureq diagnostics include raw request paths, queries and headers.
+        if metadata.target() == "ureq" || metadata.target().starts_with("ureq::") {
+            return false;
+        }
         self.0
             .iter()
             .rev()
@@ -435,6 +439,10 @@ impl Backend {
 struct Adapter(Arc<Backend>);
 impl Log for Adapter {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // ureq diagnostics include raw request paths, queries and headers.
+        if metadata.target() == "ureq" || metadata.target().starts_with("ureq::") {
+            return false;
+        }
         self.0
             .filter
             .read()
@@ -595,10 +603,7 @@ mod tests {
         let token = Token::new("very-secret".into());
         let url = SignedUrl::new("https://user:pass@host/track?sign=hidden#fragment".into());
         assert_eq!(format!("{token} {token:?}"), "[REDACTED] [REDACTED]");
-        assert_eq!(
-            format!("{url} {url:?}"),
-            "https://host/track https://host/track"
-        );
+        assert_eq!(format!("{url} {url:?}"), "[REDACTED URL] [REDACTED URL]");
         assert_eq!(token.expose(), "very-secret");
         assert!(url.expose().contains("hidden"));
         for input in [
@@ -641,6 +646,15 @@ mod tests {
         assert!(enabled("other", Level::Info));
         assert!(!enabled("other", Level::Trace));
         assert!(Filter::parse("invalid").is_err());
+        let debug = Filter::parse("debug,ureq=trace").unwrap();
+        assert!(
+            !debug.enabled(
+                &Metadata::builder()
+                    .target("ureq::unit")
+                    .level(Level::Debug)
+                    .build()
+            )
+        );
     }
 
     #[test]

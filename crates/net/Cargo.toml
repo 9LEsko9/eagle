@@ -8,3 +8,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
+
+[dependencies]
+eagle-core = { path = "../core" }
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+thiserror.workspace = true
+url = "2"

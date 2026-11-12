@@ -46,16 +46,8 @@ impl SignedUrl {
 
 impl fmt::Display for SignedUrl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Also remove userinfo: a signed URL must never disclose credentials.
-        let url = self.0.split(['?', '#']).next().unwrap_or_default();
-        if let Some((scheme, rest)) = url.split_once("://") {
-            let authority_end = rest.find('/').unwrap_or(rest.len());
-            let authority = &rest[..authority_end];
-            if let Some((_, host)) = authority.rsplit_once('@') {
-                return write!(f, "{scheme}://{host}{}", &rest[authority_end..]);
-            }
-        }
-        f.write_str(url)
+        // Signatures may also live in the path, not only query parameters.
+        f.write_str("[REDACTED URL]")
     }
 }
 
