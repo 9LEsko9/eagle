@@ -134,29 +134,39 @@ impl Store {
         Ok(c)
     }
     pub fn put_track(&self, track: &Track) -> Result<(), Error> {
-        let id = track.id.to_string();
-        let json = serde_json::to_string(track).map_err(|_| Error::Corrupt)?;
-        let artists = track
-            .artists
-            .iter()
-            .map(|a| {
-                Ok((
+        self.put_tracks(std::slice::from_ref(track))
+    }
+    /// Writes a batch of tracks and their artists in one transaction.
+    pub fn put_tracks(&self, tracks: &[Track]) -> Result<(), Error> {
+        if tracks.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Vec::with_capacity(tracks.len());
+        let mut artists = Vec::new();
+        for track in tracks {
+            rows.push((
+                track.id.to_string(),
+                serde_json::to_string(track).map_err(|_| Error::Corrupt)?,
+            ));
+            for a in &track.artists {
+                artists.push((
                     a.id.to_string(),
                     serde_json::to_string(a).map_err(|_| Error::Corrupt)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+                ));
+            }
+        }
         self.write(move |c| {
             let tx = c.transaction()?;
-            tx.execute(
-                "INSERT OR REPLACE INTO tracks VALUES(?1,?2)",
-                params![id, json],
-            )?;
-            for (id, json) in artists {
-                tx.execute(
-                    "INSERT OR REPLACE INTO artists VALUES(?1,?2)",
-                    params![id, json],
-                )?;
+            {
+                let mut track = tx.prepare_cached("INSERT OR REPLACE INTO tracks VALUES(?1,?2)")?;
+                for (id, json) in &rows {
+                    track.execute(params![id, json])?;
+                }
+                let mut artist =
+                    tx.prepare_cached("INSERT OR REPLACE INTO artists VALUES(?1,?2)")?;
+                for (id, json) in &artists {
+                    artist.execute(params![id, json])?;
+                }
             }
             tx.commit()?;
             Ok(())
@@ -185,12 +195,57 @@ impl Store {
             Ok(())
         })
     }
+    /// Replaces Yandex likes. `ids` is newest first; rows are stored oldest first so that
+    /// `ORDER BY rowid DESC` lists the newest like first, including likes added later.
     pub fn replace_likes(&self, ids: Vec<String>) -> Result<(), Error> {
         self.write(move |c| {
             let tx = c.transaction()?;
             tx.execute("DELETE FROM likes WHERE id LIKE 'yandex:%'", [])?;
-            for id in ids {
-                tx.execute("INSERT OR IGNORE INTO likes VALUES(?1)", [id])?;
+            {
+                let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO likes VALUES(?1)")?;
+                for id in ids.iter().rev() {
+                    insert.execute([id])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+    /// Small JSON documents (liked albums/artists lists) in the settings table.
+    pub fn put_setting(&self, key: &str, value: String) -> Result<(), Error> {
+        let key = key.to_owned();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO settings VALUES(?1,?2)",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+    }
+    pub fn setting(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .read()?
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+    /// Replaces one provider's playlists, keeping the provider's order (by rowid).
+    pub fn replace_playlists(
+        &self,
+        provider: &str,
+        playlists: Vec<(String, String)>,
+    ) -> Result<(), Error> {
+        let pattern = format!("{provider}:%");
+        self.write(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("DELETE FROM playlists WHERE id LIKE ?1", [pattern])?;
+            {
+                let mut insert =
+                    tx.prepare_cached("INSERT OR REPLACE INTO playlists VALUES(?1,?2)")?;
+                for (id, json) in &playlists {
+                    insert.execute(params![id, json])?;
+                }
             }
             tx.commit()?;
             Ok(())
@@ -575,6 +630,73 @@ mod tests {
                 .as_nanos(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+    #[test]
+    fn likes_list_newest_first_and_playlists_replace_per_provider() {
+        let d = dir();
+        let store = Store::open(&d).unwrap();
+        let tracks = (1..=3)
+            .map(|i| Track {
+                id: format!("yandex:{i}").parse().unwrap(),
+                title: i.to_string(),
+                artists: vec![],
+                album: None,
+                album_title: None,
+                duration_ms: 1000,
+                cover: None,
+                availability: eagle_core::Availability::Available,
+            })
+            .collect::<Vec<_>>();
+        store.put_tracks(&tracks).unwrap();
+        // Provider order is newest first.
+        store
+            .replace_likes(vec!["yandex:3".into(), "yandex:1".into()])
+            .unwrap();
+        store
+            .write(|c| {
+                c.execute("INSERT OR IGNORE INTO likes VALUES('yandex:2')", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let ids = |sql: &str| -> Vec<String> {
+            let c = store.read().unwrap();
+            let mut stmt = c.prepare(sql).unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            ids(
+                "SELECT likes.id FROM likes JOIN tracks ON tracks.id=likes.id ORDER BY likes.rowid DESC"
+            ),
+            ["yandex:2", "yandex:3", "yandex:1"]
+        );
+        store.put_json("playlists", "vk:9", "{}".into()).unwrap();
+        store
+            .replace_playlists(
+                "yandex",
+                vec![
+                    ("yandex:b".into(), "{}".into()),
+                    ("yandex:a".into(), "{}".into()),
+                ],
+            )
+            .unwrap();
+        store
+            .replace_playlists(
+                "yandex",
+                vec![
+                    ("yandex:c".into(), "{}".into()),
+                    ("yandex:a".into(), "{}".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            ids("SELECT id FROM playlists ORDER BY rowid"),
+            ["vk:9", "yandex:c", "yandex:a"]
+        );
+        drop(store);
+        fs::remove_dir_all(d).unwrap();
     }
     #[test]
     fn active_leases_protect_lru_until_the_last_reader_drops() {

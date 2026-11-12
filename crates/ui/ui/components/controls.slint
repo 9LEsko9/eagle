@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion, Type } from "../globals/theme.slint";
+
+// Segmented control; the chosen segment is filled with the text colour.
+export component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in property <int> selected;
+    callback picked(int);
+    height: 34px;
+    border-radius: 9px;
+    background: Theme.t.surf;
+    border-width: 1px;
+    border-color: Theme.t.ln;
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+        for option[index] in root.options : Rectangle {
+            border-radius: 6px;
+            min-width: label.preferred-width + 28px;
+            background: index == root.selected ? Theme.t.tx : touch.has-hover ? Theme.hover : transparent;
+            border-width: focus.has-focus ? 2px : 0px;
+            border-color: index == root.selected ? Theme.t.tx2 : Theme.t.tx;
+            animate background { duration: Motion.fast; }
+            accessible-role: button;
+            accessible-label: option;
+            accessible-checked: index == root.selected;
+            accessible-action-default => { root.picked(index); }
+            label := Text {
+                text: option;
+                color: index == root.selected ? Theme.t.bg : Theme.t.tx2;
+                font-size: Type.meta;
+                font-weight: index == root.selected ? 600 : 500;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                animate color { duration: Motion.fast; }
+            }
+            focus := FocusScope {
+                key-pressed(e) => { if e.text == " " || e.text == "\n" { root.picked(index); return accept; } return reject; }
+            }
+            touch := TouchArea { clicked => { root.picked(index); } }
+        }
+    }
+}
+
+// Monochrome on/off switch.
+export component Switch inherits Rectangle {
+    in property <bool> checked;
+    in property <string> label;
+    callback toggled();
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    accessible-role: checkbox;
+    accessible-label: label;
+    accessible-checked: checked;
+    accessible-action-default => { root.toggled(); }
+    forward-focus: focus;
+    background: checked ? Theme.t.tx : Theme.t.ln;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.t.tx2;
+    animate background { duration: Motion.fast; }
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        y: 3px;
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        background: root.checked ? Theme.t.bg : Theme.t.tx2;
+        animate x, background { duration: Motion.fast; easing: ease-out; }
+    }
+    focus := FocusScope {
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.toggled(); return accept; } return reject; }
+    }
+    TouchArea { clicked => { root.toggled(); } }
+}
+
+// Single-line text field in theme colours.
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> password;
+    in property <image> icon;
+    in-out property <string> text <=> input.text;
+    callback accepted(string);
+    public function focus-input() { input.focus(); }
+    height: 40px;
+    border-radius: 10px;
+    background: Theme.t.surf;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.t.tx2 : Theme.t.ln;
+    animate border-color { duration: Motion.fast; }
+    accessible-role: text-input;
+    accessible-label: placeholder;
+    forward-focus: input;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        if root.icon.width > 0 : VerticalLayout {
+            alignment: center;
+            Image { source: root.icon; colorize: Theme.t.tx2; width: 16px; height: 16px; }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if input.text == "" : Text {
+                width: parent.width;
+                text: root.placeholder;
+                color: Theme.t.tx2;
+                font-size: Type.body;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            input := TextInput {
+                width: parent.width;
+                color: Theme.t.tx;
+                font-size: Type.body;
+                vertical-alignment: center;
+                single-line: true;
+                input-type: root.password ? InputType.password : InputType.text;
+                selection-background-color: Theme.t.tx.with-alpha(0.25);
+                selection-foreground-color: Theme.t.tx;
+                accepted => { root.accepted(self.text); }
+            }
+        }
+    }
+}

@@ -14,6 +14,8 @@ pub(crate) struct Frame {
     pub position: u64,
     pub track: u32,
     pub generation: u32,
+    pub occurrence: u64,
+    pub revision: u32,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Marker {
@@ -147,6 +149,7 @@ struct Renderer {
     generation: u32,
     markers: Producer<Marker>,
     last_track: u32,
+    last_occurrence: u64,
     volume: f32,
     volume_target: f32,
     volume_step: f32,
@@ -170,6 +173,7 @@ impl Renderer {
                 generation: 0,
                 markers,
                 last_track: u32::MAX,
+                last_occurrence: u64::MAX,
                 volume: 1.,
                 volume_target: 1.,
                 volume_step: 0.,
@@ -196,7 +200,32 @@ impl Renderer {
             self.generation = epoch;
             self.gain = 0.;
             self.last_track = u32::MAX;
+            self.last_occurrence = u64::MAX;
         }
+        let request = self.shared.policy_request.load(Ordering::Acquire);
+        if request != self.shared.policy_ack.load(Ordering::Relaxed) {
+            let occurrence = if self.last_occurrence == u64::MAX {
+                self.shared.reset_occurrence.load(Ordering::Relaxed)
+            } else {
+                self.last_occurrence
+            };
+            let track = if self.last_track == u32::MAX {
+                self.shared.reset_track.load(Ordering::Relaxed)
+            } else {
+                self.last_track
+            };
+            self.shared.policy_track.store(track, Ordering::Relaxed);
+            self.shared.policy_consumed.store(
+                self.shared.consumed.load(Ordering::Acquire),
+                Ordering::Relaxed,
+            );
+            self.shared.policy.store(
+                (u64::from(request) << 32) | occurrence.min(u64::from(u32::MAX)),
+                Ordering::Release,
+            );
+            self.shared.policy_ack.store(request, Ordering::Release);
+        }
+        let policy = self.shared.policy.load(Ordering::Acquire);
         while self
             .consumer
             .peek()
@@ -237,7 +266,14 @@ impl Renderer {
             if self.gain > 0. || (!paused && !buffering) {
                 let frame = loop {
                     match self.consumer.pop() {
-                        Ok(frame) if frame.generation == epoch => break Some(frame),
+                        Ok(frame)
+                            if frame.generation == epoch && {
+                                frame.revision == (policy >> 32) as u32
+                                    || frame.occurrence <= (policy as u32) as u64
+                            } =>
+                        {
+                            break Some(frame);
+                        }
                         Ok(_) => continue,
                         Err(_) => break None,
                     }
@@ -246,13 +282,14 @@ impl Renderer {
                     value = frame
                         .samples
                         .map(|x| (x * self.volume * self.gain).clamp(-1., 1.));
-                    if frame.track != self.last_track {
+                    if frame.track != self.last_track || frame.occurrence != self.last_occurrence {
                         let _ = self.markers.push(Marker {
                             track: frame.track,
                             position: frame.position,
                             at: predicted + offset as u64 * 1_000_000_000 / self.rate as u64,
                         });
                         self.last_track = frame.track;
+                        self.last_occurrence = frame.occurrence;
                     }
                     last = Some((
                         frame,
@@ -274,7 +311,11 @@ impl Renderer {
         }
         if let Some((frame, at)) = last {
             self.shared.sequence.fetch_add(1, Ordering::AcqRel);
+            self.shared.frame_generation.store(epoch, Ordering::Relaxed);
             self.shared.track.store(frame.track, Ordering::Relaxed);
+            self.shared
+                .occurrence
+                .store(frame.occurrence, Ordering::Relaxed);
             self.shared
                 .position
                 .store(frame.position + 1, Ordering::Relaxed);
@@ -288,6 +329,191 @@ impl Renderer {
 mod tests {
     use super::*;
     #[test]
+    fn policy_ack_after_reset_uses_the_new_track_and_occurrence() {
+        use std::{sync::mpsc, time::Duration};
+
+        for seek in [false, true] {
+            for paused in [false, true] {
+                let shared = Arc::new(Shared::default());
+                let (_, commands) = mpsc::channel();
+                let (events, _) = mpsc::sync_channel(128);
+                let mut worker =
+                    crate::Worker::new(crate::Config::default(), shared.clone(), commands, events);
+                worker.sources = (0..3)
+                    .map(|_| {
+                        crate::Source::file(
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("tests/fixtures/tone-44100-2.flac"),
+                        )
+                    })
+                    .collect();
+                let (output, consumer) = Output::offline(44100);
+                worker.output = Some(output);
+                worker.occurrence = 7;
+                let (mut renderer, mut markers) = Renderer::new(consumer, shared.clone(), 44100, 2);
+                renderer.last_track = if seek { 1 } else { 0 };
+                renderer.last_occurrence = 3;
+                shared.track.store(renderer.last_track, Ordering::Relaxed);
+                shared.consumed.store(500, Ordering::Relaxed);
+                shared.paused.store(paused, Ordering::Relaxed);
+                shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+                worker.command(if seek {
+                    crate::Command::Seek(Duration::from_millis(100))
+                } else {
+                    crate::Command::Next
+                });
+                assert_eq!(worker.decode_index, 1);
+                while worker.decode_index == 1 {
+                    if worker.pipeline.is_none() {
+                        worker.prepare().unwrap();
+                    }
+                    worker.produce(1).unwrap();
+                }
+                worker.command(crate::Command::Configure(vec![0, 1, 2], crate::Repeat::Off));
+                renderer.render(&mut [0.0f32; 2], 0);
+                worker.apply_policy();
+                assert_eq!(worker.decode_index, 2);
+                while worker.decode_index == 2 {
+                    if worker.pipeline.is_none() {
+                        worker.prepare().unwrap();
+                    }
+                    worker.produce(1).unwrap();
+                }
+                shared.eof.store(true, Ordering::Release);
+                shared.buffering.store(false, Ordering::Release);
+                shared.paused.store(false, Ordering::Release);
+                renderer.gain = 1.;
+                let current_frames = if seek { 6615 } else { 11025 };
+                let mut samples = vec![0.0f32; (current_frames + 11025) * 2];
+                renderer.render(&mut samples, 0);
+                assert_eq!(
+                    shared.consumed.load(Ordering::Relaxed),
+                    500 + current_frames as u64 + 11025
+                );
+                assert_eq!(markers.pop().unwrap().track, 1);
+                assert_eq!(markers.pop().unwrap().track, 2);
+                assert!(markers.pop().is_err());
+            }
+        }
+    }
+    #[test]
+    fn worker_refill_clears_underrun_without_external_flag_reset() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let shared = Arc::new(Shared::default());
+        shared.buffering.store(false, Ordering::Release);
+        let (tx, rx) = mpsc::channel();
+        let (events, _) = mpsc::sync_channel(128);
+        let (consumer_tx, consumer_rx) = mpsc::channel();
+        let (start_tx, start_rx) = mpsc::channel();
+        let state = shared.clone();
+        let join = std::thread::spawn(move || {
+            let (output, consumer) = Output::offline(44100);
+            consumer_tx.send(consumer).unwrap();
+            start_rx.recv().unwrap();
+            let mut worker = crate::Worker::new(crate::Config::default(), state, rx, events);
+            worker.sources.push(crate::Source::file(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/tone-44100-2.flac"),
+            ));
+            worker.output = Some(output);
+            worker.run();
+        });
+        let consumer = consumer_rx.recv().unwrap();
+        let (mut renderer, _) = Renderer::new(consumer, shared.clone(), 44100, 2);
+        renderer.gain = 1.0;
+        renderer.render(&mut [0.0f32; 2], 0);
+        assert!(shared.buffering.load(Ordering::Acquire));
+        start_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared.buffering.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(!shared.buffering.load(Ordering::Acquire));
+        let mut data = [0.0f32; 64];
+        renderer.render(&mut data, 0);
+        assert!(shared.consumed.load(Ordering::Acquire) > 0);
+        shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+        tx.send(crate::Command::Stop).unwrap();
+        join.join().unwrap();
+    }
+    #[test]
+    fn policy_change_discards_stale_future_but_keeps_current_and_new_frames() {
+        let shared = Arc::new(Shared::default());
+        shared.buffering.store(false, Ordering::Release);
+        shared.policy.store(1u64 << 32, Ordering::Release);
+        let (mut producer, consumer) = RingBuffer::new(16);
+        for (sample, occurrence, revision) in [
+            (0.1, 0, 0),
+            (0.1, 0, 0),
+            (0.9, 1, 0),
+            (0.9, 1, 0),
+            (0.2, 1, 1),
+            (0.2, 1, 1),
+        ] {
+            producer
+                .push(Frame {
+                    samples: [sample; 2],
+                    track: occurrence as u32,
+                    position: 0,
+                    generation: 0,
+                    occurrence,
+                    revision,
+                })
+                .unwrap();
+        }
+        let (mut renderer, mut markers) = Renderer::new(consumer, shared.clone(), 48_000, 2);
+        renderer.gain = 1.0;
+        let mut data = [0.0f32; 8];
+        renderer.render(&mut data, 0);
+        assert_eq!(data, [0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2]);
+        assert_eq!(markers.pop().unwrap().track, 0);
+        assert_eq!(markers.pop().unwrap().track, 1);
+        assert_eq!(shared.consumed.load(Ordering::Relaxed), 4);
+    }
+    #[test]
+    fn changed_order_at_full_buffer_boundary_recovers_after_underrun() {
+        let shared = Arc::new(Shared::default());
+        shared.buffering.store(false, Ordering::Release);
+        shared.policy.store(1u64 << 32, Ordering::Release);
+        let (mut producer, consumer) = RingBuffer::new(16);
+        for occurrence in std::iter::once(0).chain(std::iter::repeat_n(1, 15)) {
+            producer
+                .push(Frame {
+                    samples: [0.5; 2],
+                    position: 0,
+                    track: occurrence as u32,
+                    generation: 0,
+                    occurrence,
+                    revision: 0,
+                })
+                .unwrap();
+        }
+        let (mut renderer, _) = Renderer::new(consumer, shared.clone(), 48_000, 2);
+        renderer.gain = 1.0;
+        let mut data = [0.0f32; 4];
+        renderer.render(&mut data, 0);
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+        assert_eq!(data, [0.5, 0.5, 0.0, 0.0]);
+        producer
+            .push(Frame {
+                samples: [0.5; 2],
+                position: 0,
+                track: 2,
+                generation: 0,
+                occurrence: 1,
+                revision: 1,
+            })
+            .unwrap();
+        // The worker clears buffering once the refill threshold is met.
+        shared.buffering.store(false, Ordering::Release);
+        let mut next = [0.0f32; 2];
+        renderer.render(&mut next, 0);
+        assert_eq!(next, [0.5; 2]);
+    }
+    #[test]
     fn boundary_and_short_last_track_have_no_added_silence_or_ramp() {
         let shared = Arc::new(Shared::default());
         shared.buffering.store(false, Ordering::Relaxed);
@@ -300,6 +526,8 @@ mod tests {
                     position: i,
                     track: if i < 1500 { 0 } else { 1 },
                     generation: 0,
+                    occurrence: 0,
+                    revision: 0,
                 })
                 .unwrap();
         }

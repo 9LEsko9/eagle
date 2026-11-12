@@ -1,7 +1,13 @@
 # Разработка
 
-Rust edition 2024, MSRV 1.89 (поднят для исправленной SQLite).
-На Linux для сборки нужны `libasound2-dev`, `libdbus-1-dev` и `pkg-config`. Общие зависимости: thiserror и log; tracing запрещён.
+Rust edition 2024, MSRV 1.92 (для Slint 1.17).
+На Linux:
+
+```sh
+sudo apt install libasound2-dev libdbus-1-dev libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcursor-dev pkg-config
+```
+
+Общие зависимости: thiserror и log. В коде Eagle tracing запрещён; deny.toml допускает его только внутри перечисленных зависимостей Slint/AccessKit.
 
 ```sh
 cargo fmt --all --check
@@ -29,7 +35,7 @@ Eagle распространяется под GPLv3 или более поздн
 ([LICENSE](../LICENSE), SPDX: GPL-3.0-or-later), с дополнительным разрешением
 для магазинов приложений в [EXCEPTIONS.md](../EXCEPTIONS.md).
 Вклад принимается по [CONTRIBUTING.md](../CONTRIBUTING.md).
-Slint пока не подключён. Разрешение Eagle не меняет лицензии стороннего кода.
+Slint 1.17.0 подключён к desktop. Разрешение Eagle не меняет лицензии стороннего кода.
 Для iOS проверяйте `cargo deny --config deny-ios.toml check licenses bans sources`:
 GPL разрешена только для перечисленных собственных пакетов с разрешением
 из EXCEPTIONS.md. Конфиг проверяет выражения лицензий, но не предоставляет прав.

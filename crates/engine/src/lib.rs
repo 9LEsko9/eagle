@@ -73,6 +73,12 @@ pub enum Event {
     Error { track: Option<u32>, message: String },
     Statistics(Statistics),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repeat {
+    Off,
+    All,
+    One,
+}
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub buffer_seconds: u32,
@@ -97,6 +103,16 @@ struct Shared {
     status: AtomicU32,
     rate: AtomicU32,
     pending_sources: AtomicU32,
+    policy: AtomicU64,
+    policy_request: AtomicU32,
+    policy_ack: AtomicU32,
+    policy_track: AtomicU32,
+    policy_consumed: AtomicU64,
+    occurrence: AtomicU64,
+    reset_track: AtomicU32,
+    reset_occurrence: AtomicU64,
+    reset_position: AtomicU64,
+    frame_generation: AtomicU32,
     pending_interrupts: AtomicU32,
     device: std::sync::Mutex<Option<String>>,
     observer_stop: AtomicBool,
@@ -126,6 +142,16 @@ impl Default for Shared {
             status: AtomicU32::new(State::Idle as u32),
             rate: AtomicU32::new(0),
             pending_sources: AtomicU32::new(0),
+            policy: AtomicU64::new(u32::MAX as u64),
+            policy_request: AtomicU32::new(0),
+            policy_ack: AtomicU32::new(0),
+            policy_track: AtomicU32::new(u32::MAX),
+            policy_consumed: AtomicU64::new(0),
+            occurrence: AtomicU64::new(0),
+            reset_track: AtomicU32::new(0),
+            reset_occurrence: AtomicU64::new(0),
+            reset_position: AtomicU64::new(0),
+            frame_generation: AtomicU32::new(0),
             pending_interrupts: AtomicU32::new(0),
             device: std::sync::Mutex::new(None),
             observer_stop: AtomicBool::new(false),
@@ -210,6 +236,7 @@ fn observe(shared: Arc<Shared>, events: mpsc::SyncSender<Event>) {
 }
 enum Command {
     Enqueue(Source),
+    Configure(Vec<usize>, Repeat),
     Pause(bool),
     Seek(Duration),
     Next,
@@ -297,6 +324,10 @@ impl Engine {
         }
         Ok(())
     }
+    /// Change future playback order without restarting the active source.
+    pub fn configure_playback(&self, order: Vec<usize>, repeat: Repeat) -> Result<(), Error> {
+        self.send(Command::Configure(order, repeat), false)
+    }
     pub fn pause(&self) -> Result<(), Error> {
         self.send(Command::Pause(true), false)
     }
@@ -324,6 +355,11 @@ impl Engine {
     }
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, mpsc::RecvTimeoutError> {
         self.events.recv_timeout(timeout)
+    }
+    /// Transfer event consumption to a blocking dispatcher without polling the engine.
+    pub fn take_events(&mut self) -> mpsc::Receiver<Event> {
+        let (_, empty) = mpsc::channel();
+        std::mem::replace(&mut self.events, empty)
     }
     pub fn try_recv(&self) -> Result<Event, mpsc::TryRecvError> {
         self.events.try_recv()
@@ -392,6 +428,12 @@ struct Worker {
     events: mpsc::SyncSender<Event>,
     sources: Vec<Source>,
     decode_index: usize,
+    order: Vec<usize>,
+    repeat: Repeat,
+    occurrence: u64,
+    revision: u32,
+    next_revision: u32,
+    pending_policy: Option<(u32, Vec<usize>, Repeat)>,
     pipeline: Option<Pipeline>,
     preload: Option<(usize, Decoder)>,
     preload_attempted: Option<usize>,
@@ -400,10 +442,12 @@ struct Worker {
     last_stats: Instant,
     restart_position: Duration,
     damaged: u64,
+    failures: usize,
     stopping: bool,
     _power: Option<eagle_platform::power::PowerMonitor>,
     continuation: Option<resample::Converter>,
-    tails: VecDeque<(u32, u64, u64)>,
+    tails: VecDeque<(u32, u64, u64, u64, u32)>,
+    policy_tail: VecDeque<([f32; 2], u32, u64, u64, u32)>,
     seeking: Arc<AtomicBool>,
     seek_fallback: Option<(usize, Duration)>,
     timeline: Vec<(u64, u32, u64)>,
@@ -430,6 +474,12 @@ impl Worker {
             events,
             sources: Vec::new(),
             decode_index: 0,
+            order: Vec::new(),
+            repeat: Repeat::Off,
+            occurrence: 0,
+            revision: 0,
+            next_revision: 0,
+            pending_policy: None,
             pipeline: None,
             preload: None,
             preload_attempted: None,
@@ -438,10 +488,12 @@ impl Worker {
             last_stats: Instant::now(),
             restart_position: Duration::ZERO,
             damaged: 0,
+            failures: 0,
             stopping: false,
             _power: power,
             continuation: None,
             tails: VecDeque::new(),
+            policy_tail: VecDeque::new(),
             seeking: Arc::new(AtomicBool::new(false)),
             seek_fallback: None,
             timeline: Vec::new(),
@@ -473,8 +525,20 @@ impl Worker {
             let frames = self.shared.position.load(Ordering::Relaxed);
             let at = self.shared.audible_at.load(Ordering::Relaxed);
             let consumed = self.shared.consumed.load(Ordering::Relaxed);
+            let frame_generation = self.shared.frame_generation.load(Ordering::Relaxed);
             if self.shared.sequence.load(Ordering::Acquire) != seq {
                 continue;
+            }
+            if frame_generation != self.shared.generation.load(Ordering::Acquire) {
+                let track = self.shared.reset_track.load(Ordering::Relaxed);
+                return ((track as usize) < self.sources.len()).then(|| PositionAnchor {
+                    track,
+                    position: Duration::from_nanos(
+                        self.shared.reset_position.load(Ordering::Relaxed),
+                    ),
+                    audible_at: Instant::now(),
+                    state: self.state,
+                });
             }
             if track == u32::MAX {
                 return None;
@@ -519,12 +583,36 @@ impl Worker {
         while self.shared.rendering.load(Ordering::SeqCst) {
             thread::yield_now();
         }
+        if let Some((revision, order, repeat)) = self.pending_policy.take() {
+            self.order = order;
+            self.repeat = repeat;
+            self.revision = revision;
+            self.shared.policy.store(
+                (u64::from(revision) << 32) | u64::from(u32::MAX),
+                Ordering::Release,
+            );
+            self.shared
+                .policy_request
+                .store(revision, Ordering::Release);
+            self.shared.policy_ack.store(revision, Ordering::Release);
+        }
+        self.shared
+            .reset_track
+            .store(index as u32, Ordering::Relaxed);
+        self.shared
+            .reset_occurrence
+            .store(self.occurrence, Ordering::Relaxed);
+        self.shared.reset_position.store(
+            position.as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.timeline.clear();
         self.produced_frames = self.shared.consumed.load(Ordering::Acquire);
         self.refilling = true;
         self.continuation = None;
         self.tails.clear();
+        self.policy_tail.clear();
         self.shared.buffering.store(true, Ordering::Release);
         self.shared.eof.store(false, Ordering::Release);
         self.decode_index = index;
@@ -543,6 +631,123 @@ impl Worker {
         }
         self.shared.resetting.store(false, Ordering::SeqCst);
     }
+    fn successor(&self, index: usize, automatic: bool) -> Option<usize> {
+        if automatic && self.repeat == Repeat::One {
+            return Some(index);
+        }
+        if self.order.is_empty() {
+            return (index + 1 < self.sources.len())
+                .then_some(index + 1)
+                .or_else(|| (self.repeat == Repeat::All && !self.sources.is_empty()).then_some(0));
+        }
+        let pos = self.order.iter().position(|&item| item == index)?;
+        self.order
+            .get(pos + 1)
+            .copied()
+            .or_else(|| (self.repeat == Repeat::All).then(|| self.order[0]))
+    }
+    fn advance(&mut self) {
+        self.decode_index = self
+            .successor(self.decode_index, true)
+            .unwrap_or(self.sources.len());
+        self.occurrence += 1;
+    }
+    fn skip_failed(&mut self) {
+        self.failures += 1;
+        self.decode_index = if self.failures >= self.sources.len() {
+            self.sources.len()
+        } else {
+            self.successor(self.decode_index, false)
+                .unwrap_or(self.sources.len())
+        };
+        self.occurrence += 1;
+    }
+    fn apply_policy(&mut self) {
+        let Some((revision, _, _)) = self.pending_policy.as_ref() else {
+            return;
+        };
+        if self.shared.policy_ack.load(Ordering::Acquire) != *revision {
+            return;
+        }
+        let Some((revision, order, repeat)) = self.pending_policy.take() else {
+            return;
+        };
+        let current = self.shared.policy_track.load(Ordering::Relaxed);
+        let current = if current == u32::MAX {
+            self.timeline
+                .first()
+                .map_or(self.decode_index, |entry| entry.1 as usize)
+        } else {
+            current as usize
+        };
+        let occurrence = (self.shared.policy.load(Ordering::Acquire) as u32) as u64;
+        let consumed = self.shared.policy_consumed.load(Ordering::Relaxed);
+        self.order = order;
+        self.repeat = repeat;
+        self.revision = revision;
+        self.preload = None;
+        self.preload_attempted = None;
+        if self.occurrence > occurrence || self.decode_index >= self.sources.len() {
+            let boundary = self
+                .timeline
+                .iter()
+                .rposition(|entry| entry.0 < consumed)
+                .unwrap_or(0)
+                + 1;
+            if let Some(entry) = self.timeline.get(boundary) {
+                self.produced_frames = entry.0;
+                self.timeline.truncate(boundary);
+            }
+            self.decode_index = self.successor(current, true).unwrap_or(self.sources.len());
+            self.occurrence = occurrence + 1;
+            if self.tails.front().is_some_and(|tail| tail.3 <= occurrence) {
+                let mut available = self
+                    .pipeline
+                    .as_mut()
+                    .map(|pipeline| std::mem::take(&mut pipeline.pending))
+                    .unwrap_or_default();
+                let converter = self
+                    .pipeline
+                    .as_mut()
+                    .and_then(|pipeline| pipeline.converter.take())
+                    .or_else(|| self.continuation.take());
+                if let Some(mut converter) = converter {
+                    match converter.finish() {
+                        Ok(frames) => available.extend(frames),
+                        Err(error) => {
+                            log::warn!(error = error.to_string().as_str(); "resampler tail unavailable")
+                        }
+                    }
+                }
+                while self.tails.front().is_some_and(|tail| tail.3 <= occurrence) {
+                    let Some((track, mut position, mut remaining, tail_occurrence, tail_revision)) =
+                        self.tails.pop_front()
+                    else {
+                        break;
+                    };
+                    while remaining > 0 {
+                        let Some(samples) = available.pop_front() else {
+                            break;
+                        };
+                        self.policy_tail.push_back((
+                            samples,
+                            track,
+                            position,
+                            tail_occurrence,
+                            tail_revision,
+                        ));
+                        position += 1;
+                        remaining -= 1;
+                    }
+                }
+            }
+            self.pipeline = None;
+            self.continuation = None;
+            self.tails.clear();
+            self.shared.eof.store(false, Ordering::Release);
+            self.shared.done.store(false, Ordering::Release);
+        }
+    }
     fn command(&mut self, cmd: Command) {
         if matches!(cmd, Command::Seek(_) | Command::Next | Command::Stop) {
             self.shared
@@ -559,6 +764,34 @@ impl Worker {
                     self.set_state(State::Loading);
                 }
                 self.shared.eof.store(false, Ordering::Release);
+            }
+            Command::Configure(order, repeat) => {
+                if order.iter().any(|&id| id >= self.sources.len()) {
+                    return;
+                }
+                self.next_revision = self.next_revision.wrapping_add(1);
+                self.pending_policy = Some((self.next_revision, order, repeat));
+                if self.output.is_none() {
+                    self.shared
+                        .policy_track
+                        .store(self.decode_index as u32, Ordering::Relaxed);
+                    self.shared.policy_consumed.store(
+                        self.shared.consumed.load(Ordering::Acquire),
+                        Ordering::Relaxed,
+                    );
+                    self.shared.policy.store(
+                        (u64::from(self.next_revision) << 32)
+                            | self.occurrence.min(u64::from(u32::MAX)),
+                        Ordering::Release,
+                    );
+                    self.shared
+                        .policy_ack
+                        .store(self.next_revision, Ordering::Release);
+                }
+                self.shared
+                    .policy_request
+                    .store(self.next_revision, Ordering::Release);
+                self.apply_policy();
             }
             Command::Pause(paused) => {
                 self.shared.paused.store(paused, Ordering::Release);
@@ -583,9 +816,14 @@ impl Worker {
                 self.seek_fallback = Some((index, previous));
             }
             Command::Next => {
-                let index = self
+                if let Some((_, order, repeat)) = &self.pending_policy {
+                    self.order = order.clone();
+                    self.repeat = *repeat;
+                }
+                let current = self
                     .anchor_value()
-                    .map_or(self.decode_index + 1, |a| a.track as usize + 1);
+                    .map_or(self.decode_index, |a| a.track as usize);
+                let index = self.successor(current, false).unwrap_or(self.sources.len());
                 self.reset(index.min(self.sources.len()), Duration::ZERO);
             }
         }
@@ -672,11 +910,36 @@ impl Worker {
         if let Some(converter) = self.continuation.take() {
             pipeline.converter = Some(converter);
         }
+        pipeline.fill()?;
         self.pipeline = Some(pipeline);
         self.restart_position = Duration::ZERO;
         Ok(())
     }
     fn produce(&mut self, epoch: u32) -> Result<(), Error> {
+        if let Some(output) = &mut self.output {
+            while output.producer.slots() > 0 {
+                let Some((samples, track, position, occurrence, revision)) =
+                    self.policy_tail.pop_front()
+                else {
+                    break;
+                };
+                if position == 0 || self.timeline.last().is_none_or(|entry| entry.1 != track) {
+                    self.timeline.push((self.produced_frames, track, position));
+                }
+                self.produced_frames += 1;
+                let _ = output.producer.push(Frame {
+                    samples,
+                    track,
+                    position,
+                    generation: epoch,
+                    occurrence,
+                    revision,
+                });
+            }
+            if !self.policy_tail.is_empty() {
+                return Ok(());
+            }
+        }
         if let (Some(pipeline), Some(output)) = (&mut self.pipeline, &mut self.output) {
             if output.producer.slots() == 0 {
                 return Ok(());
@@ -690,20 +953,21 @@ impl Worker {
                 let Some(samples) = pipeline.pending.pop_front() else {
                     break;
                 };
-                let (track, position) = if let Some(tail) = self.tails.front_mut() {
-                    let label = (tail.0, tail.1);
-                    tail.1 += 1;
-                    tail.2 -= 1;
-                    if tail.2 == 0 {
-                        self.tails.pop_front();
-                    }
-                    label
-                } else {
-                    let p = pipeline.position;
-                    pipeline.position += 1;
-                    (self.decode_index as u32, p)
-                };
-                if self.timeline.last().is_none_or(|t| t.1 != track) {
+                let (track, position, occurrence, revision) =
+                    if let Some(tail) = self.tails.front_mut() {
+                        let label = (tail.0, tail.1, tail.3, tail.4);
+                        tail.1 += 1;
+                        tail.2 -= 1;
+                        if tail.2 == 0 {
+                            self.tails.pop_front();
+                        }
+                        label
+                    } else {
+                        let p = pipeline.position;
+                        pipeline.position += 1;
+                        (self.decode_index as u32, p, self.occurrence, self.revision)
+                    };
+                if position == 0 || self.timeline.last().is_none_or(|t| t.1 != track) {
                     self.timeline.push((self.produced_frames, track, position));
                 }
                 self.produced_frames += 1;
@@ -712,6 +976,8 @@ impl Worker {
                     position,
                     track,
                     generation: epoch,
+                    occurrence,
+                    revision,
                 });
             }
         }
@@ -725,11 +991,11 @@ impl Worker {
                 .as_ref()
                 .is_some_and(|p| p.converter.is_some() && !p.finalized);
             if needs_flush {
-                if self.decode_index + 1 < self.sources.len()
+                if let Some(next) = self.successor(self.decode_index, true)
                     && self.preload.is_none()
-                    && let Ok(decoder) = self.open_decoder(self.decode_index + 1)
+                    && let Ok(decoder) = self.open_decoder(next)
                 {
-                    self.preload = Some((self.decode_index + 1, decoder));
+                    self.preload = Some((next, decoder));
                 }
                 let same_rate = self.preload.as_ref().is_some_and(|(_, d)| {
                     self.pipeline
@@ -743,8 +1009,13 @@ impl Worker {
                         .remaining()
                         .saturating_sub(self.tails.iter().map(|t| t.2).sum());
                     if owed > 0 {
-                        self.tails
-                            .push_back((self.decode_index as u32, pipeline.position, owed));
+                        self.tails.push_back((
+                            self.decode_index as u32,
+                            pipeline.position,
+                            owed,
+                            self.occurrence,
+                            self.revision,
+                        ));
                     }
                     self.continuation = Some(converter);
                 } else {
@@ -761,7 +1032,7 @@ impl Worker {
             }
             let pipeline = self.pipeline.take().ok_or(Error::Stopped)?;
             self.damaged += pipeline.decoder.damaged();
-            self.decode_index += 1;
+            self.advance();
         }
         Ok(())
     }
@@ -773,6 +1044,7 @@ impl Worker {
             if self.stopping {
                 break;
             }
+            self.apply_policy();
             if self.sources.is_empty() {
                 match self.commands.recv() {
                     Ok(command) => self.command(command),
@@ -828,7 +1100,7 @@ impl Worker {
                     self.wait(Duration::from_secs(1));
                     continue;
                 }
-                self.decode_index += 1;
+                self.skip_failed();
                 continue;
             }
             if let Some(output) = &mut self.output {
@@ -841,6 +1113,7 @@ impl Worker {
                     self.refilling = false;
                 }
             }
+            let before_produce = self.produced_frames;
             if self.refilling
                 && let Err(error) = self.produce(self.shared.generation.load(Ordering::Acquire))
             {
@@ -856,8 +1129,11 @@ impl Worker {
                     continue;
                 }
                 self.pipeline = None;
-                self.decode_index += 1;
+                self.skip_failed();
                 continue;
+            }
+            if self.produced_frames > before_produce {
+                self.failures = 0;
             }
             let eof = self.decode_index >= self.sources.len();
             self.shared.eof.store(eof, Ordering::Release);
@@ -907,8 +1183,8 @@ impl Worker {
                     }));
                 }
             }
-            if self.preload_attempted != Some(self.decode_index + 1)
-                && self.decode_index + 1 < self.sources.len()
+            if let Some(next) = self.successor(self.decode_index, true)
+                && self.preload_attempted != Some(next)
             {
                 let ready = self.pipeline.as_ref().is_some_and(|p| {
                     p.decoder.duration().is_some_and(|d| {
@@ -918,20 +1194,19 @@ impl Worker {
                     })
                 });
                 if ready {
-                    self.preload_attempted = Some(self.decode_index + 1);
-                    match self.open_decoder(self.decode_index + 1) {
-                        Ok(d) => self.preload = Some((self.decode_index + 1, d)),
-                        Err(error) => {
-                            if self.interrupted(epoch) {
-                                continue;
-                            }
-                            self.emit(Event::Error {
-                                track: Some((self.decode_index + 1) as u32),
-                                message: error.to_string(),
-                            });
-                        }
+                    self.preload_attempted = Some(next);
+                    if let Ok(d) = self.open_decoder(next) {
+                        self.preload = Some((next, d));
                     }
                 }
+            }
+            let consumed = self.shared.consumed.load(Ordering::Acquire);
+            let keep_from =
+                consumed.saturating_sub(self.output.as_ref().map_or(0, |o| u64::from(o.rate) * 10));
+            if let Some(index) = self.timeline.iter().rposition(|entry| entry.0 <= keep_from)
+                && index > 0
+            {
+                self.timeline.drain(..index);
             }
             if self.last_stats.elapsed() >= Duration::from_secs(1) {
                 self.last_stats = Instant::now();
@@ -948,7 +1223,7 @@ impl Worker {
                         return Duration::from_millis(10);
                     }
                     if !self.refilling && !eof {
-                        return Duration::from_secs(1);
+                        return Duration::from_millis(10);
                     }
                     let free = o.producer.slots();
                     let buffered = o.producer.buffer().capacity() - free;

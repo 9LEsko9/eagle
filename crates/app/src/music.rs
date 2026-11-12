@@ -168,28 +168,43 @@ pub(crate) fn metadata(
     )?;
     Ok(())
 }
-fn sync(store: &Store, provider: &impl Provider) -> Result<()> {
+/// Full sync for the CLI: likes, then every playlist with its tracks.
+pub(crate) fn sync(store: &Store, provider: &dyn Provider) -> Result<()> {
+    sync_likes(store, provider)?;
+    let mut playlists = Vec::new();
+    for p in provider.playlists(None)?.items {
+        let p = provider.playlist(&p.id)?;
+        store.put_tracks(&p.tracks)?;
+        playlists.push((p.id.to_string(), serde_json::to_string(&p)?));
+    }
+    store.replace_playlists(provider.name(), playlists)?;
+    Ok(())
+}
+/// Writes metadata page by page; publishes the ordered likes only after every page succeeds.
+pub(crate) fn sync_likes(store: &Store, provider: &dyn Provider) -> Result<()> {
     let mut cursor = None;
-    let mut ids = vec![];
+    let mut ids = Vec::new();
     loop {
         let page = provider.likes(cursor.as_deref())?;
-        for t in page.items {
-            store.put_track(&t)?;
-            ids.push(t.id.to_string());
-        }
+        store.put_tracks(&page.items)?;
+        ids.extend(page.items.iter().map(|track| track.id.to_string()));
         cursor = page.next;
         if cursor.is_none() {
             break;
         }
     }
     store.replace_likes(ids)?;
-    for p in provider.playlists(None)?.items {
-        let p = provider.playlist(&p.id)?;
-        for t in &p.tracks {
-            store.put_track(t)?;
-        }
-        store.put_json("playlists", &p.id.to_string(), serde_json::to_string(&p)?)?;
-    }
+    Ok(())
+}
+/// Playlist titles only (one request), so the sidebar fills before the slow likes sync.
+pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<()> {
+    let playlists = provider
+        .playlists(None)?
+        .items
+        .iter()
+        .map(|p| Ok((p.id.to_string(), serde_json::to_string(p)?)))
+        .collect::<Result<Vec<_>>>()?;
+    store.replace_playlists(provider.name(), playlists)?;
     Ok(())
 }
 pub fn run(args: &[String], root: &Path) -> Result<()> {
@@ -307,6 +322,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
             title: "Benchmark fixture".into(),
             artists: vec![],
             album: None,
+            album_title: None,
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,

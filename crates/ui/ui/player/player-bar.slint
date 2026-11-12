@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type, Motion, Layout } from "../globals/theme.slint";
+import { Player, Ui, Actions, Status, Route } from "../globals/bridge.slint";
+import { Cover } from "../components/cover.slint";
+import { IconButton } from "../components/icon-button.slint";
+import { PlayPause } from "../components/play-pause.slint";
+import { SeekSlider } from "../components/slider.slint";
+
+export component PlayerBar inherits Rectangle {
+    private property <float> unmuted: 0.7;
+    pure function clock(seconds: float) -> string {
+        return floor(seconds / 60) + ":" + (mod(floor(seconds), 60) < 10 ? "0" : "") + mod(floor(seconds), 60);
+    }
+    height: 80px;
+    background: Player.colors.bar;
+    animate background { duration: Motion.slow; }
+    Rectangle { y: 0; height: 1px; background: Theme.t.ln; }
+    Timer { interval: 250ms; running: Player.status == Status.playing && Ui.visible-to-user; triggered => { Player.shown = Player.position(); } }
+    HorizontalLayout {
+        padding-left: Layout.tight ? 12px : 16px;
+        padding-right: Layout.tight ? 12px : 20px;
+        spacing: Layout.tight ? 12px : 24px;
+        // Track: cover, title, like.
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            min-width: Layout.tight ? 120px : 200px;
+            spacing: 12px;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Cover { image: Player.cover; fg: Player.colors.tx; clicked => { Ui.panel-open = !Ui.panel-open; } }
+            }
+            VerticalLayout {
+                max-width: 240px;
+                spacing: 1px;
+                alignment: center;
+                // Title opens the album, artist opens the artist page.
+                Rectangle {
+                    preferred-width: title-text.preferred-width;
+                    min-width: 0px;
+                    height: title-text.preferred-height;
+                    title-text := Text {
+                        width: parent.width;
+                        text: Player.title == "" ? @tr("Ничего не играет") : Player.title;
+                        color: Player.colors.tx;
+                        font-size: Type.body;
+                        font-weight: 600;
+                        overflow: elide;
+                        opacity: title-touch.has-hover ? 0.75 : 1;
+                    }
+                    title-touch := TouchArea {
+                        enabled: Player.album-id != "";
+                        mouse-cursor: self.enabled ? pointer : default;
+                        clicked => { Actions.collection(Route.album, Player.album-id); }
+                    }
+                }
+                Rectangle {
+                    preferred-width: artist-text.preferred-width;
+                    min-width: 0px;
+                    height: artist-text.preferred-height;
+                    artist-text := Text {
+                        width: parent.width;
+                        text: Player.status == Status.loading ? @tr("Загрузка…") : Player.status == Status.buffering ? @tr("Буферизация…") : Player.artist;
+                        color: artist-touch.has-hover ? Player.colors.tx : Player.colors.tx2;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    artist-touch := TouchArea {
+                        enabled: Player.artist-id != "";
+                        mouse-cursor: self.enabled ? pointer : default;
+                        clicked => { Actions.collection(Route.artist, Player.artist-id); }
+                    }
+                }
+            }
+            if Player.title != "" && !Layout.tight : VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: @image-url("../icons/heart.svg");
+                    active-icon: @image-url("../icons/heart-filled.svg");
+                    icon-size: 17px;
+                    label: @tr("Нравится");
+                    pulse: true;
+                    active: Player.liked;
+                    fg: Player.colors.tx2;
+                    active-fg: Player.colors.tx;
+                    clicked => { Actions.like(Player.track-id); }
+                }
+            }
+        }
+        // Transport and progress.
+        VerticalLayout {
+            horizontal-stretch: 1.4;
+            min-width: Layout.tight ? 200px : 300px;
+            max-width: 600px;
+            alignment: center;
+            spacing: 2px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 14px;
+                if !Layout.tight : VerticalLayout {
+                    alignment: center;
+                    IconButton { icon: @image-url("../icons/shuffle.svg"); label: @tr("Перемешивание"); show-mark: true; active: Player.shuffle; fg: Player.colors.tx2; active-fg: Player.colors.tx; clicked => { Actions.toggle-shuffle(); } }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton { size: 36px; icon-size: 20px; icon: @image-url("../icons/previous.svg"); label: @tr("Предыдущий трек"); fg: Player.colors.tx; clicked => { Actions.prev(); } }
+                }
+                PlayPause { playing: Player.status == Status.playing; fg: Player.colors.tx; glyph: Player.colors.bar; clicked => { Actions.toggle-play(); } }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton { size: 36px; icon-size: 20px; icon: @image-url("../icons/next.svg"); label: @tr("Следующий трек"); fg: Player.colors.tx; clicked => { Actions.next(); } }
+                }
+                if !Layout.tight : VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: Player.repeat == 2 ? @image-url("../icons/repeat-one.svg") : @image-url("../icons/repeat.svg");
+                        label: Player.repeat == 2 ? @tr("Повтор одного трека") : @tr("Повтор");
+                        show-mark: true;
+                        active: Player.repeat > 0;
+                        fg: Player.colors.tx2;
+                        active-fg: Player.colors.tx;
+                        clicked => { Actions.cycle-repeat(); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Text { text: root.clock(Player.shown); color: Player.colors.tx2; font-size: Type.tiny; width: 36px; horizontal-alignment: right; vertical-alignment: center; }
+                SeekSlider {
+                    horizontal-stretch: 1;
+                    label: @tr("Позиция");
+                    fg: Player.colors.tx;
+                    track: Player.colors.tx.with-alpha(0.16);
+                    bubble-text: Player.colors.bar;
+                    length: Player.length;
+                    value: Player.length > 0 ? Player.shown / Player.length : 0;
+                    changed(f) => {
+                        // Show the target at once; the engine's next anchor confirms it.
+                        Player.shown = Player.length * f;
+                        Actions.seek(Player.length * f);
+                    }
+                }
+                Text { text: root.clock(Player.length); color: Player.colors.tx2; font-size: Type.tiny; width: 36px; vertical-alignment: center; }
+            }
+        }
+        // Panel and volume.
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            min-width: Layout.tight ? 72px : 200px;
+            spacing: 4px;
+            alignment: end;
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: @image-url("../icons/panel.svg");
+                    icon-size: 18px;
+                    label: Ui.panel-open ? @tr("Скрыть панель") : @tr("Показать панель");
+                    fg: Ui.panel-open ? Player.colors.tx : Player.colors.tx2;
+                    clicked => { Ui.panel-open = !Ui.panel-open; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: Player.volume > 0 ? @image-url("../icons/volume.svg") : @image-url("../icons/volume-off.svg");
+                    icon-size: 18px;
+                    label: Player.volume > 0 ? @tr("Выключить звук") : @tr("Включить звук");
+                    fg: Player.colors.tx2;
+                    clicked => {
+                        if Player.volume > 0 {
+                            root.unmuted = Player.volume;
+                            Actions.set-volume(0);
+                        } else {
+                            Actions.set-volume(root.unmuted);
+                        }
+                    }
+                }
+            }
+            if !Layout.narrow : VerticalLayout {
+                alignment: center;
+                SeekSlider {
+                    width: 96px;
+                    label: @tr("Громкость");
+                    fg: Player.colors.tx2;
+                    track: Player.colors.tx.with-alpha(0.16);
+                    live: true;
+                    value: Player.volume;
+                    changed(v) => { Actions.set-volume(v); }
+                }
+            }
+        }
+    }
+}

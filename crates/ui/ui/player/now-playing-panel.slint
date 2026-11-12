@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Motion } from "../globals/theme.slint";
+import { Player, Library, Ui, Actions, Status } from "../globals/bridge.slint";
+import { IconButton } from "../components/icon-button.slint";
+
+export global Source {
+    // Provider key from the track id → human name.
+    pure public function name(key: string) -> string {
+        return key == "yandex" ? @tr("Яндекс Музыка") : key == "vk" ? @tr("VK Музыка") : key == "file" ? @tr("Файл") : key;
+    }
+}
+
+// The card itself. It slides 24 px and fades in; nothing around it is re-laid out per frame.
+export component NowPlayingCard inherits Rectangle {
+    in property <bool> floating;
+    private property <length> art: self.width - 40px;
+    private property <length> offset: Ui.panel-open ? 0px : 24px;
+    animate offset { duration: Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+    width: 320px;
+    Rectangle {
+        x: root.offset;
+        width: parent.width;
+        height: parent.height;
+        border-radius: 16px;
+        background: Player.colors.bg;
+        opacity: Ui.panel-open ? 1 : 0;
+        animate opacity { duration: Motion.base; }
+        animate background { duration: Motion.slow; }
+        drop-shadow-blur: root.floating ? 24px : 0px;
+        drop-shadow-color: #0000004d;
+        drop-shadow-offset-y: 8px;
+        // Swallow clicks so the floating card does not close itself.
+        TouchArea { }
+        VerticalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 14px;
+            padding-bottom: 12px;
+            spacing: 0px;
+            HorizontalLayout {
+                height: 36px;
+                Text { text: @tr("Сейчас играет"); color: Player.colors.tx2; font-size: Type.small; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton { icon: @image-url("../icons/close.svg"); icon-size: 16px; label: @tr("Скрыть панель"); fg: Player.colors.tx2; clicked => { Ui.panel-open = false; } }
+                }
+            }
+            Rectangle { height: 10px; }
+            Rectangle {
+                height: root.art;
+                // Artwork settles back slightly while paused.
+                private property <float> s: Player.status == Status.paused ? 0.88 : 1;
+                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.15); }
+                Rectangle {
+                    width: parent.width * parent.s;
+                    height: self.width;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 12px;
+                    clip: true;
+                    background: Player.colors.tx.with-alpha(0.08);
+                    Image { source: Player.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                }
+            }
+            Rectangle { height: 18px; }
+            HorizontalLayout {
+                spacing: 4px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    alignment: center;
+                    Text { text: Player.title == "" ? @tr("Ничего не играет") : Player.title; color: Player.colors.tx; font-size: Type.lead; font-weight: 700; letter-spacing: -0.3px; overflow: elide; }
+                    Text { text: Player.artist; color: Player.colors.tx2; font-size: Type.body; overflow: elide; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        size: 40px;
+                        icon-size: 22px;
+                        icon: @image-url("../icons/heart.svg");
+                        active-icon: @image-url("../icons/heart-filled.svg");
+                        label: @tr("Нравится");
+                        pulse: true;
+                        active: Player.liked;
+                        fg: Player.colors.tx2;
+                        active-fg: Player.colors.tx;
+                        clicked => { Actions.like(Player.track-id); }
+                    }
+                }
+            }
+            Text {
+                text: Source.name(Player.source);
+                color: Player.colors.tx2;
+                font-size: Type.small;
+                height: self.preferred-height + 6px;
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: @tr("Далее");
+                color: Player.colors.tx2;
+                font-size: Type.small;
+                font-weight: 600;
+                height: 40px;
+                vertical-alignment: center;
+            }
+            if Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
+            ListView {
+                vertical-stretch: 1;
+                for item in Library.queue : HorizontalLayout {
+                    height: 48px;
+                    spacing: 10px;
+                    if Ui.list-covers : VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 36px;
+                            height: 36px;
+                            border-radius: 5px;
+                            clip: true;
+                            background: Player.colors.tx.with-alpha(0.08);
+                            Image { source: item.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        spacing: 1px;
+                        alignment: center;
+                        Text { text: item.title; color: Player.colors.tx; font-size: Type.meta; font-weight: 500; overflow: elide; }
+                        Text { text: item.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Docked column on wide windows. Its width switches in one step; only the card animates.
+export component NowPlayingPanel inherits Rectangle {
+    width: Ui.panel-open ? 336px : 0px;
+    clip: true;
+    NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }
+}

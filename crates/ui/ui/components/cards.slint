@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type, Motion } from "../globals/theme.slint";
+import { CardItem, Actions, Route } from "../globals/bridge.slint";
+
+// Filter chips; the chosen one is filled with the text colour (mockup «Медиатека»).
+export component Chips inherits HorizontalLayout {
+    in property <[string]> options;
+    in property <int> selected;
+    callback picked(int);
+    spacing: 8px;
+    alignment: start;
+    for option[index] in root.options : Rectangle {
+        height: 32px;
+        min-width: label.preferred-width + 28px;
+        border-radius: 16px;
+        background: index == root.selected ? Theme.t.tx : touch.has-hover ? Theme.hover : transparent;
+        border-width: index == root.selected ? 0px : 1px;
+        border-color: Theme.t.ln;
+        animate background { duration: Motion.fast; }
+        accessible-role: button;
+        accessible-label: option;
+        accessible-checked: index == root.selected;
+        accessible-action-default => { root.picked(index); }
+        label := Text {
+            text: option;
+            color: index == root.selected ? Theme.t.bg : Theme.t.tx;
+            font-size: Type.meta;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.picked(index); }
+        }
+    }
+}
+
+component Tile inherits Rectangle {
+    in property <CardItem> card;
+    in property <length> art;
+    private property <float> scale: touch.pressed ? 0.97 : 1;
+    animate scale { duration: Motion.fast; }
+    accessible-role: button;
+    accessible-label: card.title;
+    accessible-action-default => { root.open(); }
+    function open() {
+        Actions.collection(root.card.route, root.card.id);
+    }
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.art;
+        height: root.art;
+        border-radius: root.card.round ? root.art / 2 : 8px;
+        clip: true;
+        background: Theme.t.surf;
+        transform-scale-x: root.scale * 100%;
+        transform-scale-y: root.scale * 100%;
+        Image { source: root.card.cover; width: parent.width; height: parent.height; image-fit: cover; }
+        // A light wash on hover instead of a translucent overlay layer.
+        Rectangle { background: touch.has-hover ? #ffffff14 : transparent; animate background { duration: Motion.fast; } }
+    }
+    Text {
+        x: 0;
+        y: root.art + 8px;
+        height: 20px;
+        vertical-alignment: top;
+        width: root.width;
+        text: root.card.title;
+        color: Theme.t.tx;
+        font-size: Type.body;
+        font-weight: 600;
+        overflow: elide;
+        horizontal-alignment: root.card.round ? center : left;
+    }
+    Text {
+        x: 0;
+        y: root.art + 29px;
+        height: 18px;
+        vertical-alignment: top;
+        width: root.width;
+        text: root.card.subtitle;
+        color: Theme.t.tx2;
+        font-size: Type.meta;
+        overflow: elide;
+        horizontal-alignment: root.card.round ? center : left;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+    }
+}
+
+// Absolutely placed grid with no layout pass per frame. It reports which cards are on
+// screen (`top` = how far the grid is scrolled past the viewport top) so artwork loads
+// only for those.
+export component CardGrid inherits Rectangle {
+    in property <[CardItem]> cards;
+    in property <length> top;
+    in property <length> view-height;
+    private property <length> gap: 20px;
+    private property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
+    private property <length> art: (self.width - (columns - 1) * gap) / columns;
+    private property <length> row-height: art + 52px + gap;
+    private property <int> first-row: floor(max(0px, root.top) / root.row-height);
+    private property <int> visible-rows: ceil(root.view-height / root.row-height) + 1;
+    function report() {
+        Actions.visible-cards(root.first-row * root.columns, root.visible-rows * root.columns);
+    }
+    height: ceil(cards.length / columns) * row-height;
+    init => { root.report(); }
+    changed first-row => { root.report(); }
+    changed columns => { root.report(); }
+    changed visible-rows => { root.report(); }
+    changed height => { root.report(); }
+    for card[index] in root.cards : Tile {
+        card: card;
+        art: root.art;
+        x: mod(index, root.columns) * (root.art + root.gap);
+        y: floor(index / root.columns) * root.row-height;
+        width: root.art;
+        height: root.art + 52px;
+    }
+}

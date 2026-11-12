@@ -80,3 +80,14 @@ deny = [{ name = "tracing" }]
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# Permissive licenses of Slint's Windows clipboard and build-time image dependencies.
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]
+[[licenses.exceptions]]
+name = "libfuzzer-sys"
+allow = ["NCSA"]

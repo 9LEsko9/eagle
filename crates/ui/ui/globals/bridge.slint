@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+export enum Status { idle, loading, playing, paused, buffering }
+export enum Route { library, search, album, playlist, login, settings, albums, artists, artist }
+export struct TrackItem { id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
+export struct CollectionItem { id: string, title: string }
+// Album or artist tile. `key` routes artwork; `id` opens it.
+export struct CardItem { id: string, key: string, title: string, subtitle: string, cover: image, round: bool, route: Route }
+export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color }
+export global Player {
+    in property <string> track-id;
+    in property <string> album-id;
+    in property <string> artist-id;
+    in property <string> source;
+    in property <string> title;
+    in property <string> artist;
+    in property <image> cover;
+    in property <Status> status;
+    in property <float> length;
+    in-out property <float> shown;
+    in property <float> volume: 1;
+    in property <bool> shuffle;
+    in property <bool> liked;
+    in property <int> repeat;
+    in property <PlayerColors> colors;
+    pure callback position() -> float;
+}
+export global Library {
+    in property <[TrackItem]> tracks;
+    in property <[CollectionItem]> playlists;
+    in property <[TrackItem]> queue;
+    in property <[CardItem]> cards;
+    // Album/artist header: id of what is shown, artist line, like state.
+    in property <string> header-id;
+    in property <string> subtitle;
+    in property <string> subtitle-id;
+    in-out property <bool> liked;
+    in property <bool> likeable;
+    in property <bool> deletable;
+    in property <string> title;
+    in property <float> length;
+    in property <image> cover;
+}
+export global Ui {
+    in property <bool> visible-to-user: true;
+    in-out property <Route> route: Route.library;
+    in-out property <bool> panel-open;
+    in-out property <bool> drawer-open;
+    in-out property <bool> list-covers: true;
+    in-out property <string> error;
+    in property <bool> signed-in;
+    in property <bool> busy;
+    in property <bool> playlist-busy;
+    in-out property <string> search-query;
+    in-out property <int> search-kind;
+    in-out property <bool> create-playlist;
+    in-out property <string> playlist-name;
+    in-out property <bool> confirm-delete;
+}
+export global Actions {
+    callback play(string);
+    callback play-row(int);
+    callback play-all(bool);
+    callback toggle-play();
+    callback toggle-shuffle();
+    callback cycle-repeat();
+    callback next();
+    callback prev();
+    callback seek(float);
+    callback like(string);
+    callback set-volume(float);
+    callback open(Route);
+    callback collection(Route, string);
+    callback search(string);
+    pure callback valid-playlist-name(string) -> bool;
+    callback create-playlist(string);
+    callback delete-playlist();
+    callback login(string);
+    callback like-collection();
+    // On-screen ranges (first index, count) so artwork loads only for what is visible.
+    callback visible-rows(int, int);
+    callback list-covers-changed();
+    callback visible-cards(int, int);
+}

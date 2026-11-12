@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion, Type } from "../globals/theme.slint";
+
+// Thin bar that thickens and shows a knob under the pointer. Dragging moves the knob
+// locally; `changed` fires on release (seek) or continuously with `live` (volume).
+// With `length` (seconds) a time bubble follows the pointer.
+export component SeekSlider inherits Rectangle {
+    in property <float> value;
+    in property <string> label;
+    in property <color> fg: Theme.t.tx;
+    in property <color> track: Theme.t.ln;
+    in property <color> bubble-text: Theme.t.bg;
+    in property <float> length;
+    in property <bool> live;
+    callback changed(float);
+    pure function clock(seconds: float) -> string {
+        return floor(seconds / 60) + ":" + (mod(floor(seconds), 60) < 10 ? "0" : "") + mod(floor(seconds), 60);
+    }
+    pure function at(x: length) -> float {
+        return min(1, max(0, x / max(1px, root.width)));
+    }
+    min-width: 64px;
+    height: 16px;
+    private property <bool> dragging;
+    private property <float> drag;
+    private property <float> v: dragging ? drag : min(1, max(0, value));
+    private property <bool> hot: touch.has-hover || dragging || focus.has-focus;
+    private property <length> thick: hot ? 5px : 3px;
+    animate thick { duration: Motion.fast; }
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: round(value * 100);
+    accessible-action-increment => { root.changed(min(1, root.value + 0.02)); }
+    accessible-action-decrement => { root.changed(max(0, root.value - 0.02)); }
+    forward-focus: focus;
+    Rectangle {
+        x: 0;
+        y: (parent.height - root.thick) / 2;
+        width: parent.width;
+        height: root.thick;
+        border-radius: root.thick / 2;
+        background: root.track;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - root.thick) / 2;
+        width: parent.width * root.v;
+        height: root.thick;
+        border-radius: root.thick / 2;
+        background: root.fg;
+    }
+    Rectangle {
+        width: root.hot ? (root.dragging ? 14px : 12px) : 0px;
+        height: self.width;
+        border-radius: self.width / 2;
+        x: parent.width * root.v - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        background: root.fg;
+        animate width { duration: Motion.fast; }
+    }
+    if root.length > 0 && (touch.has-hover || root.dragging) : Rectangle {
+        private property <float> f: root.dragging ? root.drag : root.at(touch.mouse-x);
+        width: label-text.preferred-width + 12px;
+        height: 20px;
+        x: max(0px, min(parent.width - self.width, parent.width * self.f - self.width / 2));
+        y: -24px;
+        border-radius: 6px;
+        background: root.fg;
+        label-text := Text {
+            text: root.clock(parent.f * root.length);
+            color: root.bubble-text;
+            font-size: Type.tiny;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.LeftArrow || e.text == Key.DownArrow { root.changed(max(0, root.value - 0.02)); return accept; }
+            if e.text == Key.RightArrow || e.text == Key.UpArrow { root.changed(min(1, root.value + 0.02)); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.drag = root.at(self.mouse-x);
+                if root.live { root.changed(root.drag); }
+            }
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.changed(root.drag);
+            }
+        }
+        moved => {
+            if root.dragging {
+                root.drag = root.at(self.mouse-x);
+                if root.live { root.changed(root.drag); }
+            }
+        }
+    }
+}

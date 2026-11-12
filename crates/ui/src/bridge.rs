@@ -1,0 +1,832 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Domain events are applied only on the Slint event-loop thread.
+use crate::{
+    Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route, Status,
+    Theme, TrackItem, Ui, media,
+};
+use eagle_app::session::{
+    Card, Command, CommandSender, Event, Header, LibraryDelta, LibraryItem, View,
+};
+use eagle_engine::{PositionAnchor, State};
+use slint::{ComponentHandle, Model, VecModel};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+/// Rows kept with artwork around the visible range; everything else is released.
+const MARGIN: usize = 8;
+
+fn image(cover: &eagle_palette::Cover) -> slint::Image {
+    slint::Image::from_rgba8(
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            &cover.rgba,
+            cover.width,
+            cover.height,
+        ),
+    )
+}
+fn track_item(item: LibraryItem) -> TrackItem {
+    let seconds = item.track.duration_ms / 1000;
+    TrackItem {
+        id: item.track.id.to_string().into(),
+        album_id: item
+            .track
+            .album
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string)
+            .into(),
+        album: item.track.album_title.as_deref().unwrap_or_default().into(),
+        cover: slint::Image::default(),
+        title: item.track.title.as_str().into(),
+        artist: item
+            .track
+            .artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into(),
+        duration: format!("{}:{:02}", seconds / 60, seconds % 60).into(),
+        liked: item.liked,
+        available: item.track.availability == eagle_app::session::Availability::Available,
+    }
+}
+fn card_item(card: Card) -> CardItem {
+    let route = if card.key.starts_with("p:") {
+        Route::Playlist
+    } else if card.key.starts_with("r:") {
+        Route::Artist
+    } else {
+        Route::Album
+    };
+    CardItem {
+        id: card.id.to_string().into(),
+        key: card.key.into(),
+        title: card.title.into(),
+        subtitle: card.subtitle.into(),
+        cover: slint::Image::default(),
+        round: card.round,
+        route,
+    }
+}
+fn route(view: View) -> Route {
+    match view {
+        View::Library => Route::Library,
+        View::Search => Route::Search,
+        View::Album => Route::Album,
+        View::Playlist => Route::Playlist,
+        View::Login => Route::Login,
+        View::Settings => Route::Settings,
+        View::Albums => Route::Albums,
+        View::Artists => Route::Artists,
+        View::Artist => Route::Artist,
+    }
+}
+
+/// UI-thread state shared by event delivery and actions.
+struct Bridge {
+    rows: Rc<VecModel<TrackItem>>,
+    cards: Rc<VecModel<CardItem>>,
+    anchor: Arc<Mutex<Option<PositionAnchor>>>,
+    sender: CommandSender,
+    /// Visible ranges reported by the lists, as (first, count).
+    row_window: Cell<(usize, usize)>,
+    card_window: Cell<(usize, usize)>,
+}
+impl Bridge {
+    fn padded(window: (usize, usize), len: usize) -> Range<usize> {
+        let start = window.0.saturating_sub(MARGIN).min(len);
+        let end = (window.0 + window.1 + MARGIN).min(len);
+        start..end
+    }
+    /// Releases artwork outside the new window and asks for what is missing inside it.
+    fn rows_visible(&self, ui: &DesktopWindow, first: usize, count: usize) {
+        self.update_rows(ui, first, count, false);
+    }
+    fn update_rows(&self, ui: &DesktopWindow, first: usize, count: usize, force: bool) {
+        if !force && self.row_window.get() == (first, count) {
+            return;
+        }
+        let old = Self::padded(
+            self.row_window.replace((first, count)),
+            self.rows.row_count(),
+        );
+        let new = Self::padded((first, count), self.rows.row_count());
+        for index in old.filter(|i| !new.contains(i)) {
+            if let Some(mut row) = self.rows.row_data(index)
+                && row.cover.size().width > 0
+            {
+                row.cover = slint::Image::default();
+                self.rows.set_row_data(index, row);
+            }
+        }
+        if !ui.global::<Ui>().get_list_covers() {
+            return;
+        }
+        let keys = new
+            .filter_map(|i| self.rows.row_data(i))
+            .filter(|row| row.cover.size().width == 0)
+            .map(|row| format!("t:{}", row.id))
+            .collect::<Vec<_>>();
+        if !keys.is_empty() {
+            let _ = self.sender.send(Command::Thumbnails(keys));
+        }
+    }
+    fn cards_visible(&self, first: usize, count: usize) {
+        self.update_cards(first, count, false);
+    }
+    fn update_cards(&self, first: usize, count: usize, force: bool) {
+        if !force && self.card_window.get() == (first, count) {
+            return;
+        }
+        let old = Self::padded(
+            self.card_window.replace((first, count)),
+            self.cards.row_count(),
+        );
+        let new = Self::padded((first, count), self.cards.row_count());
+        for index in old.filter(|i| !new.contains(i)) {
+            if let Some(mut card) = self.cards.row_data(index)
+                && card.cover.size().width > 0
+            {
+                card.cover = slint::Image::default();
+                self.cards.set_row_data(index, card);
+            }
+        }
+        let keys = new
+            .filter_map(|i| self.cards.row_data(i))
+            .filter(|card| card.cover.size().width == 0)
+            .map(|card| card.key.to_string())
+            .collect::<Vec<_>>();
+        if !keys.is_empty() {
+            let _ = self.sender.send(Command::Thumbnails(keys));
+        }
+    }
+    fn thumbnail(&self, ui: &DesktopWindow, key: &str, cover: &eagle_palette::Cover) {
+        if let Some(id) = key.strip_prefix("h:") {
+            if ui.global::<Library>().get_header_id().as_str() == id {
+                ui.global::<Library>().set_cover(image(cover));
+            }
+        } else if let Some(id) = key.strip_prefix("t:") {
+            if !ui.global::<Ui>().get_list_covers() {
+                return;
+            }
+            let mut converted = None;
+            let range = Self::padded(self.row_window.get(), self.rows.row_count());
+            for index in range {
+                if let Some(mut row) = self.rows.row_data(index)
+                    && row.id.as_str() == id
+                {
+                    row.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    self.rows.set_row_data(index, row);
+                }
+            }
+            let queue = ui.global::<Library>().get_queue();
+            for index in 0..queue.row_count() {
+                if let Some(mut row) = queue.row_data(index)
+                    && row.id.as_str() == id
+                {
+                    row.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    queue.set_row_data(index, row);
+                }
+            }
+        } else {
+            let mut converted = None;
+            let range = Self::padded(self.card_window.get(), self.cards.row_count());
+            for index in range {
+                if let Some(mut card) = self.cards.row_data(index)
+                    && card.key.as_str() == key
+                {
+                    card.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    self.cards.set_row_data(index, card);
+                }
+            }
+        }
+    }
+    fn clear_rows(&self) {
+        for index in Self::padded(self.row_window.get(), self.rows.row_count()) {
+            if let Some(mut row) = self.rows.row_data(index)
+                && row.cover.size().width > 0
+            {
+                row.cover = slint::Image::default();
+                self.rows.set_row_data(index, row);
+            }
+        }
+    }
+    fn list_covers_changed(&self, ui: &DesktopWindow) {
+        let queue = ui.global::<Library>().get_queue();
+        if !ui.global::<Ui>().get_list_covers() {
+            self.clear_rows();
+            for index in 0..queue.row_count() {
+                if let Some(mut row) = queue.row_data(index) {
+                    row.cover = slint::Image::default();
+                    queue.set_row_data(index, row);
+                }
+            }
+        } else {
+            self.refresh_rows(ui);
+            let keys = (0..queue.row_count())
+                .filter_map(|index| queue.row_data(index))
+                .filter(|row| row.cover.size().width == 0)
+                .map(|row| format!("t:{}", row.id))
+                .collect::<Vec<_>>();
+            if !keys.is_empty() {
+                let _ = self.sender.send(Command::Thumbnails(keys));
+            }
+        }
+    }
+    /// Re-requests artwork after the list content changed under the window.
+    fn refresh_rows(&self, ui: &DesktopWindow) {
+        let (first, count) = self.row_window.get();
+        self.update_rows(ui, first, count, true);
+    }
+}
+
+fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
+    let rows = &bridge.rows;
+    let anchor = &bridge.anchor;
+    match event {
+        Event::Collections(collections) => {
+            let model = ui.global::<Library>().get_playlists();
+            let Some(model) = model.as_any().downcast_ref::<VecModel<CollectionItem>>() else {
+                return;
+            };
+            for (index, collection) in collections.iter().enumerate() {
+                let item = CollectionItem {
+                    id: collection.id.to_string().into(),
+                    title: collection.title.as_str().into(),
+                };
+                if index < model.row_count() {
+                    if model.row_data(index) != Some(item.clone()) {
+                        model.set_row_data(index, item);
+                    }
+                } else {
+                    model.push(item);
+                }
+            }
+            while model.row_count() > collections.len() {
+                model.remove(model.row_count() - 1);
+            }
+        }
+        Event::Collection { title, length } => {
+            ui.global::<Library>().set_title(title.into());
+            ui.global::<Library>().set_length(length.as_secs_f32());
+        }
+        Event::Header(header) => {
+            let Header {
+                id,
+                subtitle,
+                subtitle_id,
+                liked,
+                likeable,
+                deletable,
+            } = header;
+            let library = ui.global::<Library>();
+            library.set_header_id(id.into());
+            library.set_subtitle(subtitle.into());
+            library.set_subtitle_id(subtitle_id.into());
+            library.set_liked(liked);
+            library.set_likeable(likeable);
+            library.set_deletable(deletable);
+        }
+        Event::CollectionLiked(id, liked) => {
+            if ui.global::<Library>().get_header_id().as_str() == id.to_string() {
+                ui.global::<Library>().set_liked(liked);
+            }
+        }
+        Event::Cards(cards) => {
+            bridge
+                .cards
+                .set_vec(cards.into_iter().map(card_item).collect::<Vec<_>>());
+            let (first, count) = bridge.card_window.get();
+            bridge.update_cards(first, count, true);
+        }
+        Event::Thumbnail(key, cover) => bridge.thumbnail(ui, &key, &cover),
+        Event::Queue(tracks) => {
+            let keys = tracks
+                .iter()
+                .map(|t| format!("t:{}", t.id))
+                .collect::<Vec<_>>();
+            let items = tracks
+                .into_iter()
+                .map(|track| {
+                    track_item(LibraryItem {
+                        track,
+                        liked: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            ui.global::<Library>()
+                .set_queue(Rc::new(VecModel::from(items)).into());
+            if ui.global::<Ui>().get_list_covers() && !keys.is_empty() {
+                let _ = bridge.sender.send(Command::Thumbnails(keys));
+            }
+        }
+        Event::View(view) => {
+            let library = ui.global::<Library>();
+            library.set_title("".into());
+            library.set_cover(slint::Image::default());
+            library.set_header_id("".into());
+            library.set_subtitle("".into());
+            library.set_subtitle_id("".into());
+            library.set_likeable(false);
+            library.set_deletable(false);
+            ui.global::<Ui>().set_confirm_delete(false);
+            bridge.cards.set_vec(Vec::new());
+            ui.global::<Ui>().set_route(route(view));
+            ui.global::<Ui>().set_error("".into());
+        }
+        Event::PlaylistCreated(_) => {
+            ui.global::<Ui>().set_create_playlist(false);
+            ui.global::<Ui>().set_playlist_name("".into());
+        }
+        Event::PlaylistDeleted(_) => ui.global::<Ui>().set_confirm_delete(false),
+        Event::PlaylistMutationBusy(busy) => ui.global::<Ui>().set_playlist_busy(busy),
+        Event::PlaylistMutationFailed(message) => ui.global::<Ui>().set_error(message.into()),
+        Event::Busy(busy) => ui.global::<Ui>().set_busy(busy),
+        Event::Player(state) => {
+            media::state(&state);
+            let player = ui.global::<Player>();
+            player.set_status(match state.status {
+                State::Idle => Status::Idle,
+                State::Loading => Status::Loading,
+                State::Playing => Status::Playing,
+                State::Paused => Status::Paused,
+                State::Buffering => Status::Buffering,
+            });
+            player.set_volume(state.volume);
+            player.set_liked(state.liked);
+            player.set_shuffle(state.shuffle);
+            player.set_repeat(match state.repeat {
+                eagle_app::session::Repeat::Off => 0,
+                eagle_app::session::Repeat::All => 1,
+                eagle_app::session::Repeat::One => 2,
+            });
+            if let Some(track) = &state.track {
+                if player.get_track_id().as_str() != track.id.to_string() {
+                    *anchor.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    player.set_shown(0.);
+                    player.set_cover(slint::Image::default());
+                    COVER_COLOR.with(|c| *c.borrow_mut() = [128; 3]);
+                    apply_colors(ui);
+                }
+                player.set_track_id(track.id.to_string().into());
+                player.set_album_id(
+                    track
+                        .album
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string)
+                        .into(),
+                );
+                player.set_artist_id(
+                    track
+                        .artists
+                        .first()
+                        .map_or_else(String::new, |a| a.id.to_string())
+                        .into(),
+                );
+                player.set_title(track.title.as_str().into());
+                player.set_source(track.id.provider().into());
+                player.set_artist(
+                    track
+                        .artists
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into(),
+                );
+                player.set_length(track.duration_ms as f32 / 1000.);
+            }
+        }
+        Event::Position(position) => {
+            media::position(&position);
+            ui.global::<Player>().set_shown(
+                eagle_app::session::position_now(&position, Instant::now()).as_secs_f32(),
+            );
+            *anchor.lock().unwrap_or_else(|p| p.into_inner()) = Some(position);
+        }
+        Event::Library(delta) => {
+            let mut structural = false;
+            if delta.iter().any(|change| {
+                matches!(
+                    change,
+                    LibraryDelta::Insert { .. } | LibraryDelta::Remove { .. }
+                )
+            }) {
+                bridge.clear_rows();
+            }
+            for change in delta {
+                match change {
+                    LibraryDelta::Insert { index, item } => {
+                        structural = true;
+                        rows.insert(index, track_item(item));
+                    }
+                    LibraryDelta::Update { index, item } => {
+                        let mut row = track_item(item);
+                        // Keep loaded artwork across like toggles: no flicker.
+                        if let Some(old) = rows.row_data(index)
+                            && old.id == row.id
+                        {
+                            row.cover = old.cover;
+                        }
+                        rows.set_row_data(index, row);
+                    }
+                    LibraryDelta::Remove { index } => {
+                        structural = true;
+                        rows.remove(index);
+                    }
+                }
+            }
+            if structural {
+                bridge.refresh_rows(ui);
+            }
+        }
+        Event::LibraryReset(items) => {
+            bridge.clear_rows();
+            rows.set_vec(items.into_iter().map(track_item).collect::<Vec<_>>());
+            bridge.refresh_rows(ui);
+        }
+        Event::Error(message) => ui.global::<Ui>().set_error(message.into()),
+        Event::Cover(target, id, cover) => {
+            if matches!(target, eagle_app::session::CoverTarget::Collection) {
+                ui.global::<Library>().set_cover(image(&cover));
+                return;
+            }
+            if ui.global::<Player>().get_track_id().as_str() == id.to_string() {
+                ui.global::<Player>().set_cover(image(&cover));
+                COVER_COLOR.with(|c| *c.borrow_mut() = cover.dominant);
+                apply_colors(ui);
+            }
+        }
+        Event::Account => ui.global::<Ui>().set_signed_in(true),
+    }
+}
+
+thread_local! { static COVER_COLOR: RefCell<[u8; 3]> = const { RefCell::new([128; 3]) }; }
+pub(super) fn apply_colors(ui: &DesktopWindow) {
+    let tokens = ui.global::<Theme>().get_t();
+    let background = [tokens.bg.red(), tokens.bg.green(), tokens.bg.blue()];
+    let tint = match ui.global::<Theme>().get_tint() {
+        0 => eagle_palette::Tint::Off,
+        2 => eagle_palette::Tint::Bright,
+        _ => eagle_palette::Tint::Soft,
+    };
+    let (bar, panel) =
+        COVER_COLOR.with(|c| eagle_palette::player_surfaces(*c.borrow(), background, tint));
+    let color = |rgb: [u8; 3]| slint::Color::from_rgb_u8(rgb[0], rgb[1], rgb[2]);
+    ui.global::<Player>().set_colors(PlayerColors {
+        bg: color(panel.background),
+        bar: color(bar.background),
+        tx: color(panel.text),
+        tx2: color(panel.secondary),
+    });
+}
+
+thread_local! { static UI_BRIDGE: RefCell<Option<Rc<Bridge>>> = const { RefCell::new(None) }; }
+fn with_bridge(f: impl FnOnce(&Bridge)) {
+    let bridge = UI_BRIDGE.with(|b| b.borrow().clone());
+    if let Some(bridge) = bridge {
+        f(&bridge);
+    }
+}
+
+/// Flips a track heart at once; the session's reply confirms or reverts it.
+fn like_optimistically(ui: &DesktopWindow, rows: &VecModel<TrackItem>, id: &str) {
+    for index in 0..rows.row_count() {
+        if let Some(mut row) = rows.row_data(index)
+            && row.id.as_str() == id
+        {
+            row.liked = !row.liked;
+            rows.set_row_data(index, row);
+            break;
+        }
+    }
+    let player = ui.global::<Player>();
+    if player.get_track_id().as_str() == id {
+        player.set_liked(!player.get_liked());
+    }
+}
+
+pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
+    let actions = ui.global::<Actions>();
+    let tx = sender.clone();
+    actions.on_play_all(move |shuffle| {
+        let _ = tx.send(Command::PlayAll(shuffle));
+    });
+    macro_rules! simple {
+        ($method:ident, $command:expr) => {{
+            let tx = sender.clone();
+            actions.$method(move || {
+                let _ = tx.send($command);
+            });
+        }};
+    }
+    simple!(on_toggle_play, Command::TogglePlay);
+    simple!(on_next, Command::Next);
+    simple!(on_toggle_shuffle, Command::ToggleShuffle);
+    simple!(on_cycle_repeat, Command::CycleRepeat);
+    simple!(on_prev, Command::Previous);
+    let tx = sender.clone();
+    actions.on_play(move |id| {
+        if let Ok(id) = id.parse() {
+            let _ = tx.send(Command::Play(id));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_play_row(move |index| {
+        if let Ok(index) = usize::try_from(index) {
+            let _ = tx.send(Command::PlayRow(index));
+        }
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_like(move |id| {
+        let Ok(parsed) = id.parse() else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| like_optimistically(&ui, &bridge.rows, &id));
+        }
+        let _ = tx.send(Command::Like(parsed));
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_like_collection(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let library = ui.global::<Library>();
+        let Ok(id) = library.get_header_id().parse() else {
+            return;
+        };
+        library.set_liked(!library.get_liked());
+        let _ = tx.send(match ui.global::<Ui>().get_route() {
+            Route::Artist => Command::LikeArtist(id),
+            _ => Command::LikeAlbum(id),
+        });
+    });
+    let weak = ui.as_weak();
+    actions.on_visible_rows(move |first, count| {
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| {
+                bridge.rows_visible(&ui, first.max(0) as usize, count.max(0) as usize)
+            });
+        }
+    });
+    let weak = ui.as_weak();
+    actions.on_list_covers_changed(move || {
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| bridge.list_covers_changed(&ui));
+        }
+    });
+    actions.on_visible_cards(move |first, count| {
+        with_bridge(|bridge| bridge.cards_visible(first.max(0) as usize, count.max(0) as usize));
+    });
+    let tx = sender.clone();
+    actions.on_seek(move |seconds| {
+        if seconds.is_finite() && seconds >= 0. {
+            let _ = tx.send(Command::Seek(Duration::from_secs_f32(seconds)));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_set_volume(move |v| {
+        let _ = tx.send(Command::Volume(v));
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_search(move |text| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let query = text.to_string();
+        if query.trim().is_empty() {
+            let _ = tx.send(Command::Search(String::new()));
+            return;
+        }
+        let command = match ui.global::<Ui>().get_search_kind() {
+            1 => Command::SearchArtists(query),
+            2 => Command::SearchAlbums(query),
+            3 => Command::SearchPlaylists(query),
+            _ => Command::Search(query),
+        };
+        let _ = tx.send(command);
+    });
+    actions.on_valid_playlist_name(|name| !name.trim().is_empty());
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_create_playlist(move |name| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if !ui.global::<Ui>().get_playlist_busy() && !name.trim().is_empty() {
+            ui.global::<Ui>().set_error("".into());
+            ui.global::<Ui>().set_playlist_busy(true);
+            if tx
+                .send(Command::CreatePlaylist(name.trim().to_owned()))
+                .is_err()
+            {
+                ui.global::<Ui>().set_playlist_busy(false);
+                ui.global::<Ui>()
+                    .set_error("Не удалось создать плейлист".into());
+            }
+        }
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_delete_playlist(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if !ui.global::<Ui>().get_playlist_busy()
+            && ui.global::<Ui>().get_confirm_delete()
+            && let Ok(id) = ui.global::<Library>().get_header_id().parse()
+        {
+            ui.global::<Ui>().set_error("".into());
+            ui.global::<Ui>().set_playlist_busy(true);
+            if tx.send(Command::DeletePlaylist(id)).is_err() {
+                ui.global::<Ui>().set_playlist_busy(false);
+                ui.global::<Ui>()
+                    .set_error("Не удалось удалить плейлист".into());
+            }
+        }
+    });
+    let tx = sender.clone();
+    actions.on_login(move |token| {
+        let _ = tx.send(Command::Login(eagle_app::session::Token::new(
+            token.to_string(),
+        )));
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_collection(move |route, id| {
+        if let Ok(id) = id.parse() {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<Ui>().set_create_playlist(false);
+            }
+            let _ = tx.send(match route {
+                Route::Album => Command::Album(id),
+                Route::Artist => Command::Artist(id),
+                _ => Command::Playlist(id),
+            });
+        }
+    });
+    let weak = ui.as_weak();
+    actions.on_open(move |route| {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<Ui>().set_create_playlist(false);
+        }
+        let view = match route {
+            Route::Library => View::Library,
+            Route::Search => View::Search,
+            Route::Album => View::Album,
+            Route::Playlist => View::Playlist,
+            Route::Login => View::Login,
+            Route::Settings => View::Settings,
+            Route::Albums => View::Albums,
+            Route::Artists => View::Artists,
+            Route::Artist => View::Artist,
+        };
+        let _ = sender.send(Command::Open(view));
+    });
+}
+
+pub(super) fn initialize(
+    rows: Rc<VecModel<TrackItem>>,
+    cards: Rc<VecModel<CardItem>>,
+    anchor: Arc<Mutex<Option<PositionAnchor>>>,
+    sender: CommandSender,
+) {
+    UI_BRIDGE.with(|bridge| {
+        *bridge.borrow_mut() = Some(Rc::new(Bridge {
+            rows,
+            cards,
+            anchor,
+            sender,
+            row_window: Cell::new((0, 0)),
+            card_window: Cell::new((0, 0)),
+        }))
+    });
+}
+pub(super) fn deliver(ui: &DesktopWindow, event: Event) {
+    with_bridge(|bridge| apply(ui, event, bridge));
+}
+pub(super) fn clear() {
+    UI_BRIDGE.with(|bridge| bridge.borrow_mut().take());
+}
+
+/// Hidden windows retain the newest anchor without posting a Slint event.
+pub(super) fn coalesce_hidden_position(
+    event: Event,
+    visible: bool,
+    anchor: &Mutex<Option<PositionAnchor>>,
+) -> Option<Event> {
+    match event {
+        Event::Position(position) if !visible => {
+            *anchor.lock().unwrap_or_else(|p| p.into_inner()) = Some(position);
+            None
+        }
+        event => Some(event),
+    }
+}
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    #[test]
+    fn hidden_positions_update_anchor_without_scheduling_ui_work() {
+        let anchor = Mutex::new(None);
+        let position = PositionAnchor {
+            track: 0,
+            position: Duration::from_secs(4),
+            audible_at: Instant::now(),
+            state: State::Playing,
+        };
+        assert!(
+            coalesce_hidden_position(Event::Position(position.clone()), false, &anchor).is_none()
+        );
+        assert_eq!(
+            anchor.lock().unwrap().as_ref().unwrap().position,
+            position.position
+        );
+        assert!(matches!(
+            coalesce_hidden_position(Event::Position(position), true, &anchor),
+            Some(Event::Position(_))
+        ));
+    }
+    pub(crate) fn structural_changes_and_cover_toggle_release_artwork() {
+        let ui = DesktopWindow::new().unwrap();
+        let root = std::env::temp_dir().join(format!("eagle-ui-covers-{}", std::process::id()));
+        let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
+        let rows = Rc::new(VecModel::default());
+        let bridge = Bridge {
+            rows: rows.clone(),
+            cards: Rc::new(VecModel::default()),
+            anchor: Arc::new(Mutex::new(None)),
+            sender: session.sender(),
+            row_window: Cell::new((0, 1)),
+            card_window: Cell::new((0, 0)),
+        };
+        let item = |id: &str| LibraryItem {
+            track: Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("yandex:{id}"), "title": id, "artists": [],
+                    "album": null, "album_title": null, "duration_ms": 0,
+                    "cover": null, "availability": "Available"
+                }))
+                .unwrap(),
+            ),
+            liked: false,
+        };
+        let cover = eagle_palette::Cover {
+            rgba: vec![255; 4],
+            width: 1,
+            height: 1,
+            dominant: [0; 3],
+        };
+        apply(
+            &ui,
+            Event::LibraryReset(vec![item("1"), item("2")]),
+            &bridge,
+        );
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
+        apply(
+            &ui,
+            Event::Library(vec![LibraryDelta::Insert {
+                index: 0,
+                item: item("3"),
+            }]),
+            &bridge,
+        );
+        assert_eq!(rows.row_data(1).unwrap().cover.size().width, 0);
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        apply(
+            &ui,
+            Event::Library(vec![LibraryDelta::Remove { index: 0 }]),
+            &bridge,
+        );
+        assert_eq!(rows.row_data(0).unwrap().cover.size().width, 0);
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        apply(&ui, Event::LibraryReset(vec![item("1")]), &bridge);
+        assert_eq!(rows.row_data(0).unwrap().cover.size().width, 0);
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        ui.global::<Ui>().set_list_covers(false);
+        bridge.list_covers_changed(&ui);
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        assert_eq!(rows.row_data(0).unwrap().cover.size().width, 0);
+        ui.global::<Ui>().set_list_covers(true);
+        bridge.list_covers_changed(&ui);
+        bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
+    }
+    #[test]
+    fn padded_window_is_clamped_to_the_list() {
+        assert_eq!(Bridge::padded((0, 10), 100), 0..18);
+        assert_eq!(Bridge::padded((50, 10), 100), 42..68);
+        assert_eq!(Bridge::padded((95, 10), 100), 87..100);
+        assert_eq!(Bridge::padded((0, 10), 0), 0..0);
+    }
+}

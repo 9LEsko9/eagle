@@ -3,8 +3,12 @@
 
 //! Shared process entry point.
 
+pub mod benchmark;
+
+mod covers;
 pub mod music;
 mod playback;
+pub mod session;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logger =
@@ -33,4 +37,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     music::run(&args, &root)?;
     logger.flush()?;
     Ok(())
+}
+
+/// Shared application data location for CLI and desktop.
+pub fn data_directory() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    Ok(eagle_platform::logging::default_directory()?
+        .parent()
+        .ok_or("missing data directory")?
+        .to_owned())
 }

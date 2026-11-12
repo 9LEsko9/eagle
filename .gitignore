@@ -12,3 +12,4 @@ __pycache__/
 
 /bench/results/*.json
 /bench/results/stage-one-binary/
+/bench/results/stage-four-binary/
