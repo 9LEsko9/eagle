@@ -325,6 +325,11 @@ impl Engine {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, mpsc::RecvTimeoutError> {
         self.events.recv_timeout(timeout)
     }
+    /// Transfer event consumption to a blocking dispatcher without polling the engine.
+    pub fn take_events(&mut self) -> mpsc::Receiver<Event> {
+        let (_, empty) = mpsc::channel();
+        std::mem::replace(&mut self.events, empty)
+    }
     pub fn try_recv(&self) -> Result<Event, mpsc::TryRecvError> {
         self.events.try_recv()
     }

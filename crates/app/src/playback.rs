@@ -124,7 +124,7 @@ fn cache_hit(
     }
     Ok(cache.lookup(store, id, quality)?.map(|p| (p, quality)))
 }
-fn streamed(
+pub(crate) fn streamed(
     store: Arc<Store>,
     cache: Arc<Cache>,
     net: Arc<Client>,

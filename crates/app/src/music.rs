@@ -168,7 +168,7 @@ pub(crate) fn metadata(
     )?;
     Ok(())
 }
-fn sync(store: &Store, provider: &impl Provider) -> Result<()> {
+pub(crate) fn sync(store: &Store, provider: &dyn Provider) -> Result<()> {
     let mut cursor = None;
     let mut ids = vec![];
     loop {

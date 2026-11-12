@@ -54,7 +54,7 @@ impl From<TrackId> for String {
         id.to_string()
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artist {
     pub id: TrackId,
     pub name: String,
@@ -80,7 +80,7 @@ pub enum Availability {
     Removed,
     Unknown,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
     pub title: String,
