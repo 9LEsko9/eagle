@@ -58,6 +58,9 @@ impl From<TrackId> for String {
 pub struct Artist {
     pub id: TrackId,
     pub name: String,
+    /// Image URI template; absent in metadata cached before it was stored.
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Album {
@@ -65,12 +68,25 @@ pub struct Album {
     pub title: String,
     pub artists: Vec<Artist>,
     pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub cover: Option<String>,
+    #[serde(default)]
+    pub year: Option<u32>,
+}
+/// Artist screen: popular tracks and the discography without tracks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArtistPage {
+    pub artist: Artist,
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Album>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
     pub id: TrackId,
     pub title: String,
     pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Availability {
@@ -86,6 +102,9 @@ pub struct Track {
     pub title: String,
     pub artists: Vec<Artist>,
     pub album: Option<TrackId>,
+    /// Display title of `album`; absent in metadata cached before it was stored.
+    #[serde(default)]
+    pub album_title: Option<String>,
     pub duration_ms: u64,
     pub cover: Option<String>,
     pub availability: Availability,
@@ -149,6 +168,21 @@ pub trait Provider: Send + Sync {
     fn login(&self, token: Token) -> Result<Account, ProviderError>;
     fn account(&self) -> Result<Account, ProviderError>;
     fn search(&self, query: &str, page: u32) -> Result<Page<Track>, ProviderError>;
+    fn search_artists(&self, _query: &str, _page: u32) -> Result<Page<Artist>, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn search_albums(&self, _query: &str, _page: u32) -> Result<Page<Album>, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn search_playlists(&self, _query: &str, _page: u32) -> Result<Page<Playlist>, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn create_playlist(&self, _title: &str) -> Result<Playlist, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn delete_playlist(&self, _id: &TrackId) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
     fn track(&self, id: &TrackId) -> Result<Track, ProviderError>;
     fn album(&self, id: &TrackId) -> Result<Album, ProviderError>;
     fn playlist(&self, id: &TrackId) -> Result<Playlist, ProviderError>;
@@ -156,6 +190,23 @@ pub trait Provider: Send + Sync {
     fn likes(&self, cursor: Option<&str>) -> Result<Page<Track>, ProviderError>;
     fn set_liked(&self, id: &TrackId, liked: bool) -> Result<(), ProviderError>;
     fn set_disliked(&self, id: &TrackId, disliked: bool) -> Result<(), ProviderError>;
+    /// Liked albums without tracks, newest first.
+    fn liked_albums(&self) -> Result<Vec<Album>, ProviderError> {
+        Ok(Vec::new())
+    }
+    /// Liked artists, newest first.
+    fn liked_artists(&self) -> Result<Vec<Artist>, ProviderError> {
+        Ok(Vec::new())
+    }
+    fn set_album_liked(&self, _id: &TrackId, _liked: bool) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn set_artist_liked(&self, _id: &TrackId, _liked: bool) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn artist(&self, _id: &TrackId) -> Result<ArtistPage, ProviderError> {
+        Err(ProviderError::NotFound)
+    }
     fn resolve_stream(&self, id: &TrackId, quality: Quality) -> Result<Stream, ProviderError>;
 }
 #[cfg(test)]

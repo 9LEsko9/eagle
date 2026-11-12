@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, ThemeMode, Type, Motion, Layout } from "../globals/theme.slint";
+import { Ui, Actions, Route, Player, Status } from "../globals/bridge.slint";
+import { TextButton } from "../components/button.slint";
+import { Segmented, Switch } from "../components/controls.slint";
+import { Artwork } from "../components/cover.slint";
+import { PlayPause } from "../components/play-pause.slint";
+
+component SectionTitle inherits Text {
+    color: Theme.t.tx2;
+    font-size: Type.small;
+    font-weight: 600;
+    height: 44px;
+    vertical-alignment: bottom;
+}
+
+// Label (with optional hint) on the left, control on the right, hairline below.
+component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    min-height: 60px;
+    HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 24px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            spacing: 2px;
+            alignment: center;
+            Text { text: root.title; color: Theme.t.tx; font-size: Type.body; font-weight: 500; }
+            if root.hint != "" : Text { text: root.hint; color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.t.ln; }
+}
+
+// Static sample row in theme colours, mirroring the track list.
+component SampleRow inherits HorizontalLayout {
+    in property <string> number;
+    in property <string> title;
+    in property <string> artist;
+    in property <string> time;
+    in property <bool> current;
+    height: 50px;
+    spacing: 12px;
+    Rectangle {
+        width: 24px;
+        Text { text: root.number; color: Theme.t.tx2; font-size: Type.meta; horizontal-alignment: center; vertical-alignment: center; visible: !root.current; }
+        Image { source: @image-url("../icons/speaker.svg"); colorize: Theme.t.tx; width: 16px; height: 16px; visible: root.current; }
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        alignment: center;
+        spacing: 1px;
+        Text { text: root.title; color: Theme.t.tx; font-size: Type.body; font-weight: root.current ? 600 : 500; overflow: elide; }
+        Text { text: root.artist; color: Theme.t.tx2; font-size: Type.meta; overflow: elide; }
+    }
+    Text { text: root.time; color: Theme.t.tx2; font-size: Type.meta; vertical-alignment: center; }
+}
+
+// Live preview: theme, text size and the cover-tinted player react to every setting.
+component AppearancePreview inherits Rectangle {
+    border-radius: 14px;
+    background: Theme.t.bg;
+    border-width: 1px;
+    border-color: Theme.t.ln;
+    animate background { duration: Motion.slow; }
+    VerticalLayout {
+        padding: 16px;
+        spacing: 4px;
+        Text { text: @tr("Предпросмотр"); color: Theme.t.tx2; font-size: Type.small; font-weight: 600; height: 28px; vertical-alignment: top; }
+        SampleRow { number: "1"; title: Player.title != "" ? Player.title : @tr("Магистраль"); artist: Player.title != "" ? Player.artist : @tr("Шум волн"); time: "4:22"; current: true; }
+        SampleRow { number: "2"; title: @tr("Северный свет"); artist: @tr("Мира Вольская"); time: "3:42"; }
+        Rectangle { height: 8px; }
+        Rectangle {
+            height: 72px;
+            border-radius: 12px;
+            background: Player.colors.bg;
+            animate background { duration: Motion.slow; }
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 12px;
+                Artwork { image: Player.cover; width: 48px; height: 48px; radius: 6px; }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    alignment: center;
+                    spacing: 1px;
+                    Text { text: Player.title != "" ? Player.title : @tr("Магистраль"); color: Player.colors.tx; font-size: Type.body; font-weight: 600; overflow: elide; }
+                    Text { text: Player.title != "" ? Player.artist : @tr("Шум волн"); color: Player.colors.tx2; font-size: Type.meta; overflow: elide; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    PlayPause { size: 36px; playing: Player.status == Status.playing; fg: Player.colors.tx; glyph: Player.colors.bg; clicked => { Actions.toggle-play(); } }
+                }
+            }
+        }
+        Text {
+            text: @tr("Цвет плеера берётся из обложки текущего трека.");
+            color: Theme.t.tx2;
+            font-size: Type.small;
+            wrap: word-wrap;
+            height: self.preferred-height + 8px;
+            vertical-alignment: bottom;
+        }
+    }
+}
+
+export component SettingsScreen inherits Flickable {
+    // Derived from the window (not this element) so the decision cannot feed back into layout.
+    private property <length> content-width: Layout.width
+        - (Layout.compact ? 0px : 208px)
+        - (Ui.panel-open && !Layout.narrow ? 336px : 0px)
+        - (Layout.compact ? 40px : Layout.wide ? 96px : 64px);
+    // Wide: settings and a sticky preview side by side, the pair centred in the free space.
+    private property <bool> split: content-width >= 960px;
+    viewport-height: body.preferred-height + 24px;
+    body := HorizontalLayout {
+        width: root.width;
+        alignment: root.split ? center : start;
+        VerticalLayout {
+            max-width: root.split ? 1240px : 680px;
+            horizontal-stretch: 1;
+            alignment: start;
+            spacing: 0px;
+            Text { text: @tr("Настройки"); color: Theme.t.tx; font-size: Layout.compact ? Type.title : Type.display; font-weight: 700; letter-spacing: -0.8px; }
+            if !root.split : VerticalLayout {
+                padding-top: 20px;
+                AppearancePreview { }
+            }
+            HorizontalLayout {
+                spacing: 48px;
+                alignment: stretch;
+                VerticalLayout {
+                    horizontal-stretch: 1.6;
+                    min-width: 0px;
+                    alignment: start;
+                    spacing: 0px;
+                    SectionTitle { text: @tr("Оформление"); }
+                    SettingRow {
+                        title: @tr("Тема");
+                        hint: @tr("«Авто» следует системной светлой или тёмной теме");
+                        Segmented {
+                            options: [@tr("Авто"), @tr("Графит"), @tr("Бумага"), @tr("OLED")];
+                            selected: Theme.mode == ThemeMode.graphite ? 1 : Theme.mode == ThemeMode.paper ? 2 : Theme.mode == ThemeMode.oled ? 3 : 0;
+                            picked(i) => {
+                                Theme.mode = i == 1 ? ThemeMode.graphite : i == 2 ? ThemeMode.paper : i == 3 ? ThemeMode.oled : ThemeMode.auto;
+                            }
+                        }
+                    }
+                    SettingRow {
+                        title: @tr("Цвет плеера");
+                        hint: @tr("Плеер и панель окрашиваются в оттенок обложки");
+                        Segmented {
+                            options: [@tr("Выкл"), @tr("Мягкий"), @tr("Яркий")];
+                            selected: Theme.tint;
+                            picked(i) => { Theme.tint = i; }
+                        }
+                    }
+                    SettingRow {
+                        title: @tr("Размер текста");
+                        Segmented {
+                            options: [@tr("Мелкий"), @tr("Обычный"), @tr("Крупный")];
+                            selected: Type.scale < 0.95 ? 0 : Type.scale > 1.05 ? 2 : 1;
+                            picked(i) => { Type.scale = i == 0 ? 0.9 : i == 2 ? 1.15 : 1; }
+                        }
+                    }
+                    SettingRow {
+                        title: @tr("Обложки в списках");
+                        hint: @tr("Миниатюры у треков и в очереди");
+                        Switch { label: @tr("Обложки в списках"); checked: Ui.list-covers; toggled => { Ui.list-covers = !Ui.list-covers; Actions.list-covers-changed(); } }
+                    }
+                    SettingRow {
+                        title: @tr("Уменьшить движение");
+                        hint: @tr("Отключает анимации и перетекание цветов");
+                        Switch { label: @tr("Уменьшить движение"); checked: Motion.reduced; toggled => { Motion.reduced = !Motion.reduced; } }
+                    }
+                    SectionTitle { text: @tr("Аккаунты"); }
+                    SettingRow {
+                        title: @tr("Яндекс Музыка");
+                        hint: Ui.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
+                        if !Ui.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
+                    }
+                    SettingRow {
+                        title: @tr("VK Музыка");
+                        hint: @tr("Пока недоступно");
+                    }
+                    Text {
+                        text: @tr("При закрытии окна приложение выходит.");
+                        color: Theme.t.tx2;
+                        font-size: Type.meta;
+                        height: 44px;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.split : VerticalLayout {
+                    horizontal-stretch: 1;
+                    min-width: 340px;
+                    max-width: 460px;
+                    alignment: start;
+                    padding-top: 44px;
+                    AppearancePreview { }
+                }
+            }
+        }
+    }
+}

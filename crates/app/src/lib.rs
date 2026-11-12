@@ -3,6 +3,9 @@
 
 //! Shared process entry point.
 
+pub mod benchmark;
+
+mod covers;
 pub mod music;
 mod playback;
 pub mod session;

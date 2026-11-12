@@ -38,6 +38,9 @@ pub fn run(root: PathBuf, software: bool) -> Result<(), Box<dyn std::error::Erro
         .set_tracks(ModelRc::from(rows.clone()));
     ui.global::<Library>()
         .set_playlists(Rc::new(VecModel::<CollectionItem>::default()).into());
+    let cards = Rc::new(VecModel::<CardItem>::default());
+    ui.global::<Library>()
+        .set_cards(ModelRc::from(cards.clone()));
     let anchor = Arc::new(Mutex::new(None::<PositionAnchor>));
     bridge::apply_colors(&ui);
     ui.global::<Theme>().on_palette_changed({
@@ -83,8 +86,8 @@ pub fn run(root: PathBuf, software: bool) -> Result<(), Box<dyn std::error::Erro
                 }
             }
         })?;
-    bridge::initialize(event_rows.clone(), event_anchor);
     let sender = session.sender();
+    bridge::initialize(event_rows.clone(), cards, event_anchor, sender.clone());
     bridge::bind(&ui, sender.clone());
     slint::invoke_from_event_loop({
         let weak = ui.as_weak();
@@ -226,10 +229,13 @@ mod tests {
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        bridge::tests::structural_changes_and_cover_toggle_release_artwork();
         let ui = DesktopWindow::new().unwrap();
         let rows = Rc::new(VecModel::from(vec![TrackItem {
             id: "yandex:1".into(),
             album_id: "".into(),
+            album: "".into(),
+            cover: slint::Image::default(),
             title: "Первый трек".into(),
             artist: "Исполнитель".into(),
             duration: "1:00".into(),
@@ -268,6 +274,100 @@ mod tests {
             "visible rows: {visible_rows}"
         );
 
+        let searches = Rc::new(RefCell::new(Vec::new()));
+        ui.global::<Actions>().on_search({
+            let searches = searches.clone();
+            let weak = ui.as_weak();
+            move |query| {
+                searches.borrow_mut().push((
+                    weak.unwrap().global::<Ui>().get_search_kind(),
+                    query.to_string(),
+                ))
+            }
+        });
+        ui.global::<Ui>().set_route(Route::Search);
+        ui.global::<Ui>().set_search_query("Мира".into());
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Альбомы")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(&*searches.borrow(), &[(2, "Мира".to_owned())]);
+        assert_eq!(ui.global::<Ui>().get_search_query().as_str(), "Мира");
+        let opened = Rc::new(RefCell::new(None));
+        ui.global::<Actions>().on_collection({
+            let opened = opened.clone();
+            move |route, id| *opened.borrow_mut() = Some((route, id.to_string()))
+        });
+        ui.global::<Library>().set_cards(
+            Rc::new(VecModel::from(vec![CardItem {
+                id: "yandex:12".into(),
+                key: "a:yandex:12".into(),
+                title: "Альбом для проверки".into(),
+                subtitle: "".into(),
+                cover: slint::Image::default(),
+                round: false,
+                route: Route::Album,
+            }]))
+            .into(),
+        );
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Альбом для проверки")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(
+            *opened.borrow(),
+            Some((Route::Album, "yandex:12".to_owned()))
+        );
+        ui.global::<Actions>()
+            .on_valid_playlist_name(|name| !name.trim().is_empty());
+        let created = Rc::new(RefCell::new(String::new()));
+        ui.global::<Actions>().on_create_playlist({
+            let created = created.clone();
+            move |name| *created.borrow_mut() = name.to_string()
+        });
+        ui.global::<Ui>().set_signed_in(true);
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Создать плейлист")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        slint::platform::update_timers_and_animations();
+        ui.global::<Ui>().set_playlist_name("   ".into());
+        ElementHandle::find_by_accessible_label(&ui, "Создать")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(created.borrow().is_empty());
+        ui.global::<Ui>().set_playlist_name("Вечер".into());
+        ElementHandle::find_by_accessible_label(&ui, "Создать")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(&*created.borrow(), "Вечер");
+        ui.global::<Ui>().set_create_playlist(false);
+        ui.global::<Ui>().set_route(Route::Playlist);
+        ui.global::<Library>().set_title("Вечер".into());
+        ui.global::<Library>().set_deletable(true);
+        let deleted = Rc::new(RefCell::new(false));
+        ui.global::<Actions>().on_delete_playlist({
+            let deleted = deleted.clone();
+            move || *deleted.borrow_mut() = true
+        });
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Удалить плейлист")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(!*deleted.borrow());
+        slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Удалить")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(*deleted.borrow());
+        ui.global::<Library>().set_deletable(false);
         ui.global::<Ui>().set_route(Route::Settings);
         ElementHandle::find_by_accessible_label(&ui, "Бумага")
             .next()

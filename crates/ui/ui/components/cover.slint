@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme } from "../globals/theme.slint";
+
+// Rounded artwork. A neutral wash stands in while the image loads.
+export component Artwork inherits Rectangle {
+    in property <image> image;
+    in property <length> radius: 6px;
+    border-radius: radius;
+    clip: true;
+    background: Theme.t.surf;
+    Image { source: root.image; width: parent.width; height: parent.height; image-fit: cover; }
+}
+
+// Clickable bottom-bar cover: toggles the «Сейчас играет» panel.
 export component Cover inherits Rectangle {
     in property <image> image;
     in property <color> fg: Theme.t.tx;
     callback clicked();
-    width: 48px; height: 48px; border-radius: 6px; clip: true;
-    accessible-role: button; accessible-label: @tr("Сейчас играет");
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    accessible-role: button;
+    accessible-label: @tr("Сейчас играет");
     accessible-action-default => { root.clicked(); }
-    border-width: focus.has-focus ? 2px : 0px; border-color: fg;
     forward-focus: focus;
-    Image { source: root.image; width: parent.width; height: parent.height; image-fit: contain; }
+    Artwork { image: root.image; radius: 6px; }
+    Rectangle { border-radius: 6px; border-width: focus.has-focus ? 2px : 0px; border-color: root.fg; }
     focus := FocusScope { key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; } }
-    TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }

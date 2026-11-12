@@ -13,16 +13,38 @@ export global Theme {
     private property <Tokens> paper: { bg: #fafaf7, surf: #f1f1ec, tx: #151517, tx2: #5c5c61, ln: #e4e4de };
     private property <Tokens> oled: { bg: #000, surf: #0e0e10, tx: #fff, tx2: #9c9ca3, ln: #1a1a1d };
     out property <Tokens> t: mode == ThemeMode.graphite ? graphite : mode == ThemeMode.paper ? paper : mode == ThemeMode.oled ? oled : system-dark ? graphite : paper;
+    // Hover and pressed washes derive from the text colour, so they read on every theme and on tinted player surfaces.
+    out property <color> hover: t.tx.with-alpha(0.06);
+    out property <color> press: t.tx.with-alpha(0.1);
 }
 export global Motion {
     in-out property <bool> reduced;
-    out property <duration> fast: reduced ? 0ms : 200ms;
+    out property <duration> fast: reduced ? 0ms : 180ms;
     out property <duration> base: reduced ? 0ms : 300ms;
-    out property <duration> slow: reduced ? 0ms : 550ms;
+    out property <duration> slow: reduced ? 0ms : 500ms;
+    out property <duration> swipe: reduced ? 0ms : 550ms;
 }
 export global Type {
     in-out property <float> scale: 1;
+    out property <length> tiny: 11px * scale;
     out property <length> small: 12px * scale;
+    out property <length> meta: 13px * scale;
     out property <length> body: 14px * scale;
-    out property <length> title: 20px * scale;
+    out property <length> lead: 19px * scale;
+    out property <length> title: 24px * scale;
+    out property <length> display: 32px * scale;
+}
+
+// Window-width breakpoints. The window writes `width`; everything else reads the flags.
+export global Layout {
+    in-out property <length> width: 1280px;
+    // The sidebar becomes a drawer behind a menu button.
+    out property <bool> compact: width < 860px;
+    // The «Сейчас играет» panel floats over the content once a docked column (336 px)
+    // would leave the track list narrower than 420 px.
+    out property <bool> narrow: width - (compact ? 0px : 208px) - 336px < 420px;
+    // The player bar drops shuffle, repeat and the volume slider.
+    out property <bool> tight: width < 720px;
+    // Large windows get roomier gutters.
+    out property <bool> wide: width >= 1600px;
 }

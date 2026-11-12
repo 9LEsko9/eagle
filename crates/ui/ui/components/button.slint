@@ -1,28 +1,89 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Motion, Type } from "../globals/theme.slint";
+
+// Pill button. `primary` is filled with the text colour, `outline` has a hairline border, otherwise it is plain.
 export component TextButton inherits Rectangle {
-    out property <bool> hovered: touch.has-hover;
-    in property <bool> align-left;
+    in property <string> text;
+    in property <image> icon;
     in property <bool> primary;
+    in property <bool> outline;
+    in property <bool> enabled: true;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked();
+    private property <color> fg: primary ? Theme.t.bg : Theme.t.tx;
+    height: 36px;
+    horizontal-stretch: 0;
+    border-radius: self.height / 2;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    opacity: enabled ? 1 : 0.4;
+    background: primary ? (touch.pressed ? Theme.t.tx.with-alpha(0.82) : touch.has-hover ? Theme.t.tx.with-alpha(0.9) : Theme.t.tx)
+        : touch.pressed ? Theme.press : touch.has-hover ? Theme.hover : transparent;
+    border-width: focus.has-focus ? 2px : outline ? 1px : 0px;
+    border-color: focus.has-focus ? (primary ? Theme.t.tx2 : Theme.t.tx) : Theme.t.ln;
+    animate background { duration: Motion.fast; }
+    HorizontalLayout {
+        padding-left: root.icon.width > 0 ? 14px : 16px;
+        padding-right: root.icon.width > 0 ? 18px : 16px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon.width > 0 : VerticalLayout {
+            alignment: center;
+            Image { source: root.icon; colorize: root.fg; width: 14px; height: 14px; }
+        }
+        Text { text: root.text; color: root.fg; font-size: Type.meta; font-weight: 600; vertical-alignment: center; }
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+// Text-only sidebar item.
+export component NavItem inherits Rectangle {
     in property <string> text;
     in property <bool> active;
-    in property <color> foreground: Theme.t.tx;
     callback clicked();
-    min-width: 44px;
-    height: 40px;
-    horizontal-stretch: 0;
+    height: 32px;
+    border-radius: 6px;
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { root.clicked(); }
     forward-focus: focus;
-    border-radius: primary ? 18px : 6px;
-    background: primary ? Theme.t.tx : touch.has-hover || active ? Theme.t.surf : transparent;
+    background: active ? Theme.t.surf : touch.has-hover ? Theme.hover : transparent;
     border-width: focus.has-focus ? 2px : 0px;
-    border-color: foreground;
+    border-color: Theme.t.tx;
     animate background { duration: Motion.fast; }
-    Text { text: root.text; color: root.primary ? Theme.t.bg : root.foreground; font-size: Type.body; font-weight: 500; horizontal-alignment: root.align-left ? left : center; x: root.align-left ? 10px : 0px; width: root.width - (root.align-left ? 20px : 0px); vertical-alignment: center; }
+    Text {
+        x: 10px;
+        width: parent.width - 20px;
+        text: root.text;
+        color: root.active || touch.has-hover ? Theme.t.tx : Theme.t.tx2;
+        font-size: Type.body;
+        font-weight: root.active ? 600 : 500;
+        vertical-alignment: center;
+        overflow: elide;
+        animate color { duration: Motion.fast; }
+    }
     focus := FocusScope {
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
     }
-    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Row inside a popup menu.
+export component MenuItem inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 34px;
+    border-radius: 6px;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.clicked(); }
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text { x: 10px; width: parent.width - 20px; text: root.text; color: Theme.t.tx; font-size: Type.meta; font-weight: 500; vertical-alignment: center; overflow: elide; }
+    touch := TouchArea { clicked => { root.clicked(); } }
 }

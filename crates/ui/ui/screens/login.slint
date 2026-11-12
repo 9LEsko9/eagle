@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type } from "../globals/theme.slint";
+import { Ui, Actions } from "../globals/bridge.slint";
+import { TextButton } from "../components/button.slint";
+import { Field } from "../components/controls.slint";
+
+export component LoginScreen inherits VerticalLayout {
+    alignment: start;
+    HorizontalLayout {
+        VerticalLayout {
+            max-width: 440px;
+            horizontal-stretch: 1;
+            spacing: 0px;
+            Text { text: @tr("Вход в Яндекс Музыку"); color: Theme.t.tx; font-size: Type.display; font-weight: 700; letter-spacing: -0.8px; wrap: word-wrap; }
+            Text {
+                text: Ui.signed-in ? @tr("Вход выполнен") : @tr("Введите токен Яндекса. Он сохранится в системном хранилище секретов.");
+                color: Theme.t.tx2;
+                font-size: Type.body;
+                wrap: word-wrap;
+                height: self.preferred-height + 24px;
+                vertical-alignment: center;
+            }
+            if !Ui.signed-in : VerticalLayout {
+                spacing: 12px;
+                token := Field {
+                    init => { self.focus-input(); }
+                    placeholder: @tr("Токен");
+                    password: true;
+                    accepted(text) => { Actions.login(text); self.text = ""; }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    TextButton { text: @tr("Войти"); primary: true; clicked => { Actions.login(token.text); token.text = ""; } }
+                }
+            }
+            Text {
+                text: @tr("VK пока недоступен: провайдер не подключён.");
+                color: Theme.t.tx2;
+                font-size: Type.meta;
+                height: 48px;
+                vertical-alignment: bottom;
+            }
+        }
+        Rectangle { horizontal-stretch: 0.001; }
+    }
+}

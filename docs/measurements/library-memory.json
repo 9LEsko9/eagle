@@ -1,0 +1,175 @@
+{
+  "date": "2026-11-12",
+  "host": "macOS 27.2 arm64",
+  "rustc": "1.99.1",
+  "python": "3.15.0",
+  "profile": "release",
+  "base_commit": "149fa03f5ab871f75e1c390c59a8ca94698ee0fc",
+  "baseline": "Working tree snapshot before this task; includes prior uncommitted work. Identical benchmark instrumentation added to both builds.",
+  "baseline_sha256": {
+    "crates/app/src/covers.rs": "18c6f7d86417216183a5179fcebe47c83c0590fc0e55a8817c3a340ad20e98ed",
+    "crates/app/src/music.rs": "63b372ffda3035d8e2a95b56bca3ff9afc3792787afd348dc202094acdebb8a6",
+    "crates/app/src/session.rs": "2ebdfb1eaecdd3283d84e54d54d5eb7683c254208ff8e2b59d02a8eb17d950e0",
+    "crates/providers/yandex/src/lib.rs": "0bb61e4a7c40afb8a0cec8e8bff2b8ba4718f9d1229f27badb5541f5d812619c",
+    "crates/ui/src/bridge.rs": "5de92e2b50bb81edc8103dbc0610d3dfafe223c5e56d6c355701a9ca3564a279"
+  },
+  "scope": "Offline storage sync (20 pages of 500 tracks) and cover worker traversal (10000 64px tracks, 1000 300px cards; 20 items/window). Excludes Slint rendering and live network.",
+  "command_latency": {
+    "milliseconds": 1.237,
+    "scope": "debug catalog regression test; Collections queued during blocked first page; measured from releasing page to reply, not from command submission"
+  },
+  "runs": {
+    "baseline_sync": {
+      "scenario": "sync",
+      "os": "Darwin",
+      "arch": "arm64",
+      "binary": "/private/tmp/eagle-baseline-target/release/eagle-cli",
+      "duration_seconds": 9.672916208015522,
+      "cpu_percent_one_core": 2.2929102960995142,
+      "memory_metric": "phys_footprint_bytes",
+      "sampled_peak_bytes": 20775344,
+      "settled_min_bytes": 7553456,
+      "settled_max_bytes": 20775344,
+      "settled_final_bytes": 7553456,
+      "passes": [
+        {
+          "elapsed_ms": 200.407375,
+          "pass": 0,
+          "settled_bytes": 14860720
+        },
+        {
+          "elapsed_ms": 733.6512080000001,
+          "pass": 1,
+          "settled_bytes": 16187824
+        },
+        {
+          "elapsed_ms": 66.836584,
+          "pass": 2,
+          "settled_bytes": 16040368
+        }
+      ],
+      "samples": 324,
+      "sample_interval_ms": 25
+    },
+    "final_sync": {
+      "scenario": "sync",
+      "os": "Darwin",
+      "arch": "arm64",
+      "binary": "/Users/lesk9/Documents/eagle/target/release/eagle-cli",
+      "duration_seconds": 8.902006415999494,
+      "cpu_percent_one_core": 2.304135518235716,
+      "memory_metric": "phys_footprint_bytes",
+      "sampled_peak_bytes": 6668720,
+      "settled_min_bytes": 4374960,
+      "settled_max_bytes": 6226352,
+      "settled_final_bytes": 4374960,
+      "passes": [
+        {
+          "elapsed_ms": 103.553083,
+          "pass": 0,
+          "settled_bytes": 6635952
+        },
+        {
+          "elapsed_ms": 106.759917,
+          "pass": 1,
+          "settled_bytes": 6668720
+        },
+        {
+          "elapsed_ms": 100.699209,
+          "pass": 2,
+          "settled_bytes": 6226352
+        }
+      ],
+      "samples": 311,
+      "sample_interval_ms": 25
+    },
+    "baseline_scroll": {
+      "scenario": "scroll",
+      "os": "Darwin",
+      "arch": "arm64",
+      "binary": "/private/tmp/eagle-baseline-target/release/eagle-cli",
+      "duration_seconds": 20.739786999998614,
+      "cpu_percent_one_core": 57.66158864923475,
+      "memory_metric": "phys_footprint_bytes",
+      "sampled_peak_bytes": 76988896,
+      "settled_min_bytes": 60817888,
+      "settled_max_bytes": 73679328,
+      "settled_final_bytes": 60817888,
+      "passes": [
+        {
+          "elapsed_ms": 4034.180042,
+          "hot_window_p50_ms": 0.010166999999999999,
+          "hot_window_p95_ms": 0.020707999999999997,
+          "pass": 0,
+          "window_p50_ms": 1.065542,
+          "window_p95_ms": 67.104709,
+          "settled_bytes": 70877664
+        },
+        {
+          "elapsed_ms": 4674.490417,
+          "hot_window_p50_ms": 0.010583,
+          "hot_window_p95_ms": 0.029334,
+          "pass": 1,
+          "window_p50_ms": 1.182292,
+          "window_p95_ms": 74.15879100000001,
+          "settled_bytes": 73531872
+        },
+        {
+          "elapsed_ms": 3866.052208,
+          "hot_window_p50_ms": 0.010166999999999999,
+          "hot_window_p95_ms": 0.017709,
+          "pass": 2,
+          "window_p50_ms": 1.0491249999999999,
+          "window_p95_ms": 63.670457999999996,
+          "settled_bytes": 73679328
+        }
+      ],
+      "samples": 727,
+      "sample_interval_ms": 25
+    },
+    "final_scroll": {
+      "scenario": "scroll",
+      "os": "Darwin",
+      "arch": "arm64",
+      "binary": "/Users/lesk9/Documents/eagle/target/release/eagle-cli",
+      "duration_seconds": 20.937355583999306,
+      "cpu_percent_one_core": 59.24842717234148,
+      "memory_metric": "phys_footprint_bytes",
+      "sampled_peak_bytes": 32915936,
+      "settled_min_bytes": 19628512,
+      "settled_max_bytes": 32915936,
+      "settled_final_bytes": 19628512,
+      "passes": [
+        {
+          "elapsed_ms": 4745.333750000001,
+          "hot_window_p50_ms": 0.015458999999999999,
+          "hot_window_p95_ms": 0.049666999999999996,
+          "pass": 0,
+          "window_p50_ms": 1.249542,
+          "window_p95_ms": 75.463667,
+          "settled_bytes": 32883168
+        },
+        {
+          "elapsed_ms": 4079.2726249999996,
+          "hot_window_p50_ms": 0.017834,
+          "hot_window_p95_ms": 0.041083,
+          "pass": 1,
+          "window_p50_ms": 1.136666,
+          "window_p95_ms": 68.228792,
+          "settled_bytes": 32866784
+        },
+        {
+          "elapsed_ms": 3941.241834,
+          "hot_window_p50_ms": 0.011417,
+          "hot_window_p95_ms": 0.032959,
+          "pass": 2,
+          "window_p50_ms": 1.090709,
+          "window_p95_ms": 66.577417,
+          "settled_bytes": 32915936
+        }
+      ],
+      "samples": 737,
+      "sample_interval_ms": 25
+    }
+  }
+}

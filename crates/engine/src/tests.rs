@@ -329,3 +329,244 @@ fn estimated_duration_never_truncates_long_vbr() {
         );
     }
 }
+
+#[test]
+fn repeat_and_order_keep_exact_frames_without_restarting() {
+    for (order, repeat, expected) in [
+        (vec![0, 1], Repeat::One, vec![0, 0, 0]),
+        (vec![0, 1], Repeat::All, vec![0, 1, 0]),
+        (vec![0, 2, 1], Repeat::Off, vec![0, 2, 1]),
+    ] {
+        let (_, commands) = mpsc::channel();
+        let (events, _) = mpsc::sync_channel(128);
+        let mut worker = Worker::new(
+            Config::default(),
+            Arc::new(Shared::default()),
+            commands,
+            events,
+        );
+        worker.sources = vec![
+            fixture("tone-44100-2.flac"),
+            fixture("tone-44100-2.flac"),
+            fixture("tone-44100-2.flac"),
+        ];
+        worker.command(Command::Configure(order, repeat));
+        let (output, mut consumer) = Output::offline(44100);
+        worker.output = Some(output);
+        let mut frames = Vec::new();
+        while frames.len() < 33075 {
+            if worker.pipeline.is_none() {
+                worker.prepare().unwrap();
+            }
+            worker.produce(0).unwrap();
+            while let Ok(frame) = consumer.pop() {
+                frames.push(frame);
+            }
+        }
+        let reference = decoded("tone-44100-2.flac", 44100);
+        for (i, &id) in expected.iter().enumerate() {
+            let section = &frames[i * 11025..(i + 1) * 11025];
+            assert!(section.iter().all(|frame| frame.track == id));
+            assert_eq!(
+                section
+                    .iter()
+                    .map(|frame| frame.samples)
+                    .collect::<Vec<_>>(),
+                reference
+            );
+            assert_eq!(section[0].position, 0);
+        }
+    }
+}
+
+#[test]
+fn live_order_change_preserves_current_frames_and_replaces_buffered_future() {
+    for rate in [44100, 48000] {
+        let (_, commands) = mpsc::channel();
+        let (events, _) = mpsc::sync_channel(128);
+        let shared = Arc::new(Shared::default());
+        let mut worker = Worker::new(Config::default(), shared.clone(), commands, events);
+        worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+        let (output, mut consumer) = Output::offline(rate);
+        worker.output = Some(output);
+        while worker.decode_index < 2 {
+            if worker.pipeline.is_none() {
+                worker.prepare().unwrap();
+            }
+            worker.produce(0).unwrap();
+        }
+        for _ in 0..5000 {
+            assert_eq!(consumer.pop().unwrap().track, 0);
+        }
+        shared.track.store(0, Ordering::Release);
+        shared.consumed.store(5000, Ordering::Release);
+        worker.command(Command::Configure(vec![0, 2, 1], Repeat::Off));
+        let request = shared.policy_request.load(Ordering::Acquire);
+        shared.policy_track.store(0, Ordering::Relaxed);
+        shared.policy_consumed.store(5000, Ordering::Relaxed);
+        shared
+            .policy
+            .store(u64::from(request) << 32, Ordering::Release);
+        shared.policy_ack.store(request, Ordering::Release);
+        worker.apply_policy();
+        while worker.decode_index != 1 {
+            if worker.pipeline.is_none() {
+                worker.prepare().unwrap();
+            }
+            worker.produce(0).unwrap();
+        }
+        if rate == 48000 {
+            worker.prepare().unwrap();
+            worker.produce(0).unwrap();
+        }
+        let mut valid = Vec::new();
+        while let Ok(frame) = consumer.pop() {
+            if (frame.revision == (shared.policy.load(Ordering::Acquire) >> 32) as u32
+                || frame.occurrence <= shared.policy.load(Ordering::Acquire) as u32 as u64)
+                && frame.occurrence <= 1
+            {
+                valid.push(frame);
+            }
+        }
+        let per_track = rate as usize / 4;
+        assert_eq!(valid.len(), per_track * 2 - 5000, "rate {rate}");
+        assert!(valid[..per_track - 5000].iter().all(|f| f.track == 0));
+        assert!(valid[per_track - 5000..].iter().all(|f| f.track == 2));
+        assert_eq!(worker.timeline[1].0, per_track as u64);
+    }
+}
+
+#[test]
+fn policy_change_preserves_unsubmitted_resampler_tail() {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let shared = Arc::new(Shared::default());
+    let mut worker = Worker::new(Config::default(), shared.clone(), commands, events);
+    worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+    let (output, mut consumer) = Output::offline(48000);
+    worker.output = Some(output);
+    while worker.decode_index == 0 {
+        if worker.pipeline.is_none() {
+            worker.prepare().unwrap();
+        }
+        worker.produce(0).unwrap();
+    }
+    assert!(worker.tails.front().is_some_and(|tail| tail.2 > 0));
+    worker.command(Command::Configure(vec![0, 2, 1], Repeat::Off));
+    let request = shared.policy_request.load(Ordering::Acquire);
+    shared.policy_track.store(0, Ordering::Relaxed);
+    shared.policy_consumed.store(0, Ordering::Relaxed);
+    shared
+        .policy
+        .store(u64::from(request) << 32, Ordering::Release);
+    shared.policy_ack.store(request, Ordering::Release);
+    worker.apply_policy();
+    assert!(!worker.policy_tail.is_empty());
+    while worker.decode_index != 1 {
+        if worker.pipeline.is_none() {
+            worker.prepare().unwrap();
+        }
+        worker.produce(0).unwrap();
+    }
+    let mut current = Vec::new();
+    while let Ok(frame) = consumer.pop() {
+        if frame.track == 0 {
+            current.push(frame.samples);
+        }
+    }
+    assert_eq!(current.len(), 12000);
+    assert_eq!(current, decoded("tone-44100-2.flac", 48000));
+}
+
+#[test]
+fn failed_sources_follow_order_and_stop_after_one_failed_cycle() {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let mut worker = Worker::new(
+        Config::default(),
+        Arc::new(Shared::default()),
+        commands,
+        events,
+    );
+    worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+    worker.command(Command::Configure(vec![0, 2, 1], Repeat::All));
+    worker.skip_failed();
+    assert_eq!(worker.decode_index, 2);
+    worker.skip_failed();
+    assert_eq!(worker.decode_index, 1);
+    worker.skip_failed();
+    assert_eq!(worker.decode_index, worker.sources.len());
+    worker.failures = 0;
+    worker.decode_index = 0;
+    worker.repeat = Repeat::One;
+    worker.skip_failed();
+    assert_eq!(worker.decode_index, 2);
+}
+
+#[test]
+fn next_applies_pending_policy_and_preserves_pause() {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let shared = Arc::new(Shared::default());
+    let mut worker = Worker::new(Config::default(), shared.clone(), commands, events);
+    worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+    worker.output = Some(Output::offline(44100).0);
+    shared.paused.store(true, Ordering::Release);
+    worker.command(Command::Configure(vec![0, 2, 1], Repeat::All));
+    assert!(worker.pending_policy.is_some());
+    shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+    worker.command(Command::Next);
+    assert_eq!(worker.decode_index, 2);
+    assert!(worker.pending_policy.is_none());
+    assert!(shared.paused.load(Ordering::Acquire));
+    assert_eq!(
+        shared.policy_ack.load(Ordering::Acquire),
+        shared.policy_request.load(Ordering::Acquire)
+    );
+    worker.command(Command::Configure(vec![0, 1, 2], Repeat::One));
+    shared.pending_interrupts.fetch_add(1, Ordering::AcqRel);
+    worker.command(Command::Seek(Duration::from_millis(100)));
+    assert_eq!(worker.decode_index, 2);
+    assert_eq!(worker.repeat, Repeat::One);
+    assert!(worker.pending_policy.is_none());
+    assert!(shared.paused.load(Ordering::Acquire));
+}
+
+#[test]
+fn policy_change_preserves_each_protected_short_track_tail() {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let shared = Arc::new(Shared::default());
+    let mut worker = Worker::new(Config::default(), shared.clone(), commands, events);
+    worker.sources = (0..3).map(|_| fixture("tone-44100-2.flac")).collect();
+    worker.output = Some(Output::offline(44100).0);
+    worker.decode_index = 2;
+    worker.occurrence = 2;
+    worker.prepare().unwrap();
+    let pipeline = worker.pipeline.as_mut().unwrap();
+    pipeline.pending.clear();
+    pipeline.pending.extend([[0.1; 2], [0.2; 2], [0.3; 2]]);
+    worker.tails.push_back((0, 10, 1, 0, 0));
+    worker.tails.push_back((1, 20, 2, 1, 0));
+    worker.command(Command::Configure(vec![0, 1, 2], Repeat::All));
+    let request = shared.policy_request.load(Ordering::Acquire);
+    shared.policy_track.store(1, Ordering::Relaxed);
+    shared.policy_consumed.store(0, Ordering::Relaxed);
+    shared
+        .policy
+        .store((u64::from(request) << 32) | 1, Ordering::Release);
+    shared.policy_ack.store(request, Ordering::Release);
+    worker.apply_policy();
+    assert_eq!(
+        worker
+            .policy_tail
+            .iter()
+            .map(|t| (t.0, t.1, t.2, t.3))
+            .collect::<Vec<_>>(),
+        vec![
+            ([0.1; 2], 0, 10, 0),
+            ([0.2; 2], 1, 20, 1),
+            ([0.3; 2], 1, 21, 1)
+        ]
+    );
+}

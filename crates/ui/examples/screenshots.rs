@@ -3,8 +3,43 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use eagle_ui::{
-        CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route, Status, Theme,
-        ThemeMode, TrackItem, Ui,
+        Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route,
+        Status, Theme, ThemeMode, TrackItem, Ui,
+    };
+    // Geometric placeholder artwork in the mockup's palette: background, disc, stripe.
+    fn art(size: u32, back: [u8; 3], disc: [u8; 3], cx: f32, cy: f32) -> slint::Image {
+        let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(size, size);
+        let edge = size as usize;
+        for (i, pixel) in buffer.make_mut_slice().iter_mut().enumerate() {
+            let (x, y) = (
+                (i % edge) as f32 / size as f32,
+                (i / edge) as f32 / size as f32,
+            );
+            let inside = (x - cx).powi(2) + (y - cy).powi(2) < 0.27f32.powi(2);
+            let rgb = if inside || (y > 0.75 && y < 0.80) {
+                disc
+            } else {
+                back
+            };
+            *pixel = slint::Rgba8Pixel::new(rgb[0], rgb[1], rgb[2], 255);
+        }
+        slint::Image::from_rgba8(buffer)
+    }
+    let palette: [([u8; 3], [u8; 3], f32, f32); 6] = [
+        ([38, 70, 83], [233, 196, 106], 0.47, 0.51),
+        ([61, 90, 128], [224, 251, 252], 0.47, 0.43),
+        ([224, 122, 95], [244, 241, 222], 0.63, 0.53),
+        ([129, 178, 154], [31, 58, 46], 0.35, 0.61),
+        ([109, 89, 122], [234, 172, 139], 0.61, 0.39),
+        ([242, 204, 143], [61, 64, 91], 0.68, 0.62),
+    ];
+    let album_of = |album: &str| match album {
+        "Магистраль" => 0,
+        "Полярная ночь" => 1,
+        "Город спит" => 2,
+        "Аналог" => 3,
+        "Бетонный сад" => 4,
+        _ => 5,
     };
     use slint::{ComponentHandle, VecModel};
     use std::{rc::Rc, time::Duration};
@@ -34,22 +69,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
     );
     let sample = [
-        ("Магистраль", "Шум волн", "4:22"),
-        ("Северный свет", "Мира Вольская", "3:42"),
-        ("Неон на Пресне", "Сигнал", "4:05"),
-        ("Тёплый шум", "Ольга Корт", "3:18"),
-        ("Бетонный сад", "Позднее лето", "2:57"),
-        ("До рассвета", "Тим Рязанов", "3:51"),
-        ("Пустые трамваи", "Сигнал", "3:34"),
-        ("Медленная вода", "Ольга Корт", "4:47"),
-        ("Последний поезд", "Мира Вольская", "2:41"),
+        ("Магистраль", "Шум волн", "Магистраль", "4:22"),
+        ("Северный свет", "Мира Вольская", "Полярная ночь", "3:42"),
+        ("Неон на Пресне", "Сигнал", "Город спит", "4:05"),
+        ("Тёплый шум", "Ольга Корт", "Аналог", "3:18"),
+        ("Бетонный сад", "Позднее лето", "Бетонный сад", "2:57"),
+        ("До рассвета", "Тим Рязанов", "Окна", "3:51"),
+        ("Пустые трамваи", "Сигнал", "Город спит", "3:34"),
+        ("Медленная вода", "Ольга Корт", "Аналог", "4:47"),
+        ("Последний поезд", "Мира Вольская", "Полярная ночь", "2:41"),
     ];
     let tracks = sample
         .iter()
         .enumerate()
-        .map(|(i, (title, artist, duration))| TrackItem {
+        .map(|(i, (title, artist, album, duration))| TrackItem {
             id: format!("fixture:{i}").into(),
-            album_id: "".into(),
+            album_id: format!("fixture:album:{i}").into(),
+            album: (*album).into(),
+            cover: {
+                let (b, d, x, y) = palette[album_of(album)];
+                art(64, b, d, x, y)
+            },
             title: (*title).into(),
             artist: (*artist).into(),
             duration: (*duration).into(),
@@ -61,6 +101,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_queue(Rc::new(VecModel::from(tracks[1..5].to_vec())).into());
     ui.global::<Library>()
         .set_tracks(Rc::new(VecModel::from(tracks)).into());
+    let albums = [
+        ("Магистраль", "2024 · Шум волн"),
+        ("Полярная ночь", "2023 · Мира Вольская"),
+        ("Город спит", "2025 · Сигнал"),
+        ("Аналог", "2022 · Ольга Корт"),
+        ("Бетонный сад", "2024 · Позднее лето"),
+        ("Окна", "2021 · Тим Рязанов"),
+        ("Северный ветер", "2020 · Мира Вольская"),
+        ("Тихий час", "2023 · Сигнал"),
+    ];
+    let album_cards = albums
+        .iter()
+        .enumerate()
+        .map(|(i, (title, subtitle))| {
+            let (b, d, x, y) = palette[i % palette.len()];
+            CardItem {
+                id: format!("fixture:album:{i}").into(),
+                key: format!("a:{i}").into(),
+                title: (*title).into(),
+                subtitle: (*subtitle).into(),
+                cover: art(300, b, d, x, y),
+                round: false,
+                route: Route::Album,
+            }
+        })
+        .collect::<Vec<_>>();
+    let artist_cards = [
+        "Шум волн",
+        "Мира Вольская",
+        "Сигнал",
+        "Ольга Корт",
+        "Позднее лето",
+        "Тим Рязанов",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, name)| {
+        let (b, d, x, y) = palette[(i + 2) % palette.len()];
+        CardItem {
+            id: format!("fixture:artist:{i}").into(),
+            key: format!("r:{i}").into(),
+            title: (*name).into(),
+            subtitle: "".into(),
+            cover: art(300, b, d, x, y),
+            round: true,
+            route: Route::Artist,
+        }
+    })
+    .collect::<Vec<_>>();
+    let artist_cover = art(300, [224, 122, 95], [244, 241, 222], 0.5, 0.5);
     let mut cover = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(600, 600);
     for (i, pixel) in cover.make_mut_slice().iter_mut().enumerate() {
         let (x, y) = ((i % 600) as f32 / 600., (i / 600) as f32 / 600.);
@@ -73,6 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *pixel = slint::Rgba8Pixel::new(rgb[0], rgb[1], rgb[2], 255);
     }
     let cover = slint::Image::from_rgba8(cover);
+    let cover_image = cover.clone();
     ui.global::<Library>().set_cover(cover.clone());
     ui.global::<Player>().set_cover(cover);
     ui.global::<Library>().set_title("Поздний вечер".into());
@@ -82,41 +173,267 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_track_id("fixture:0".into());
     ui.global::<Player>().set_title("Магистраль".into());
     ui.global::<Player>().set_artist("Шум волн".into());
-    ui.global::<Player>()
-        .set_source("Данные предпросмотра".into());
+    ui.global::<Player>().set_source("yandex".into());
     ui.global::<Player>().set_length(262.);
     ui.global::<Player>().set_shown(84.);
-    ui.global::<Player>().set_status(Status::Paused);
+    ui.global::<Player>().set_status(Status::Playing);
+    ui.global::<Player>().set_volume(0.7);
+    ui.global::<Player>().set_liked(false);
+    ui.global::<Player>().on_position(|| 84.);
+    ui.global::<Ui>().set_signed_in(true);
+    ui.global::<Actions>()
+        .on_valid_playlist_name(|name| !name.trim().is_empty());
     let folder = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/tmp/eagle-screenshots".into());
     std::fs::create_dir_all(&folder)?;
+    // (file name, theme, route, panel open, drawer open, window width)
+    let shots = [
+        (
+            "search-narrow",
+            ThemeMode::Graphite,
+            Route::Search,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "create-playlist-narrow",
+            ThemeMode::Graphite,
+            Route::Library,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "search-albums",
+            ThemeMode::Graphite,
+            Route::Search,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "create-playlist",
+            ThemeMode::Graphite,
+            Route::Library,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "delete-playlist",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "graphite",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "paper",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        ("oled", ThemeMode::Oled, Route::Playlist, true, false, 1280.),
+        (
+            "albums",
+            ThemeMode::Graphite,
+            Route::Albums,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "artists",
+            ThemeMode::Paper,
+            Route::Artists,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "artist",
+            ThemeMode::Graphite,
+            Route::Artist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "settings-full",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1920.,
+        ),
+        (
+            "settings-compact",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            780.,
+        ),
+        (
+            "fullscreen",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1920.,
+        ),
+        (
+            "fullscreen-panel",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1920.,
+        ),
+        (
+            "graphite-wide",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "settings",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "settings-paper",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "narrow-panel",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            true,
+            false,
+            920.,
+        ),
+        (
+            "compact",
+            ThemeMode::Paper,
+            Route::Playlist,
+            false,
+            false,
+            780.,
+        ),
+        (
+            "compact-drawer",
+            ThemeMode::Paper,
+            Route::Playlist,
+            false,
+            true,
+            780.,
+        ),
+        (
+            "tight",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            600.,
+        ),
+    ];
     let index = Rc::new(std::cell::Cell::new(0));
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
     timer.start(
         slint::TimerMode::Repeated,
-        Duration::from_millis(800),
+        Duration::from_millis(900),
         move || {
-            let ui = weak.upgrade().unwrap();
+            let Some(ui) = weak.upgrade() else { return };
             let n = index.get();
             if n > 0 {
-                let image = ui.window().take_snapshot().unwrap();
-                image::save_buffer(
-                    format!("{folder}/{}.png", ["graphite", "paper", "oled"][n - 1]),
+                let Ok(image) = ui.window().take_snapshot() else {
+                    return;
+                };
+                let saved = image::save_buffer(
+                    format!("{folder}/{}.png", shots[n - 1].0),
                     image.as_bytes(),
                     image.width(),
                     image.height(),
                     image::ColorType::Rgba8,
-                )
-                .unwrap();
+                );
+                if let Err(error) = saved {
+                    eprintln!("screenshot: {error}");
+                }
             }
-            if n == 3 {
-                slint::quit_event_loop().unwrap();
+            if n == shots.len() {
+                let _ = slint::quit_event_loop();
                 return;
             }
-            ui.global::<Theme>()
-                .set_mode([ThemeMode::Graphite, ThemeMode::Paper, ThemeMode::Oled][n]);
+            let (name, mode, route, panel, drawer, width) = shots[n];
+            ui.global::<Ui>()
+                .set_create_playlist(name.starts_with("create-playlist"));
+            ui.global::<Ui>()
+                .set_playlist_name("Вечерняя прогулка".into());
+            ui.global::<Ui>().set_search_query("Сигнал".into());
+            ui.global::<Ui>().set_search_kind(2);
+            ui.global::<Ui>()
+                .set_confirm_delete(name == "delete-playlist");
+            ui.global::<Library>()
+                .set_deletable(name == "delete-playlist");
+            ui.window().set_size(slint::LogicalSize::new(
+                width,
+                if width > 1600. { 1080. } else { 880. },
+            ));
+            ui.global::<Theme>().set_mode(mode);
+            ui.global::<Ui>().set_route(route);
+            let library = ui.global::<Library>();
+            match route {
+                Route::Search => {
+                    library.set_title("".into());
+                    library.set_cards(Rc::new(VecModel::from(album_cards.clone())).into());
+                }
+                Route::Albums => {
+                    library.set_title("".into());
+                    library.set_cards(Rc::new(VecModel::from(album_cards.clone())).into());
+                }
+                Route::Artists => {
+                    library.set_title("".into());
+                    library.set_cards(Rc::new(VecModel::from(artist_cards.clone())).into());
+                }
+                Route::Artist => {
+                    library.set_cards(Rc::new(VecModel::from(album_cards[2..6].to_vec())).into());
+                    library.set_title("Сигнал".into());
+                    library.set_cover(artist_cover.clone());
+                    library.set_likeable(true);
+                    library.set_liked(true);
+                }
+                _ => {
+                    library.set_cards(Rc::new(VecModel::<CardItem>::default()).into());
+                    library.set_title("Поздний вечер".into());
+                    library.set_cover(cover_image.clone());
+                    library.set_likeable(false);
+                }
+            }
+            ui.global::<Ui>().set_panel_open(panel);
+            ui.global::<Ui>().set_drawer_open(drawer);
             let theme = ui.global::<Theme>().get_t();
             let background = [theme.bg.red(), theme.bg.green(), theme.bg.blue()];
             let (bar, panel) =

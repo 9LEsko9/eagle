@@ -1,30 +1,59 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Motion } from "../globals/theme.slint";
+
+// Filled round button; the glyph morphs between a triangle and two bars, the disc
+// dips while pressed.
 export component PlayPause inherits Rectangle {
     in property <bool> playing;
     in property <color> fg: Theme.t.tx;
+    in property <color> glyph: Theme.t.bg;
+    in property <length> size: 40px;
     callback clicked();
-    width: 44px; height: 44px;
+    width: size;
+    height: size;
     private property <float> t: playing ? 1 : 0;
-    animate t { duration: Motion.base; easing: ease-out; }
-    accessible-role: button; accessible-label: playing ? @tr("Пауза") : @tr("Играть");
+    animate t { duration: Motion.base; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
+    private property <float> scale: touch.pressed ? 0.9 : touch.has-hover ? 1.05 : 1;
+    animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0.9, 0.25, 1.3); }
+    accessible-role: button;
+    accessible-label: playing ? @tr("Пауза") : @tr("Играть");
     accessible-action-default => { root.clicked(); }
-    border-width: focus.has-focus ? 2px : 0px; border-color: fg;
     forward-focus: focus;
-    Path {
-        width: 20px; height: 20px; x: 12px; y: 12px;
-        viewbox-width: 16; viewbox-height: 16; fill: root.fg;
-        MoveTo { x: 3; y: 1; }
-        LineTo { x: 8.5 - 1.5 * root.t; y: 4.15 - 3.15 * root.t; }
-        LineTo { x: 8.5 - 1.5 * root.t; y: 11.85 + 3.15 * root.t; }
-        LineTo { x: 3; y: 15; }
-        Close { }
-        MoveTo { x: 8.5 + 0.5 * root.t; y: 4.15 - 3.15 * root.t; }
-        LineTo { x: 14 - root.t; y: 8 - 7 * root.t; }
-        LineTo { x: 14 - root.t; y: 8 + 7 * root.t; }
-        LineTo { x: 8.5 + 0.5 * root.t; y: 11.85 + 3.15 * root.t; }
-        Close { }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: self.width / 2;
+        background: root.fg;
+        border-width: focus.has-focus ? 2px : 0px;
+        border-color: root.glyph;
+        transform-scale-x: root.scale * 100%;
+        transform-scale-y: root.scale * 100%;
+        Path {
+            width: root.size * 0.4;
+            height: self.width;
+            // Optical centring: the triangle is nudged right, the bars are not.
+            x: (parent.width - self.width) / 2 + 1.5px * (1 - root.t);
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            fill: root.glyph;
+            MoveTo { x: 3 - 0.5 * root.t; y: 1; }
+            LineTo { x: 8.5 - 2 * root.t; y: 4.15 - 3.15 * root.t; }
+            LineTo { x: 8.5 - 2 * root.t; y: 11.85 + 3.15 * root.t; }
+            LineTo { x: 3 - 0.5 * root.t; y: 15; }
+            Close { }
+            MoveTo { x: 8.5 + 1 * root.t; y: 4.15 - 3.15 * root.t; }
+            LineTo { x: 14 - 0.5 * root.t; y: 8 - 7 * root.t; }
+            LineTo { x: 14 - 0.5 * root.t; y: 8 + 7 * root.t; }
+            LineTo { x: 8.5 + 1 * root.t; y: 11.85 + 3.15 * root.t; }
+            Close { }
+        }
     }
-    focus := FocusScope { key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; } }
-    TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    focus := FocusScope {
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }

@@ -15,6 +15,7 @@ pub struct Preferences {
     pub reduced: bool,
     pub text_scale: f32,
     pub tint: u8,
+    pub list_covers: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -28,6 +29,7 @@ impl Default for Preferences {
             reduced: false,
             text_scale: 1.,
             tint: 1,
+            list_covers: true,
         }
     }
 }
@@ -53,6 +55,7 @@ impl Preferences {
         });
         ui.global::<Theme>().set_tint(i32::from(self.tint.min(2)));
         ui.global::<Ui>().set_panel_open(self.panel_open);
+        ui.global::<Ui>().set_list_covers(self.list_covers);
         ui.global::<Motion>().set_reduced(self.reduced);
         ui.global::<Type>()
             .set_scale(if (0.8..=1.8).contains(&self.text_scale) {
@@ -79,6 +82,7 @@ impl Preferences {
             reduced: ui.global::<Motion>().get_reduced(),
             text_scale: ui.global::<Type>().get_scale(),
             tint: ui.global::<Theme>().get_tint() as u8,
+            list_covers: ui.global::<Ui>().get_list_covers(),
         }
     }
     pub fn save(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {

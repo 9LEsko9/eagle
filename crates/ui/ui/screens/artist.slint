@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type, Layout } from "../globals/theme.slint";
+import { Library, Ui, Actions } from "../globals/bridge.slint";
+import { TrackRowView } from "../components/track-row.slint";
+import { TextButton } from "../components/button.slint";
+import { CardGrid } from "../components/cards.slint";
+import { TrackMenu, TrackTableHeader } from "collection.slint";
+
+component SectionHeading inherits Text {
+    color: Theme.t.tx;
+    font-size: Type.lead;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    height: 48px;
+    vertical-alignment: bottom;
+}
+
+// One scrolling page: header, popular tracks (a handful, so not virtualised) and the
+// discography grid, whose artwork loads as it scrolls into view.
+export component ArtistScreen inherits Flickable {
+    private property <length> cover-size: Layout.compact ? 112px : 160px;
+    viewport-height: body.preferred-height + 24px;
+    body := VerticalLayout {
+        width: root.width;
+        spacing: 0px;
+        HorizontalLayout {
+            spacing: 24px;
+            if !Layout.compact || Library.cover.width > 0 : VerticalLayout {
+                alignment: end;
+                Rectangle {
+                    width: root.cover-size;
+                    height: root.cover-size;
+                    border-radius: self.width / 2;
+                    clip: true;
+                    background: Theme.t.surf;
+                    Image { source: Library.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                }
+            }
+            VerticalLayout {
+                alignment: end;
+                spacing: 0px;
+                Text { text: @tr("Исполнитель"); color: Theme.t.tx2; font-size: Type.meta; font-weight: 500; }
+                Text {
+                    text: Library.title != "" ? Library.title : Ui.busy ? @tr("Загрузка…") : "";
+                    color: Theme.t.tx;
+                    font-size: Layout.compact ? Type.title : Type.display;
+                    font-weight: 700;
+                    letter-spacing: -0.8px;
+                    overflow: elide;
+                    height: self.preferred-height + 10px;
+                    vertical-alignment: center;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    padding-top: 12px;
+                    alignment: start;
+                    TextButton { text: @tr("Слушать"); icon: @image-url("../icons/play.svg"); primary: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(false); } }
+                    if Library.likeable : TextButton {
+                        text: Library.liked ? @tr("Вы подписаны") : @tr("Нравится");
+                        icon: Library.liked ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                        outline: true;
+                        clicked => { Actions.like-collection(); }
+                    }
+                }
+            }
+        }
+        if Library.tracks.length > 0 : SectionHeading { text: @tr("Популярные треки"); }
+        if Library.tracks.length > 0 : Rectangle { height: 8px; }
+        if Library.tracks.length > 0 : TrackTableHeader { }
+        if Library.tracks.length > 0 : menu := TrackMenu {
+            height: Library.tracks.length * 54px + 6px;
+            VerticalLayout {
+                padding-top: 6px;
+                for item[index] in Library.tracks : TrackRowView {
+                    item: item;
+                    number: index + 1;
+                    menu(item) => { menu.open(item, self.y); }
+                }
+            }
+        }
+        if Library.cards.length > 0 : SectionHeading { text: @tr("Альбомы"); }
+        if Library.cards.length > 0 : Rectangle { height: 16px; }
+        if Library.cards.length > 0 : grid := CardGrid {
+            cards: Library.cards;
+            top: -root.viewport-y - self.y;
+            view-height: root.height;
+        }
+    }
+}

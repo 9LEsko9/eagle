@@ -1,43 +1,145 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Type } from "../globals/theme.slint";
-import { TrackItem, Actions, Player, Route } from "../globals/bridge.slint";
-import { TextButton } from "button.slint";
+import { TrackItem, Actions, Player, Route, Ui } from "../globals/bridge.slint";
 import { IconButton } from "icon-button.slint";
+
+// Column widths shared with the table header.
+export global TrackColumns {
+    out property <length> number: 40px;
+    out property <length> actions: 66px;
+    out property <length> time: 44px;
+    out property <length> gap: 12px;
+    out property <length> inset: 10px;
+}
+
+// Kept deliberately light: rows are created while scrolling, so no popups, conditional
+// sub-trees or animations live here. The «ещё» menu is shared by the whole list.
 export component TrackRowView inherits Rectangle {
     in property <TrackItem> item;
     in property <int> number;
-    private property <bool> hovered: touch.has-hover || heart.hovered || more.hovered || play-control.hovered;
+    in property <bool> show-album;
+    // Asks the list to open the shared «ещё» menu for this row.
+    callback menu(TrackItem);
+    private property <bool> lit: touch.has-hover || heart.hovered || more.hovered || play-control.hovered || focus.has-focus;
+    private property <bool> current: item.id != "" && item.id == Player.track-id;
     height: 54px;
     border-radius: 8px;
-    accessible-role: list-item; accessible-label: item.title + ", " + item.artist;
+    accessible-role: list-item;
+    accessible-label: item.title + ", " + item.artist;
     accessible-action-default => { if item.available { Actions.play(item.id); } }
-    background: root.hovered || focus.has-focus ? Theme.t.surf : transparent;
-    border-width: focus.has-focus ? 2px : 0px; border-color: Theme.t.tx;
+    background: root.lit ? Theme.t.surf : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.t.tx;
     forward-focus: focus;
     focus := FocusScope { key-pressed(e) => { if e.text == "\n" && root.item.available { Actions.play(root.item.id); return accept; } return reject; } }
     touch := TouchArea { clicked => { focus.focus(); } double-clicked => { if root.item.available { Actions.play(root.item.id); } } }
     HorizontalLayout {
-        padding-left: 10px; padding-right: 8px; spacing: 12px;
+        padding-left: TrackColumns.inset;
+        padding-right: TrackColumns.inset;
+        spacing: TrackColumns.gap;
         Rectangle {
+            width: TrackColumns.number;
+            Text {
+                text: root.number;
+                color: Theme.t.tx2;
+                font-size: Type.meta;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                visible: !root.current && !root.lit;
+            }
+            Image {
+                source: @image-url("../icons/speaker.svg");
+                colorize: Theme.t.tx;
+                width: 16px;
+                height: 16px;
+                visible: root.current && !root.lit;
+            }
+            play-control := IconButton {
+                icon: @image-url("../icons/play.svg");
+                icon-size: 14px;
+                label: @tr("Играть трек");
+                reveal: root.lit;
+                clicked => { if root.item.available { Actions.play(root.item.id); } }
+            }
+        }
+        if Ui.list-covers : Rectangle {
             width: 40px;
-            Text { text: root.number; color: Theme.t.tx2; font-size: Type.small; horizontal-alignment: center; vertical-alignment: center; opacity: root.hovered || focus.has-focus ? 0 : 1; }
-            play-control := IconButton { icon: @image-url("../icons/play.svg"); label: @tr("Играть трек"); reveal: root.hovered || focus.has-focus; clicked => { if root.item.available { Actions.play(root.item.id); } } }
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 4px;
+                clip: true;
+                background: Theme.t.surf;
+                Image { source: root.item.cover; width: parent.width; height: parent.height; image-fit: cover; }
+            }
         }
         VerticalLayout {
-            horizontal-stretch: 2; spacing: 2px; alignment: center;
-            Text { text: item.title; color: item.available ? Theme.t.tx : Theme.t.tx2; font-size: Type.body; font-weight: item.id == Player.track-id ? 600 : 500; overflow: elide; }
-            Text { text: item.artist; color: Theme.t.tx2; font-size: 13px * Type.scale; overflow: elide; }
+            // Zero basis: columns split by stretch only, so they line up across rows.
+            horizontal-stretch: 2;
+            min-width: 0px;
+            preferred-width: 0px;
+            spacing: 1px;
+            alignment: center;
+            Text {
+                text: item.title;
+                color: root.item.available ? Theme.t.tx : Theme.t.tx2;
+                font-size: Type.body;
+                font-weight: root.current ? 600 : 500;
+                overflow: elide;
+            }
+            Text { text: item.artist; color: Theme.t.tx2; font-size: Type.meta; overflow: elide; }
         }
-        heart := IconButton { icon: @image-url("../icons/heart.svg"); active-icon: @image-url("../icons/heart-filled.svg"); show-mark: false; label: @tr("Нравится"); active: root.item.liked; reveal: root.item.liked || root.hovered || focus.has-focus; clicked => { Actions.like(root.item.id); } }
-        more := IconButton { icon: @image-url("../icons/more.svg"); label: @tr("Ещё"); reveal: root.hovered || focus.has-focus; clicked => { menu.show(); } }
-        Text { width: 44px; text: item.duration; color: Theme.t.tx2; font-size: Type.small; horizontal-alignment: right; vertical-alignment: center; }
-    }
-    menu := PopupWindow {
-        x: parent.width - self.width; y: 40px; width: 180px; height: 80px;
-        Rectangle { background: Theme.t.surf;
-        VerticalLayout {
-            TextButton { text: @tr("Нравится"); clicked => { Actions.like(root.item.id); menu.close(); } }
-            if root.item.album-id != "" : TextButton { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); menu.close(); } }
-        } }
+        if root.show-album : Rectangle {
+            horizontal-stretch: 1.2;
+            min-width: 0px;
+            preferred-width: 0px;
+            album := Text {
+                width: min(self.preferred-width, parent.width);
+                x: 0;
+                text: root.item.album;
+                color: album-touch.has-hover ? Theme.t.tx : Theme.t.tx2;
+                font-size: Type.meta;
+                overflow: elide;
+                vertical-alignment: center;
+                album-touch := TouchArea {
+                    enabled: root.item.album-id != "";
+                    mouse-cursor: pointer;
+                    clicked => { Actions.collection(Route.album, root.item.album-id); }
+                }
+            }
+        }
+        HorizontalLayout {
+            width: TrackColumns.actions;
+            spacing: 2px;
+            alignment: end;
+            padding-top: 11px;
+            padding-bottom: 11px;
+            heart := IconButton {
+                icon: @image-url("../icons/heart.svg");
+                active-icon: @image-url("../icons/heart-filled.svg");
+                label: @tr("Нравится");
+                fg: Theme.t.tx2;
+                active-fg: Theme.t.tx;
+                active: root.item.liked;
+                pulse: true;
+                reveal: root.item.liked || root.lit;
+                clicked => { Actions.like(root.item.id); }
+            }
+            more := IconButton {
+                icon: @image-url("../icons/more.svg");
+                label: @tr("Ещё");
+                fg: Theme.t.tx2;
+                reveal: root.lit;
+                clicked => { root.menu(root.item); }
+            }
+        }
+        Text {
+            width: TrackColumns.time;
+            text: item.duration;
+            color: Theme.t.tx2;
+            font-size: Type.meta;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
     }
 }

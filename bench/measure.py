@@ -17,6 +17,71 @@ import threading
 import time
 
 
+def measure_library(binary, scenario, seconds, sample, metric):
+    """Disk-local fixtures: cold decoded cache, repeated traversal, then plateau."""
+    import json
+    import struct
+    import zlib
+    with tempfile.TemporaryDirectory(prefix='eagle-library-') as directory:
+        root = Path(directory)
+        covers = root / 'covers'
+        covers.mkdir()
+        def chunk(kind, data):
+            return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
+        for edge in (64, 600):
+            raw = (b'\0' + bytes([64, 128, 192, 255]) * edge) * edge
+            png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B', edge, edge, 8, 6, 0, 0, 0))
+                   + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+            (covers / f'fixture-{edge}.png').write_bytes(png)
+        output = Path('bench/results') / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + f'.{scenario}.json')
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(mode='w+') as progress:
+            child = subprocess.Popen([str(binary), '--bench-library-' + scenario],
+                                     env=dict(os.environ, EAGLE_DATA_DIR=directory), stdout=progress)
+            snapshots = []
+            started = time.monotonic()
+            done_at = None
+            pass_ready = {}
+            pass_settled = {}
+            try:
+                while True:
+                    if child.poll() is not None:
+                        raise RuntimeError('Library fixture exited early')
+                    snapshots.append((time.monotonic() - started, sample(child.pid)))
+                    now = time.monotonic()
+                    for index in range(3):
+                        if (root / f'bench-pass-{index}').exists() and index not in pass_ready:
+                            pass_ready[index] = now
+                        if index in pass_ready and index not in pass_settled and now - pass_ready[index] >= 1:
+                            pass_settled[index] = snapshots[-1][1][1]
+                            (root / f'bench-ack-{index}').write_text('continue')
+                    if (root / 'bench-done').exists() and done_at is None:
+                        done_at = time.monotonic()
+                    if done_at is not None and time.monotonic() - done_at >= seconds:
+                        break
+                    if time.monotonic() - started > 600:
+                        raise RuntimeError('Library fixture timed out')
+                    time.sleep(0.025)
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+            progress.seek(0)
+            passes = [json.loads(line) for line in progress if line.strip()]
+        for item in passes:
+            item['settled_bytes'] = pass_settled[item['pass']]
+        elapsed = snapshots[-1][0] - snapshots[0][0]
+        settled = [s[1][1] for s in snapshots if s[0] >= done_at - started]
+        report = dict(scenario=scenario, os=platform.system(), arch=platform.machine(),
+                      binary=str(binary), duration_seconds=elapsed,
+                      cpu_percent_one_core=(snapshots[-1][1][0] - snapshots[0][1][0]) / elapsed * 100,
+                      memory_metric=metric, sampled_peak_bytes=max(s[1][1] for s in snapshots),
+                      settled_min_bytes=min(settled), settled_max_bytes=max(settled),
+                      settled_final_bytes=settled[-1], passes=passes,
+                      samples=len(snapshots), sample_interval_ms=25)
+        output.write_text(json.dumps(report, indent=2) + '\n')
+        print(output)
+
+
 def linux_sample(pid):
     base = Path('/proc') / str(pid)
     stat = (base / 'stat').read_text().rsplit(')', 1)[1].split()
@@ -236,7 +301,7 @@ def measure_playback(binary, data_dir, track_id, seconds, sample, metric):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=float, default=60)
-    parser.add_argument('--scenario', choices=['idle', 'info', 'store', 'track', 'playback'], default='idle')
+    parser.add_argument('--scenario', choices=['idle', 'info', 'store', 'track', 'playback', 'sync', 'scroll'], default='idle')
     parser.add_argument('--data-dir', type=Path, help='existing cache directory for playback measurement')
     parser.add_argument('--binary', type=Path, help='prebuilt CLI, e.g. a baseline build')
     parser.add_argument('--track', help='yandex:<track ID>; uses the existing keyring token')
@@ -256,6 +321,9 @@ def main():
     else:
         subprocess.run(['cargo', 'build', '--release', '--locked', '-p', 'eagle-cli'], check=True)
         binary = Path('target/release/eagle-cli' + ('.exe' if system == 'Windows' else '')).resolve()
+    if args.scenario in ('sync', 'scroll'):
+        measure_library(binary, args.scenario, args.seconds, sample, metric)
+        return
     if args.scenario == 'playback':
         measure_playback(binary, args.data_dir.resolve(), args.track, args.seconds, sample, metric)
         return
