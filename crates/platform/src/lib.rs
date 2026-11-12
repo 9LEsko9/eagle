@@ -4,3 +4,4 @@
 //! Platform services.
 
 pub mod logging;
+pub mod power;
