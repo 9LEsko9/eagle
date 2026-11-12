@@ -6,12 +6,15 @@ import argparse
 import csv
 import ctypes as C
 import datetime
+import functools
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
-import time
 import tempfile
+import threading
+import time
 
 
 def linux_sample(pid):
@@ -54,6 +57,17 @@ def thread_deltas(start, end):
     return rows
 
 
+@functools.lru_cache(maxsize=1)
+def mac_seconds_per_tick():
+    class Timebase(C.Structure):
+        _fields_ = [('numer', C.c_uint32), ('denom', C.c_uint32)]
+    timebase = Timebase()
+    lib = C.CDLL('/usr/lib/libSystem.B.dylib')
+    if lib.mach_timebase_info(C.byref(timebase)) != 0 or not timebase.denom:
+        raise RuntimeError('mach_timebase_info failed')
+    return timebase.numer / timebase.denom / 1e9
+
+
 def mac_sample(pid):
     # rusage_info_v2: UUID followed by 18 uint64 fields (Darwin sys/resource.h).
     class Usage(C.Structure):
@@ -62,7 +76,8 @@ def mac_sample(pid):
     usage = Usage()
     if lib.proc_pid_rusage(pid, 2, C.byref(usage)) != 0:
         raise OSError(C.get_errno(), 'proc_pid_rusage')
-    return (usage.values[0] + usage.values[1]) / 1e9, usage.values[7], None
+    return ((usage.values[0] + usage.values[1]) * mac_seconds_per_tick(), usage.values[7], None,
+            {'package_idle_wakeups': usage.values[2], 'interrupt_wakeups': usage.values[3]})
 
 
 def windows_sample(pid):
@@ -99,23 +114,167 @@ def windows_sample(pid):
         kernel.CloseHandle(handle)
 
 
+def wakeup_deltas(start, end):
+    if len(start) < 4 or len(end) < 4:
+        return ['', '']
+    deltas = [end[3][key] - start[3][key]
+              for key in ('package_idle_wakeups', 'interrupt_wakeups')]
+    if any(value < 0 for value in deltas):
+        raise ValueError('Process wakeup counters decreased')
+    return deltas
+
+
+def network_stats(output):
+    match = re.search(r"Сеть: (\d+) запросов, (\d+) байт ответов", output)
+    if not match:
+        raise ValueError('CLI did not return network counters')
+    return tuple(map(int, match.groups()))
+
+
+def measure_track(binary, data_dir, track_id, sample, metric):
+    if not re.fullmatch(r'yandex:[0-9]+', track_id):
+        raise ValueError('--track must be yandex:<numeric ID>')
+    env = dict(os.environ, EAGLE_DATA_DIR=data_dir, EAGLE_LOG='info')
+    rows = []
+    for mode in ('cold', 'cached'):
+        snapshots = []
+        sample_times = []
+        started = time.monotonic()
+        child = subprocess.Popen([str(binary), 'play', track_id, '--download-only'],
+                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True)
+        stopped = threading.Event()
+
+        def observe():
+            while not stopped.is_set():
+                try:
+                    snapshots.append(sample(child.pid))
+                    sample_times.append(time.monotonic())
+                except (OSError, ValueError, ProcessLookupError):
+                    pass  # Cached execution may finish between samples.
+                stopped.wait(0.025)
+
+        observer = threading.Thread(target=observe, daemon=True)
+        observer.start()
+        try:
+            output, errors = child.communicate(timeout=300)
+        except BaseException:
+            child.kill()
+            child.communicate()
+            raise
+        finally:
+            stopped.set()
+            observer.join()
+        elapsed = time.monotonic() - started
+        if child.returncode:
+            raise RuntimeError('Track measurement failed: ' + errors.strip())
+        requests, response_bytes = network_stats(output)
+        if mode == 'cold' and requests == 0:
+            raise RuntimeError('Cold run unexpectedly used a cache')
+        if mode == 'cached' and (requests or response_bytes):
+            raise RuntimeError('Cached run accessed the network')
+        audio_bytes = sum(p.stat().st_size for p in (Path(data_dir) / 'audio').glob('*.high'))
+        rows.append([mode, platform.system(), platform.machine(), track_id, elapsed,
+                     requests, response_bytes, audio_bytes,
+                     max((s[1] for s in snapshots), default=''), len(snapshots),
+                     *(wakeup_deltas(snapshots[0], snapshots[-1]) if len(snapshots) >= 2 else ['', '']),
+                     sample_times[-1] - sample_times[0] if len(sample_times) >= 2 else ''])
+    output = Path('bench/results') / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.track.csv')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['mode', 'os', 'arch', 'track_id', 'duration_seconds',
+                         'http_requests', 'response_body_bytes', 'audio_bytes',
+                         'sampled_peak_' + metric, 'memory_samples',
+                         'sampled_package_idle_wakeups', 'sampled_interrupt_wakeups', 'sampled_window_seconds'])
+        writer.writerows(rows)
+    print(output)
+
+
+def measure_playback(binary, data_dir, track_id, seconds, sample, metric):
+    if not re.fullmatch(r'yandex:[0-9]+', track_id):
+        raise ValueError('--track must be yandex:<numeric ID>')
+    cache = Path(data_dir) / 'audio' / ('yandex_' + track_id.split(':')[1] + '.high')
+    import json
+    ranges = json.loads(cache.with_suffix('.high.map').read_text())
+    if (ranges['ranges'] != [[0, ranges['total']]]
+            or cache.stat().st_size != ranges['total']):
+        raise ValueError('Playback measurement requires a complete cached track')
+    child = subprocess.Popen([str(binary), 'play', track_id],
+                             env=dict(os.environ, EAGLE_DATA_DIR=str(data_dir), EAGLE_LOG='info'),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(2)  # Exclude opening the DB, decoder and output device.
+        if child.poll() is not None:
+            raise RuntimeError('Playback exited during warmup')
+        start = sample(child.pid)
+        before = time.monotonic()
+        time.sleep(seconds)
+        end = sample(child.pid)
+        elapsed = time.monotonic() - before
+        if child.poll() is not None:
+            raise RuntimeError('Track ended before the measurement finished; use fewer seconds')
+    finally:
+        child.terminate()
+        output, errors = child.communicate(timeout=10)
+    requests, response_bytes = network_stats(output)
+    if requests or response_bytes:
+        raise RuntimeError('Cached playback unexpectedly accessed the network')
+    path = Path('bench/results') / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.playback.csv')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['scenario', 'os', 'arch', 'track_id', 'duration_seconds',
+                         'cpu_percent_one_core', metric, 'http_requests', 'response_body_bytes',
+                         'package_idle_wakeups', 'interrupt_wakeups'])
+        writer.writerow(['playback', platform.system(), platform.machine(), track_id, elapsed,
+                         (end[0] - start[0]) / elapsed * 100, end[1], requests, response_bytes,
+                         *wakeup_deltas(start, end)])
+    print(path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=float, default=60)
-    parser.add_argument('--scenario', choices=['idle', 'info'], default='idle')
+    parser.add_argument('--scenario', choices=['idle', 'info', 'store', 'track', 'playback'], default='idle')
+    parser.add_argument('--data-dir', type=Path, help='existing cache directory for playback measurement')
+    parser.add_argument('--binary', type=Path, help='prebuilt CLI, e.g. a baseline build')
+    parser.add_argument('--track', help='yandex:<track ID>; uses the existing keyring token')
     args = parser.parse_args()
+    if args.scenario in ('track', 'playback') and not args.track:
+        parser.error('this scenario requires --track yandex:<ID>')
+    if args.scenario == 'playback' and not args.data_dir:
+        parser.error('--scenario playback requires --data-dir with a complete cached track')
     if not 0 < args.seconds <= 86400:
         parser.error('--seconds must be in (0, 86400]')
     system = platform.system()
     sample, metric = {'Linux': (linux_sample, 'pss_bytes'),
                       'Darwin': (mac_sample, 'phys_footprint_bytes'),
                       'Windows': (windows_sample, 'private_working_set_bytes')}[system]
-    subprocess.run(['cargo', 'build', '--release', '-p', 'eagle-cli'], check=True)
-    binary = Path('target/release/eagle-cli' + ('.exe' if system == 'Windows' else '')).resolve()
+    if args.binary:
+        binary = args.binary.resolve(strict=True)
+    else:
+        subprocess.run(['cargo', 'build', '--release', '--locked', '-p', 'eagle-cli'], check=True)
+        binary = Path('target/release/eagle-cli' + ('.exe' if system == 'Windows' else '')).resolve()
+    if args.scenario == 'playback':
+        measure_playback(binary, args.data_dir.resolve(), args.track, args.seconds, sample, metric)
+        return
     data = tempfile.TemporaryDirectory(prefix='eagle-bench-')
+    if args.scenario == 'track':
+        try:
+            measure_track(binary, data.name, args.track, sample, metric)
+        finally:
+            data.cleanup()
+        return
     env = dict(os.environ, EAGLE_DATA_DIR=data.name, EAGLE_LOG='info')
     child = subprocess.Popen([str(binary), '--bench-' + args.scenario], env=env, stderr=subprocess.DEVNULL)
     try:
+        if args.scenario == 'store':
+            deadline = time.monotonic() + 120
+            while not (Path(data.name) / 'bench-ready').exists():
+                if child.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError('Storage fixture did not become ready')
+                time.sleep(0.025)
         time.sleep(1.25)  # Let startup info flush before measuring idle.
         start = sample(child.pid)
         before = time.monotonic()
@@ -138,11 +297,12 @@ def main():
                 writer.writerows(rows)
         with output.open('w', newline='') as stream:
             writer = csv.writer(stream)
-            writer.writerow(['scenario', 'os', 'arch', 'duration_seconds', 'cpu_percent_one_core', metric, 'voluntary_switches_observed', 'binary_bytes', 'info_records_per_second'])
+            writer.writerow(['scenario', 'os', 'arch', 'duration_seconds', 'cpu_percent_one_core', metric, 'voluntary_switches_observed', 'binary_bytes', 'info_records_per_second', 'package_idle_wakeups', 'interrupt_wakeups'])
             writer.writerow([args.scenario, system, platform.machine(), elapsed,
                              (end[0] - start[0]) / elapsed * 100, end[1],
                              '' if end[2] is None else sum(row[3] for row in rows if row[3] != ''),
-                             binary.stat().st_size, 1 if args.scenario == 'info' else 0])
+                             binary.stat().st_size, 1 if args.scenario == 'info' else 0,
+                             *wakeup_deltas(start, end)])
         print(output)
     finally:
         child.terminate()

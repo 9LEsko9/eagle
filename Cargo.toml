@@ -8,7 +8,7 @@ members = ["crates/core", "crates/providers/yandex", "crates/providers/vk", "cra
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 license = "GPL-3.0-or-later"
 
@@ -26,3 +26,13 @@ strip = true
 inherits = "release"
 debug = 2
 strip = false
+
+# Keep MP3 decoding efficient while workspace code remains debuggable.
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.rodio]
+opt-level = 3
+
+[profile.dev.package.eagle-engine]
+opt-level = 3

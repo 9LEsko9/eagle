@@ -12,3 +12,4 @@ license = "GPL-3.0-or-later"
 [dependencies]
 thiserror.workspace = true
 log.workspace = true
+serde = { version = "1", features = ["derive"] }

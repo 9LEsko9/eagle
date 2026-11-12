@@ -1,0 +1,1 @@
+{"id":123,"title":"Fixture track","artists":[{"id":7,"name":"Fixture artist"}],"albums":[{"id":8}],"durationMs":1000,"available":true,"coverUri":"cdn.example.org/%%"}
