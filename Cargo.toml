@@ -14,7 +14,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 thiserror = "2"
-log = "0.4"
+log = { version = "0.4", features = ["std", "kv", "release_max_level_debug"] }
 
 [profile.release]
 lto = "fat"

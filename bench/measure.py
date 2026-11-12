@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import subprocess
 import time
+import tempfile
 
 
 def linux_sample(pid):
@@ -101,6 +102,7 @@ def windows_sample(pid):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=float, default=60)
+    parser.add_argument('--scenario', choices=['idle', 'info'], default='idle')
     args = parser.parse_args()
     if not 0 < args.seconds <= 86400:
         parser.error('--seconds must be in (0, 86400]')
@@ -110,9 +112,11 @@ def main():
                       'Windows': (windows_sample, 'private_working_set_bytes')}[system]
     subprocess.run(['cargo', 'build', '--release', '-p', 'eagle-cli'], check=True)
     binary = Path('target/release/eagle-cli' + ('.exe' if system == 'Windows' else '')).resolve()
-    child = subprocess.Popen([str(binary), '--bench-idle'])
+    data = tempfile.TemporaryDirectory(prefix='eagle-bench-')
+    env = dict(os.environ, EAGLE_DATA_DIR=data.name, EAGLE_LOG='info')
+    child = subprocess.Popen([str(binary), '--bench-' + args.scenario], env=env, stderr=subprocess.DEVNULL)
     try:
-        time.sleep(0.25)
+        time.sleep(1.25)  # Let startup info flush before measuring idle.
         start = sample(child.pid)
         before = time.monotonic()
         time.sleep(args.seconds)
@@ -123,6 +127,10 @@ def main():
         output = Path('bench/results') / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.csv')
         output.parent.mkdir(parents=True, exist_ok=True)
         rows = [] if end[2] is None else thread_deltas(start[2], end[2])
+        if args.scenario == 'idle' and system == 'Linux':
+            logger = [row for row in rows if row[2] == 'eg-log']
+            if len(logger) != 1 or logger[0][3] != 0 or logger[0][4] != 'full_window':
+                raise RuntimeError('Idle logger must have zero voluntary switches: ' + repr(logger))
         if end[2] is not None:
             with output.with_suffix('.threads.csv').open('w', newline='') as stream:
                 writer = csv.writer(stream)
@@ -130,14 +138,16 @@ def main():
                 writer.writerows(rows)
         with output.open('w', newline='') as stream:
             writer = csv.writer(stream)
-            writer.writerow(['scenario', 'os', 'arch', 'duration_seconds', 'cpu_percent_one_core', metric, 'voluntary_switches_observed'])
-            writer.writerow(['idle', system, platform.machine(), elapsed,
+            writer.writerow(['scenario', 'os', 'arch', 'duration_seconds', 'cpu_percent_one_core', metric, 'voluntary_switches_observed', 'binary_bytes', 'info_records_per_second'])
+            writer.writerow([args.scenario, system, platform.machine(), elapsed,
                              (end[0] - start[0]) / elapsed * 100, end[1],
-                             '' if end[2] is None else sum(row[3] for row in rows if row[3] != '')])
+                             '' if end[2] is None else sum(row[3] for row in rows if row[3] != ''),
+                             binary.stat().st_size, 1 if args.scenario == 'info' else 0])
         print(output)
     finally:
         child.terminate()
         child.wait(timeout=10)
+        data.cleanup()
 
 
 if __name__ == '__main__':
