@@ -1,0 +1,16 @@
+{
+  "sha256": "51ce489c847406413b01a213b1cb96c4b5a35751632c0484ef25381d042a787b",
+  "binary_bytes": 20752288,
+  "scenarios": [
+    {
+      "requested_renderer": "skia",
+      "primary_alive": true,
+      "secondary_exit_code": 0
+    },
+    {
+      "requested_renderer": "software",
+      "primary_alive": true,
+      "secondary_exit_code": 0
+    }
+  ]
+}

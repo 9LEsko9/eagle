@@ -1,17 +1,18 @@
 # Eagle
 
 Музыкальный плеер на Rust. Pre-alpha: CLI, локальные файлы, HTTP и Яндекс Музыка.
-Графический интерфейс и провайдер VK пока не реализованы.
+Десктопный интерфейс на Slint — в разработке. VK пока недоступен.
 
 ```sh
+cargo run -p eagle-desktop
 cargo run -p eagle-cli -- play song.flac
 cargo run -p eagle-cli -- yandex login
 cargo run -p eagle-cli -- play yandex:123
 ```
 
-Rust 1.89+. На Linux: `libasound2-dev`, `libdbus-1-dev`, `pkg-config`.
+Rust 1.92+. [Зависимости Linux](docs/development.md).
 
-- [CLI и кэш](docs/cli.md)
+- [Десктоп](docs/desktop.md) · [CLI и кэш](docs/cli.md)
 - [Движок, проверки и замеры](docs/engine.md)
 - [Разработка](docs/development.md) · [Логирование](docs/logging.md)
 
