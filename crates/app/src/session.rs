@@ -2059,6 +2059,15 @@ impl Worker {
                 | Command::Albums
                 | Command::Artists
         ) {
+            if !matches!(
+                &command,
+                Command::Search(_)
+                    | Command::SearchArtists(_)
+                    | Command::SearchAlbums(_)
+                    | Command::SearchPlaylists(_)
+            ) {
+                self.search_ui_id = None;
+            }
             self.view_generation += 1;
             self.covers.invalidate();
             if self.ui_attached
@@ -5738,6 +5747,84 @@ mod delta_tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn search_results_can_open_artist_album_and_playlist() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let root =
+            std::env::temp_dir().join(format!("eagle-search-navigation-{}", std::process::id()));
+        let mut track = fake_track("fakea", "1", "Song", "Artist", 1000);
+        track.album = Some("fakea:album".parse().unwrap());
+        let provider = Arc::new(FakeProvider::new("fakea").with_tracks(vec![track]));
+        let (tx, rx) = mpsc::channel();
+        let session = Session::start_with_providers(root.clone(), vec![provider], move |event| {
+            let _ = tx.send(event);
+        })
+        .unwrap();
+        let sender = session.sender();
+        sender
+            .send(Command::Login {
+                provider: "fakea".into(),
+                token: Token::new("test".into()),
+            })
+            .unwrap();
+        let receive = |predicate: &dyn Fn(&Event) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                if predicate(&event) {
+                    return;
+                }
+            }
+        };
+        receive(
+            &|event| matches!(event, Event::Providers(items) if items.iter().any(|p| p.id == "fakea" && p.signed_in)),
+        );
+        for (id, command, target) in [
+            (
+                1,
+                Command::Artist("fakea:artist-artist".parse().unwrap()),
+                "fakea:artist-artist",
+            ),
+            (
+                2,
+                Command::Album("fakea:album".parse().unwrap()),
+                "fakea:album",
+            ),
+        ] {
+            sender.send(Command::Open(View::Search)).unwrap();
+            sender
+                .send(Command::SearchUi {
+                    id,
+                    kind: 0,
+                    query: "Song".into(),
+                })
+                .unwrap();
+            receive(
+                &|event| matches!(event, Event::SearchResults { id: got, rows, .. } if *got == id && !rows.is_empty()),
+            );
+            sender.send(command).unwrap();
+            receive(&|event| matches!(event, Event::Header(header) if header.id == target));
+        }
+        sender.send(Command::Open(View::Search)).unwrap();
+        sender
+            .send(Command::SearchUi {
+                id: 3,
+                kind: 0,
+                query: "Song".into(),
+            })
+            .unwrap();
+        receive(
+            &|event| matches!(event, Event::SearchResults { id: 3, rows, .. } if !rows.is_empty()),
+        );
+        sender
+            .send(Command::Playlist("fakea:missing".parse().unwrap()))
+            .unwrap();
+        receive(&|event| matches!(event, Event::Error(_)));
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn cached_library_is_available_offline_and_shutdown_joins_workers() {
         let root = std::env::temp_dir().join(format!("eagle-session-{}", std::process::id()));

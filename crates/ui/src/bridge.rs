@@ -99,6 +99,7 @@ fn route(view: View) -> Route {
 struct Bridge {
     rows: Rc<VecModel<TrackItem>>,
     search_rows: RefCell<Vec<LibraryItem>>,
+    search_cards: RefCell<Vec<Card>>,
     search_id: Cell<u64>,
     cards: Rc<VecModel<CardItem>>,
     anchor: Arc<Mutex<Option<PositionAnchor>>>,
@@ -131,6 +132,24 @@ impl Bridge {
                 .collect::<Vec<_>>(),
         );
         self.refresh_rows(ui);
+        self.cards.set_vec(
+            self.search_cards
+                .borrow()
+                .iter()
+                .filter(|card| {
+                    provider.is_empty()
+                        || card.id.provider() == provider.as_str()
+                        || card
+                            .sources
+                            .iter()
+                            .any(|id| id.provider() == provider.as_str())
+                })
+                .cloned()
+                .map(card_item)
+                .collect::<Vec<_>>(),
+        );
+        let (first, count) = self.card_window.get();
+        self.update_cards(first, count, true);
     }
     fn image(&self, cover: &Arc<eagle_palette::Cover>) -> slint::Image {
         let key = Arc::as_ptr(cover) as usize;
@@ -668,10 +687,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 return;
             }
             *bridge.search_rows.borrow_mut() = rows;
+            *bridge.search_cards.borrow_mut() = cards;
             bridge.filter_search(ui);
-            bridge
-                .cards
-                .set_vec(cards.into_iter().map(card_item).collect::<Vec<_>>());
             ui.global::<Ui>().set_search_pending(false);
         }
         Event::Library(delta) => {
@@ -1079,23 +1096,20 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     let tx = sender.clone();
     let weak = ui.as_weak();
     actions.on_play_row(move |index| {
-        if let Ok(mut index) = usize::try_from(index) {
+        if let Ok(index) = usize::try_from(index) {
             if let Some(ui) = weak.upgrade()
                 && ui.global::<Ui>().get_route() == Route::Search
             {
                 with_bridge(|bridge| {
                     if let Some(row) = bridge.rows.row_data(index)
-                        && let Some(original) = bridge
-                            .search_rows
-                            .borrow()
-                            .iter()
-                            .position(|item| item.track.id.to_string() == row.id.as_str())
+                        && let Ok(id) = row.id.parse()
                     {
-                        index = original;
+                        let _ = tx.send(Command::Play(id));
                     }
                 });
+            } else {
+                let _ = tx.send(Command::PlayRow(index));
             }
-            let _ = tx.send(Command::PlayRow(index));
         }
     });
     let tx = sender.clone();
@@ -1192,6 +1206,7 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
                 bridge.search_id.set(bridge.search_id.get().wrapping_add(1));
                 if text.trim().is_empty() {
                     bridge.search_rows.borrow_mut().clear();
+                    bridge.search_cards.borrow_mut().clear();
                     bridge.rows.set_vec(Vec::new());
                     bridge.cards.set_vec(Vec::new());
                 }
@@ -1338,6 +1353,7 @@ pub(super) fn initialize(
         *bridge.borrow_mut() = Some(Rc::new(Bridge {
             rows,
             search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
             search_id: Cell::new(0),
             cards,
             anchor,
@@ -1416,6 +1432,7 @@ pub(super) mod tests {
         let bridge = Bridge {
             rows: Rc::new(VecModel::default()),
             search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
             search_id: Cell::new(1),
             cards: Rc::new(VecModel::default()),
             anchor: Arc::new(Mutex::new(None)),
@@ -1479,6 +1496,97 @@ pub(super) mod tests {
         assert_eq!(bridge.rows.row_count(), 2);
         assert_eq!(bridge.rows.row_data(0).unwrap().id.as_str(), "fakea:a");
         assert_eq!(bridge.rows.row_data(1).unwrap().id.as_str(), "fakeb:c");
+        let card = |id: &str, sources: Vec<&str>| Card {
+            id: id.parse().unwrap(),
+            key: format!("a:{id}"),
+            title: id.into(),
+            subtitle: String::new(),
+            cover: None,
+            round: false,
+            sources: sources.into_iter().map(|id| id.parse().unwrap()).collect(),
+        };
+        apply(
+            &ui,
+            Event::SearchResults {
+                id: 2,
+                rows: vec![],
+                cards: vec![
+                    card("fakea:a", vec!["fakeb:a"]),
+                    card("fakea:b", vec![]),
+                    card("fakeb:c", vec![]),
+                ],
+            },
+            &bridge,
+        );
+        assert_eq!(bridge.cards.row_count(), 2);
+        assert_eq!(bridge.cards.row_data(0).unwrap().id.as_str(), "fakea:a");
+        assert_eq!(bridge.cards.row_data(1).unwrap().id.as_str(), "fakeb:c");
+        ui.global::<Ui>().set_search_provider("".into());
+        bridge.filter_search(&ui);
+        assert_eq!(bridge.cards.row_count(), 3);
+    }
+    #[test]
+    fn search_old_visible_row_never_plays_new_row_before_reply_delivery() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root =
+            std::env::temp_dir().join(format!("eagle-search-play-race-{}", std::process::id()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session = eagle_app::session::Session::start_with_providers(
+            root.clone(),
+            vec![eagle_app::fixture::provider()],
+            move |event| {
+                let _ = tx.send(event);
+            },
+        )
+        .unwrap();
+        let sender = session.sender();
+        let ui = DesktopWindow::new().unwrap();
+        ui.global::<Ui>().set_route(Route::Search);
+        let rows = Rc::new(VecModel::from(vec![TrackItem {
+            id: "fixture:999".into(),
+            ..Default::default()
+        }]));
+        initialize(
+            rows,
+            Rc::new(VecModel::default()),
+            Arc::new(Mutex::new(None)),
+            sender.clone(),
+        );
+        bind(&ui, sender.clone());
+        sender.send(Command::Open(View::Search)).unwrap();
+        sender
+            .send(Command::SearchUi {
+                id: 1,
+                kind: 0,
+                query: "new".into(),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if matches!(rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap(),
+                Event::SearchResults { id: 1, rows, .. } if !rows.is_empty())
+            {
+                break;
+            }
+        }
+        // The worker has new rows but the UI has not delivered that event yet.
+        ui.global::<Actions>().invoke_play_row(0);
+        loop {
+            match rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap()
+            {
+                Event::Error(message) => {
+                    assert!(message.contains("трек не найден"), "{message}");
+                    break;
+                }
+                Event::Player(player) if player.track.is_some() => panic!("played another row"),
+                _ => {}
+            }
+        }
+        clear();
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
     }
     pub(crate) fn structural_changes_and_cover_toggle_release_artwork() {
         let ui = DesktopWindow::new().unwrap();
@@ -1488,6 +1596,7 @@ pub(super) mod tests {
         let bridge = Bridge {
             rows: rows.clone(),
             search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
             search_id: Cell::new(0),
             cards: Rc::new(VecModel::default()),
             anchor: Arc::new(Mutex::new(None)),
