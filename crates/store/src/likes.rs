@@ -127,7 +127,7 @@ impl Store {
                 let provider = provider_of(&member);
                 if targets.iter().any(|t| t == provider) {
                     tx.execute(
-                        "INSERT OR REPLACE INTO like_outbox VALUES(?1,?2,?3,'pending',?4,0)",
+                        "INSERT OR REPLACE INTO like_outbox VALUES(?1,?2,?3,'pending',?4,0,0)",
                         params![provider, member, liked, hlc],
                     )?;
                 }
@@ -219,7 +219,7 @@ impl Store {
             };
             for (track, at) in &candidates {
                 tx.execute(
-                    "INSERT OR IGNORE INTO like_outbox VALUES(?1,?2,1,'pending',?3,0)",
+                    "INSERT OR IGNORE INTO like_outbox VALUES(?1,?2,1,'pending',?3,0,0)",
                     params![provider, track, at],
                 )?;
             }
@@ -449,7 +449,7 @@ mod tests {
             .like(&id("fakea:1"), true, &["fakea".to_owned()])
             .unwrap();
         let job = store.like_jobs("fakea", 0).unwrap().remove(0);
-        assert!(store.defer_like_job(&job, 100).unwrap());
+        assert_eq!(store.defer_like_job_backoff(&job, 70).unwrap(), Some(100));
         assert!(store.like_jobs("fakea", 99).unwrap().is_empty());
         assert_eq!(store.like_jobs("fakea", 100).unwrap().len(), 1);
         assert!(store.mark_like_job_uncertain(&job).unwrap());
@@ -857,7 +857,7 @@ mod tests {
             .execute_batch("DROP TABLE IF EXISTS likes_unresolved; PRAGMA user_version=12;")
             .unwrap();
         let store = Store::open(&dir).unwrap();
-        assert_eq!(user_version(&store), 13);
+        assert_eq!(user_version(&store), 14);
         assert!(table_exists(&store, "likes_unresolved"));
         assert_eq!(liked_ids(&store), ["yandex:1"]);
         assert_eq!(store.unresolved_likes_count().unwrap(), 0);

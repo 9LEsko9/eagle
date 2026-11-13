@@ -60,6 +60,7 @@ impl Downloads {
         net: Arc<Client>,
         providers: Arc<Providers>,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
+        on_online: Box<dyn Fn() + Send + Sync>,
     ) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let replies = tx.clone();
@@ -141,6 +142,8 @@ impl Downloads {
                             }
                         }
                         Request::SystemNetwork(policy) => {
+                            let came_online = policy.online == eagle_net::policy::NetworkStatus::Yes
+                                && network_policy.online != eagle_net::policy::NetworkStatus::Yes;
                             network_policy.online = policy.online;
                             network_policy.metered = policy.metered;
                             emit(Event::NetworkPolicy(network_policy));
@@ -149,6 +152,9 @@ impl Downloads {
                                     if let Err(error) = store.control_download(&account, a.job.id, DownloadState::Queued) { emit(Event::Error(error.to_string())); }
                                     a.attempt.cancel();
                                 }
+                            }
+                            if came_online {
+                                on_online();
                             }
                         }
                         Request::Wake => {}
@@ -1021,6 +1027,7 @@ mod tests {
             Arc::new(move |event| {
                 let _ = tx.send(event);
             }),
+            Box::new(|| {}),
         )
         .unwrap();
         service.network_policy(NetworkPolicy {
@@ -1116,6 +1123,7 @@ mod tests {
             Arc::new(move |event| {
                 let _ = tx.send(event);
             }),
+            Box::new(|| {}),
         )
         .unwrap();
         service.account("a".into());

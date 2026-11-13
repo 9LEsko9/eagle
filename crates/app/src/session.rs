@@ -29,7 +29,18 @@ const RESET_THRESHOLD: usize = 32;
 fn likes_backfill_key(provider: &str) -> String {
     format!("likes_backfill:{provider}")
 }
-const LIKE_RETRY_SECS: i64 = 300;
+/// Likes sent per flush. The rest stay queued so that user requests run between batches.
+const LIKE_BATCH: usize = 20;
+/// Seconds since the epoch, read by likes retries. Tests replace it.
+type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+fn wall_clock() -> Clock {
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    })
+}
 
 /// The uid of the account owning this installation's rights, or empty when none is stored.
 fn stored_account(store: &Store, providers: &Providers) -> Result<String> {
@@ -528,6 +539,8 @@ enum Message {
     Bitrate(u64, u64, Option<u32>),
     /// The copy of the track that was really chosen for playback.
     Source(u64, u64, TrackId),
+    /// The network became reachable: deferred likes are sent now.
+    NetworkOnline,
 }
 #[derive(Clone)]
 pub struct CommandSender(mpsc::Sender<Message>);
@@ -577,9 +590,15 @@ impl Session {
         let worker = thread::Builder::new()
             .name("eg-app".into())
             .spawn(move || {
-                if let Err(e) =
-                    Worker::new_with_providers(root, emit.clone(), tx, providers, tokens)
-                        .and_then(|w| w.run(rx))
+                if let Err(e) = Worker::new_with_providers(
+                    root,
+                    emit.clone(),
+                    tx,
+                    providers,
+                    tokens,
+                    wall_clock(),
+                )
+                .and_then(|w| w.run(rx))
                 {
                     (emit)(Event::Error(e.to_string()));
                 }
@@ -658,6 +677,9 @@ struct Worker {
     last_position: Option<PositionAnchor>,
     player: Arc<PlayerState>,
     emit: Arc<dyn Fn(Event) + Send + Sync>,
+    clock: Clock,
+    /// When the earliest deferred like is due, if any is pending in the future.
+    like_retry_at: Option<i64>,
 }
 impl Worker {
     #[cfg(test)]
@@ -672,6 +694,7 @@ impl Worker {
             tx,
             None,
             Arc::new(crate::tokens::MemoryTokens::default()),
+            wall_clock(),
         )
     }
     fn new_with_providers(
@@ -680,8 +703,9 @@ impl Worker {
         tx: mpsc::Sender<Message>,
         providers: Option<Vec<Arc<dyn Provider>>>,
         tokens: Arc<dyn crate::tokens::TokenStore>,
+        clock: Clock,
     ) -> Result<Self> {
-        Self::new_with_handles(root, emit, tx, providers, tokens, None)
+        Self::new_with_handles(root, emit, tx, providers, tokens, None, clock)
     }
     fn new_with_handles(
         root: PathBuf,
@@ -690,6 +714,7 @@ impl Worker {
         providers: Option<Vec<Arc<dyn Provider>>>,
         tokens: Arc<dyn crate::tokens::TokenStore>,
         handles: Option<(Arc<Store>, Arc<Cache>)>,
+        clock: Clock,
     ) -> Result<Self> {
         let (store, cache) = if let Some(handles) = handles {
             handles
@@ -732,6 +757,8 @@ impl Worker {
             net: net.clone(),
             store: store.clone(),
             providers: providers.clone(),
+            likes_more: std::cell::Cell::new(false),
+            clock: clock.clone(),
         };
         let replies = tx.clone();
         let catalog_worker = thread::Builder::new()
@@ -740,6 +767,7 @@ impl Worker {
                 services.run(requests, replies);
             })?;
         let covers = crate::covers::Covers::start(root.clone(), net.clone(), emit.clone())?;
+        let online = tx.clone();
         let downloads = crate::downloads::Downloads::start(
             root.clone(),
             store.clone(),
@@ -747,6 +775,9 @@ impl Worker {
             net.clone(),
             providers.clone(),
             emit.clone(),
+            Box::new(move || {
+                let _ = online.send(Message::NetworkOnline);
+            }),
         )?;
         let account = stored_account(&store, &providers)?;
         downloads.account(account.clone());
@@ -805,6 +836,8 @@ impl Worker {
             last_position: None,
             player: Arc::default(),
             emit,
+            clock,
+            like_retry_at: None,
         };
         worker.restore_playback()?;
         Ok(worker)
@@ -1053,25 +1086,29 @@ impl Worker {
             self.request(Command::Library)?;
             (self.emit)(Event::Providers(self.providers.statuses()));
             self.background(Command::Restore)?;
+            self.refresh_like_deadline();
             loop {
-                let message = if self.player.status == State::Playing {
-                    let remaining =
-                        Duration::from_secs(10).saturating_sub(self.last_checkpoint.elapsed());
-                    match rx.recv_timeout(remaining) {
+                if self.like_due() {
+                    self.send_flush_likes(false);
+                }
+                let message = match self.timer_wait() {
+                    None => match rx.recv() {
+                        Ok(message) => message,
+                        Err(_) => break,
+                    },
+                    Some(wait) => match rx.recv_timeout(wait) {
                         Ok(message) => message,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if let Err(error) = self.checkpoint() {
+                            if self.player.status == State::Playing
+                                && self.last_checkpoint.elapsed() >= Duration::from_secs(10)
+                                && let Err(error) = self.checkpoint()
+                            {
                                 (self.emit)(Event::Error(error.to_string()));
                             }
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                } else {
-                    match rx.recv() {
-                        Ok(message) => message,
-                        Err(_) => break,
-                    }
+                    },
                 };
                 match message {
                     Message::Command(Command::RelocateStorage {
@@ -1104,6 +1141,7 @@ impl Worker {
                         self.engine_event(event)
                     }
                     Message::Engine(_, _) => {}
+                    Message::NetworkOnline => self.send_flush_likes(true),
                     Message::Bitrate(generation, id, bitrate) => {
                         self.apply_bitrate(generation, id, bitrate);
                     }
@@ -1112,6 +1150,7 @@ impl Worker {
                     }
                     Message::Catalog(generation, reply) => {
                         let reply = *reply;
+                        self.refresh_like_deadline();
                         if generation != 0
                             && generation != self.view_generation
                             && !matches!(
@@ -1232,6 +1271,7 @@ impl Worker {
                                 (self.emit)(Event::Collections(collections))
                             }
                             Ok(CatalogReply::Unchanged) => {}
+                            Ok(CatalogReply::LikesPending) => self.send_flush_likes(false),
                             Ok(CatalogReply::Cover(target, id, cover, generation)) => {
                                 if self.ui_attached && generation == self.cover_generation {
                                     (self.emit)(Event::Cover(target, id, cover));
@@ -1313,6 +1353,7 @@ impl Worker {
         bootstrap: PathBuf,
         lease: Option<Arc<eagle_store::relocation::StorageLease>>,
     ) -> Result<Self> {
+        let clock = self.clock.clone();
         (self.emit)(Event::StorageMoving(true));
         self.stop_engine();
         self.catalog.take();
@@ -1369,6 +1410,7 @@ impl Worker {
                     Some(providers.all().to_vec()),
                     providers.tokens().clone(),
                     Some((store, cache)),
+                    clock.clone(),
                 )?
             }
             crate::storage::MoveOutcome::Reopen { root, error } => {
@@ -1381,6 +1423,7 @@ impl Worker {
                     tx,
                     Some(providers.all().to_vec()),
                     providers.tokens().clone(),
+                    clock,
                 )?
             }
         };
@@ -1855,6 +1898,39 @@ impl Worker {
         }
     }
     /// Catalog work that is not tied to the visible screen and never shows a spinner or error.
+    /// Asks the catalog to send the due likes. Until its reply, no like deadline is armed.
+    fn send_flush_likes(&mut self, online: bool) {
+        self.like_retry_at = None;
+        if let Some(catalog) = &self.catalog {
+            let _ = catalog.send(CatalogRequest::FlushLikes { online });
+        }
+    }
+    /// Reads the earliest future like retry from the store. Called after every catalog reply,
+    /// which is the only place where likes are sent or deferred.
+    fn refresh_like_deadline(&mut self) {
+        let now = (self.clock)();
+        self.like_retry_at = match self.store.next_like_retry_at(now) {
+            Ok(at) => at,
+            Err(error) => {
+                log::warn!(error = error.to_string().as_str(); "like retry time unreadable");
+                None
+            }
+        };
+    }
+    fn like_due(&self) -> bool {
+        self.like_retry_at.is_some_and(|at| (self.clock)() >= at)
+    }
+    fn like_wait(&self) -> Option<Duration> {
+        self.like_retry_at
+            .map(|at| Duration::from_secs((at - (self.clock)()).max(0) as u64))
+    }
+    /// How long the loop may block: until the playback checkpoint or the next like retry.
+    /// `None` when neither exists, so an idle worker waits without a timer.
+    fn timer_wait(&self) -> Option<Duration> {
+        let checkpoint = (self.player.status == State::Playing)
+            .then(|| Duration::from_secs(10).saturating_sub(self.last_checkpoint.elapsed()));
+        [checkpoint, self.like_wait()].into_iter().flatten().min()
+    }
     fn background(&mut self, command: Command) -> Result<()> {
         self.catalog
             .as_ref()
@@ -2886,6 +2962,10 @@ enum CatalogRequest {
     RefreshPlaylist(u64, TrackId),
     Cover(Arc<Track>, CoverTarget, u64, u64),
     ClearCovers,
+    /// Sends the due likes; `online` also makes the deferred ones due (the network came back).
+    FlushLikes {
+        online: bool,
+    },
 }
 enum CatalogReply {
     RadioResult(String, bool, std::result::Result<RadioSession, RadioError>),
@@ -2920,6 +3000,8 @@ enum CatalogReply {
     Account(bool),
     /// Sign-in state changed without touching the account.
     Providers,
+    /// More due likes are waiting: the worker queues another `FlushLikes` behind new requests.
+    LikesPending,
 }
 struct Catalog {
     covers: RefCell<VecDeque<(TrackId, Arc<eagle_palette::Cover>)>>,
@@ -2930,6 +3012,9 @@ struct Catalog {
     net: Arc<eagle_net::Client>,
     store: Arc<Store>,
     providers: Arc<Providers>,
+    /// Set when a like flush stopped at a full batch with due likes left.
+    likes_more: std::cell::Cell<bool>,
+    clock: Clock,
 }
 impl Catalog {
     /// The provider that owns the track or collection `id`.
@@ -2982,6 +3067,7 @@ impl Catalog {
                             CatalogRequest::EditPlaylist(generation, _, _) => *generation,
                             CatalogRequest::RefreshPlaylist(generation, _) => *generation,
                             CatalogRequest::Cover(_, _, generation, _) => *generation,
+                            CatalogRequest::FlushLikes { .. } => 0,
                             CatalogRequest::ClearCovers => unreachable!(),
                         };
                         let mutation = matches!(
@@ -3008,6 +3094,7 @@ impl Catalog {
                         if replies
                             .send(Message::Catalog(generation, Box::new(reply)))
                             .is_err()
+                            || !self.report_likes_pending(&replies)
                         {
                             break;
                         }
@@ -3032,8 +3119,22 @@ impl Catalog {
                         sync = None;
                     }
                 }
+                if !self.report_likes_pending(&replies) {
+                    break;
+                }
             }
         }
+    }
+
+    /// Tells the worker that another like batch is due. False when the worker has gone.
+    fn report_likes_pending(&self, replies: &mpsc::Sender<Message>) -> bool {
+        !self.likes_more.replace(false)
+            || replies
+                .send(Message::Catalog(
+                    0,
+                    Box::new(Ok(CatalogReply::LikesPending)),
+                ))
+                .is_ok()
     }
 
     /// Fetches the metadata of the provider's likes that are stored without a track. Each id is
@@ -3304,6 +3405,13 @@ impl Catalog {
                 self.covers.borrow_mut().clear();
                 Ok(CatalogReply::Unchanged)
             }
+            CatalogRequest::FlushLikes { online } => {
+                if online && let Err(error) = self.store.wake_like_jobs() {
+                    log::warn!(error = error.to_string().as_str(); "like wake failed");
+                }
+                self.flush_likes();
+                Ok(CatalogReply::Unchanged)
+            }
             CatalogRequest::Command(_, command) => self.command(command),
             CatalogRequest::Cover(track, target, _, cover_generation) => {
                 {
@@ -3403,13 +3511,12 @@ impl Catalog {
             },
         }
     }
-    /// Sends queued likes to their providers. A failed attempt stays queued unless its outcome is
-    /// unknown (never resent by itself) or the provider rejected it for good.
+    /// Sends up to `LIKE_BATCH` due likes. A network or rate-limit failure defers the job with a
+    /// growing backoff and stops this provider; a sign-in failure stops it without a mark. A full
+    /// batch with due likes left sets `likes_more`.
     fn flush_likes(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = (self.clock)();
+        let mut sent = 0;
         for provider in self.providers.with_capability(|c| c.likes) {
             let provider_id = provider.info().id;
             let jobs = match self.store.like_jobs(provider_id, now) {
@@ -3420,30 +3527,38 @@ impl Catalog {
                 }
             };
             for job in jobs {
-                let sent = match job.track.parse::<TrackId>() {
+                if sent == LIKE_BATCH {
+                    self.likes_more.set(true);
+                    return;
+                }
+                let attempt = match job.track.parse::<TrackId>() {
                     Ok(track) => provider.set_liked(&track, job.liked),
                     Err(_) => Err(eagle_core::ProviderError::InvalidId),
                 };
-                let recorded = match sent {
-                    Ok(()) => self.store.finish_like_job(&job),
+                let recorded = match attempt {
+                    Ok(()) => self.store.finish_like_job(&job).map(|_| ()),
                     Err(eagle_core::ProviderError::Uncertain) => {
-                        self.store.mark_like_job_uncertain(&job)
+                        self.store.mark_like_job_uncertain(&job).map(|_| ())
                     }
-                    Err(eagle_core::ProviderError::RateLimited) => {
-                        let _ = self.store.defer_like_job(&job, now + LIKE_RETRY_SECS);
+                    Err(
+                        eagle_core::ProviderError::Network | eagle_core::ProviderError::RateLimited,
+                    ) => {
+                        log::debug!(provider = provider_id, track_id = job.track.as_str(); "like deferred");
+                        if let Err(error) = self.store.defer_like_job_backoff(&job, now) {
+                            log::warn!(provider = provider_id, error = error.to_string().as_str(); "like deferral failed");
+                        }
                         break;
                     }
-                    Err(eagle_core::ProviderError::Network | eagle_core::ProviderError::Auth) => {
-                        break;
-                    }
+                    Err(eagle_core::ProviderError::Auth) => break,
                     Err(error) => {
                         log::warn!(provider = provider_id, track_id = job.track.as_str(), error = error.to_string().as_str(); "like rejected");
-                        self.store.finish_like_job(&job)
+                        self.store.finish_like_job(&job).map(|_| ())
                     }
                 };
                 if let Err(error) = recorded {
                     log::warn!(provider = provider_id, error = error.to_string().as_str(); "like queue update failed");
                 }
+                sent += 1;
             }
         }
     }
@@ -5919,6 +6034,8 @@ mod sync_tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         Catalog {
+            likes_more: std::cell::Cell::new(false),
+            clock: wall_clock(),
             covers: RefCell::new(VecDeque::new()),
             last_album: RefCell::new(None),
             last_artist: RefCell::new(None),
@@ -6546,9 +6663,15 @@ mod sync_tests {
         let (_, tokens, fakea, fakeb) = token_providers();
         let emit: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|_| {});
         let (tx, _) = mpsc::channel();
-        let worker =
-            Worker::new_with_providers(root.clone(), emit, tx, Some(vec![fakea, fakeb]), tokens)
-                .unwrap();
+        let worker = Worker::new_with_providers(
+            root.clone(),
+            emit,
+            tx,
+            Some(vec![fakea, fakeb]),
+            tokens,
+            wall_clock(),
+        )
+        .unwrap();
         let status = worker.providers.statuses();
         assert_eq!(status.len(), 2);
         assert!(status.iter().all(|p| !p.signed_in));
@@ -6584,6 +6707,7 @@ mod sync_tests {
             tx,
             Some(vec![fakea.clone(), fakeb.clone()]),
             tokens.clone(),
+            wall_clock(),
         )
         .unwrap();
         for (provider, token) in [(&fakea, "a"), (&fakeb, "b")] {
@@ -6895,7 +7019,10 @@ mod sync_tests {
         assert_eq!(fakeb.set_liked_calls().len(), 1);
         assert_eq!(pending_likes(&c, "fakea"), 1);
         fakea.clear_failure();
-        c.flush_likes();
+        // The failed attempt backs off, so a plain flush does not resend it before its retry
+        // time; the network coming back does.
+        c.request(CatalogRequest::FlushLikes { online: true })
+            .unwrap();
         assert_eq!(pending_likes(&c, "fakea"), 0);
         assert_eq!(fakea.set_liked_calls().len(), 1);
     }
@@ -6938,5 +7065,195 @@ mod sync_tests {
             .unwrap();
         assert!(tokens.load("fakea").unwrap().is_none());
         assert_eq!(saved(&worker), ["fakea:1", "fakeb:2"]);
+    }
+}
+
+#[cfg(test)]
+mod like_delivery_tests {
+    use super::*;
+    use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    fn id(value: &str) -> TrackId {
+        value.parse().unwrap()
+    }
+
+    fn catalog_for(providers: Arc<Providers>) -> Catalog {
+        let root = std::env::temp_dir().join(format!("eagle-like-catalog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Catalog {
+            covers: RefCell::new(VecDeque::new()),
+            last_album: RefCell::new(None),
+            last_artist: RefCell::new(None),
+            root: root.clone(),
+            net: Arc::new(eagle_net::Client::new().unwrap()),
+            store: Arc::new(Store::open(&root).unwrap()),
+            providers,
+            likes_more: std::cell::Cell::new(false),
+            clock: wall_clock(),
+        }
+    }
+
+    fn song(n: u32) -> Track {
+        fake_track("fake", &n.to_string(), "Song", "Artist", 1000)
+    }
+
+    /// A worker whose only provider is `fake` (signed in) and whose clock the test moves.
+    struct Harness {
+        worker: Worker,
+        tx: mpsc::Sender<Message>,
+        rx: mpsc::Receiver<Message>,
+        now: Arc<AtomicI64>,
+    }
+
+    fn harness(name: &str, fake: &Arc<FakeProvider>) -> Harness {
+        let root =
+            std::env::temp_dir().join(format!("eagle-like-delivery-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let now = Arc::new(AtomicI64::new(1_000));
+        let clock_now = now.clone();
+        let clock: Clock = Arc::new(move || clock_now.load(Ordering::SeqCst));
+        let (tx, rx) = mpsc::channel();
+        let providers: Vec<Arc<dyn Provider>> = vec![fake.clone()];
+        let worker = Worker::new_with_providers(
+            root,
+            Arc::new(|_| {}),
+            tx.clone(),
+            Some(providers),
+            Arc::new(crate::tokens::MemoryTokens::default()),
+            clock,
+        )
+        .unwrap();
+        worker
+            .providers
+            .sign_in(fake.as_ref(), Token::new("t".into()))
+            .unwrap();
+        Harness {
+            worker,
+            tx,
+            rx,
+            now,
+        }
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !done() {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A signed-in, liked track whose first delivery fails with a network error.
+    fn offline_like(name: &str) -> (Harness, Arc<FakeProvider>) {
+        let fake = Arc::new(
+            FakeProvider::new("fake")
+                .with_tracks(vec![song(1)])
+                .fail_with(|| ProviderError::Network),
+        );
+        let h = harness(name, &fake);
+        h.worker.store.put_tracks(&[song(1)]).unwrap();
+        (h, fake)
+    }
+
+    #[test]
+    fn like_made_offline_is_delivered_after_the_retry_deadline() {
+        let (h, fake) = offline_like("deadline");
+        let store = h.worker.store.clone();
+        let (tx, now) = (h.tx.clone(), h.now.clone());
+        let worker = std::thread::spawn(move || h.worker.run(h.rx).map_err(|e| e.to_string()));
+        tx.send(Message::Command(Command::Like(id("fake:1"))))
+            .unwrap();
+        wait_until(|| store.next_like_retry_at(1_000).unwrap().is_some());
+        assert!(fake.set_liked_calls().is_empty());
+        // The provider is back and the backoff has passed: any message wakes the worker, which
+        // sends the due like without a new command.
+        fake.clear_failure();
+        now.store(1_000 + 3_600, Ordering::SeqCst);
+        tx.send(Message::Engine(
+            u64::MAX,
+            eagle_engine::Event::StateChanged(State::Idle),
+        ))
+        .unwrap();
+        wait_until(|| !fake.set_liked_calls().is_empty());
+        assert_eq!(fake.set_liked_calls(), [(id("fake:1"), true)]);
+        tx.send(Message::Command(Command::Shutdown)).unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn network_coming_back_flushes_pending_likes() {
+        let (h, fake) = offline_like("online");
+        let h_store = h.worker.store.clone();
+        let (tx, now) = (h.tx.clone(), h.now.clone());
+        let worker = std::thread::spawn(move || h.worker.run(h.rx).map_err(|e| e.to_string()));
+        tx.send(Message::Command(Command::Like(id("fake:1"))))
+            .unwrap();
+        wait_until(|| h_store.next_like_retry_at(1_000).unwrap().is_some());
+        // The clock has not moved: the network returning alone sends the like.
+        fake.clear_failure();
+        tx.send(Message::NetworkOnline).unwrap();
+        wait_until(|| !fake.set_liked_calls().is_empty());
+        assert_eq!(now.load(Ordering::SeqCst), 1_000);
+        assert_eq!(fake.set_liked_calls(), [(id("fake:1"), true)]);
+        tx.send(Message::Command(Command::Shutdown)).unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn search_is_answered_between_like_batches() {
+        let tracks: Vec<Track> = (1..=45).map(song).collect();
+        let fake = Arc::new(FakeProvider::new("fake").with_tracks(tracks.clone()));
+        let providers = Arc::new(Providers::new(vec![fake.clone() as Arc<dyn Provider>], &[]));
+        providers.set_account(
+            fake.info().id,
+            Some(fake.login(Token::new("t".into())).unwrap()),
+        );
+        let c = catalog_for(providers);
+        c.store.put_tracks(&tracks).unwrap();
+        for track in &tracks {
+            c.store.like(&track.id, true, &["fake".to_owned()]).unwrap();
+        }
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let catalog = std::thread::spawn(move || c.run(rx, reply_tx));
+        tx.send(CatalogRequest::FlushLikes { online: false })
+            .unwrap();
+        tx.send(CatalogRequest::Command(0, Command::Search("x".into())))
+            .unwrap();
+        // Like the worker: every `LikesPending` queues the next batch behind what arrived since.
+        let mut answered = false;
+        loop {
+            let Message::Catalog(_, reply) = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+            else {
+                continue;
+            };
+            match *reply {
+                Ok(CatalogReply::LikesPending) => {
+                    tx.send(CatalogRequest::FlushLikes { online: false })
+                        .unwrap();
+                }
+                Ok(CatalogReply::Tracks(..)) => {
+                    answered = true;
+                    // The search came before the third batch was even queued.
+                    assert!(fake.set_liked_calls().len() <= 2 * LIKE_BATCH);
+                }
+                _ => {}
+            }
+            if answered && fake.set_liked_calls().len() == 45 {
+                break;
+            }
+        }
+        drop(tx);
+        catalog.join().unwrap();
+    }
+
+    #[test]
+    fn idle_worker_has_no_like_timer() {
+        let fake = Arc::new(FakeProvider::new("fake"));
+        let mut h = harness("idle", &fake);
+        h.worker.refresh_like_deadline();
+        assert_eq!(h.worker.like_wait(), None);
+        assert!(!h.worker.like_due());
     }
 }

@@ -66,7 +66,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 13 {
+    if version > 14 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -152,6 +152,23 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
             CREATE TABLE IF NOT EXISTS likes_unresolved(track TEXT PRIMARY KEY, at INTEGER NOT NULL);
             PRAGMA user_version=13; COMMIT;",
         )?;
+    }
+    if version < 14 {
+        // Failed like deliveries count their attempts for the retry backoff. The column check
+        // keeps the step idempotent for a database whose version was rewound by hand.
+        let has_attempts: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('like_outbox') WHERE name='attempts')",
+            [],
+            |r| r.get(0),
+        )?;
+        let add = if has_attempts {
+            ""
+        } else {
+            "ALTER TABLE like_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;"
+        };
+        c.execute_batch(&format!(
+            "BEGIN IMMEDIATE; {add} PRAGMA user_version=14; COMMIT;"
+        ))?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
