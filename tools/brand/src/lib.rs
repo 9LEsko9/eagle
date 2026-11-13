@@ -5,3 +5,4 @@
 
 pub mod palette;
 pub mod render;
+pub mod sources;
