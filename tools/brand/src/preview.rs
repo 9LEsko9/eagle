@@ -198,6 +198,7 @@ fn draw_trays(src: &Path, sheet: &mut Pixmap) -> Result<()> {
 /// with the head and eye inverted. This affects the preview only.
 fn draw_marks(src: &Path, sheet: &mut Pixmap) -> Result<()> {
     let svg = load(src, Source::Mark)?;
+    // Simulated dark variant: mark.svg has none, so this exists only in the preview.
     let inverted = invert_mark(&svg);
     let mark = |size| render_svg(&svg, size);
     let inverted_mark = |size| render_svg(&inverted, size);

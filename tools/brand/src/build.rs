@@ -4,7 +4,7 @@
 //! Writes the desktop, tray, mobile and web assets.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use resvg::tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
@@ -91,8 +91,9 @@ fn mkdir(dir: &Path) -> Result<()> {
 /// Refuses to run when `out` is a dangerous target (see `check_out`).
 pub fn build_all(src: &Path, out: &Path) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
-    check_out(src, out, &cwd)?;
-    if out.exists() {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    check_out(src, out, &cwd, home.as_deref())?;
+    if fs::symlink_metadata(out).is_ok() {
         fs::remove_dir_all(out).with_context(|| format!("failed to clear {}", out.display()))?;
     }
     mkdir(out)?;
@@ -106,18 +107,30 @@ pub fn build_all(src: &Path, out: &Path) -> Result<()> {
 
 /// Rejects an `out` directory that `build_all` must never clear.
 ///
-/// Relative paths are taken from `cwd`. Refused: an empty path, the filesystem
-/// root, the source directory or any directory containing it, and any
-/// ancestor of `cwd`.
-fn check_out(src: &Path, out: &Path, cwd: &Path) -> Result<()> {
+/// `out` may not contain `.` or `..`; `src` is only read, so it may. Both are
+/// resolved against `cwd` with symlinks followed, so the checks apply to the directory that
+/// removal would really touch. Refused: an empty path, the filesystem root,
+/// a directory that contains `src`, `cwd` or `home`, or `cwd` itself.
+fn check_out(src: &Path, out: &Path, cwd: &Path, home: Option<&Path>) -> Result<()> {
     if out.as_os_str().is_empty() {
         bail!("refusing to clear an empty output path");
     }
-    let out = cwd.join(out);
+    if out
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        bail!(
+            "refusing {}: use a plain path without '.' or '..'",
+            out.display()
+        );
+    }
+    let cwd = resolve(cwd)?;
+    let src = resolve(&cwd.join(src))?;
+    let out = resolve(&cwd.join(out))?;
     if out.parent().is_none() {
         bail!("refusing to clear the filesystem root {}", out.display());
     }
-    if cwd.join(src).starts_with(&out) {
+    if src.starts_with(&out) {
         bail!(
             "refusing to clear {}, which contains the source",
             out.display()
@@ -129,7 +142,34 @@ fn check_out(src: &Path, out: &Path, cwd: &Path) -> Result<()> {
             out.display()
         );
     }
+    if let Some(home) = home
+        && resolve(home)?.starts_with(&out)
+    {
+        bail!(
+            "refusing to clear {}, an ancestor of the home directory",
+            out.display()
+        );
+    }
     Ok(())
+}
+
+/// Resolves the absolute `path` to a real path, following symlinks.
+///
+/// The longest existing prefix is canonicalized and the missing rest is
+/// appended, so the result is the path a later `create_dir_all` would use.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(current) {
+            return Ok(missing.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
+            bail!("cannot resolve {}", path.display());
+        };
+        missing.push(name.to_owned());
+        current = parent;
+    }
 }
 
 /// Writes the desktop icons into `out`.
@@ -271,32 +311,85 @@ pub fn build_web(src: &Path, out: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     use super::check_out;
+    use tempfile::TempDir;
+
+    /// A real directory layout: `base/work/src` is the source, `work` is the cwd.
+    struct Layout {
+        _dir: TempDir,
+        base: PathBuf,
+        work: PathBuf,
+        src: PathBuf,
+    }
+
+    fn layout() -> Layout {
+        let dir = TempDir::new().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let work = base.join("work");
+        let src = work.join("src");
+        fs::create_dir_all(&src).unwrap();
+        Layout {
+            _dir: dir,
+            base,
+            work,
+            src,
+        }
+    }
 
     #[test]
     fn check_out_refuses_dangerous_targets() {
-        let cwd = Path::new("/work/eagle/tools/brand");
-        let src = Path::new("/work/eagle/assets/brand/src");
-        for out in [
-            "",
-            "/",
-            "/work/eagle/assets/brand/src",
-            "/work/eagle/assets",
-            "/work",
-            "/work/eagle/tools",
-        ] {
+        let l = layout();
+        let (src, cwd) = (l.src.as_path(), l.work.as_path());
+        let refused = [
+            "".to_string(),
+            "/".to_string(),
+            ".".to_string(),
+            "..".to_string(),
+            "src/..".to_string(),
+            "../../..".to_string(),
+            src.display().to_string(),
+            l.work.display().to_string(),
+            l.base.display().to_string(),
+        ];
+        for out in &refused {
             assert!(
-                check_out(src, Path::new(out), cwd).is_err(),
+                check_out(src, Path::new(out), cwd, None).is_err(),
                 "{out:?} must be refused"
             );
         }
-        assert!(check_out(src, Path::new("/work/eagle/assets/brand/out"), cwd).is_ok());
-        assert!(check_out(src, Path::new("out"), cwd).is_ok());
+        let allowed = [l.work.join("out"), l.src.join("out"), PathBuf::from("out")];
+        for out in &allowed {
+            assert!(
+                check_out(src, out, cwd, None).is_ok(),
+                "{out:?} must be allowed"
+            );
+        }
+        let home = l.base.join("home");
+        assert!(check_out(src, &l.base.join("home/out"), cwd, Some(&home)).is_ok());
         assert!(
-            check_out(src, Path::new("."), cwd).is_err(),
-            "relative . is the working directory"
+            check_out(src, &l.base, cwd, Some(&home)).is_err(),
+            "ancestor of home"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_out_follows_symlinks() {
+        let l = layout();
+        let alias = l.base.join("alias");
+        std::os::unix::fs::symlink(&l.work, &alias).unwrap();
+        let (src, cwd) = (l.src.as_path(), l.work.as_path());
+        assert!(
+            check_out(src, &alias.join("src"), cwd, None).is_err(),
+            "resolves to src"
+        );
+        assert!(
+            check_out(src, &alias, cwd, None).is_err(),
+            "resolves to cwd"
+        );
+        assert!(check_out(src, &alias.join("out"), cwd, None).is_ok());
     }
 }
