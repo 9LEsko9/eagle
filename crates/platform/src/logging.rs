@@ -7,7 +7,7 @@ use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,30 +18,58 @@ const RECORD_BYTES: usize = 4096;
 const FILE_BYTES: u64 = 1_000_000;
 const FLUSH_DELAY: Duration = Duration::from_secs(1);
 
-fn sensitive(key: &str) -> bool {
-    [
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "sign",
-        "sig",
-        "signature",
-        "key",
-        "api_key",
-        "apikey",
-        "client_secret",
-        "password",
-        "authorization",
-        "cookie",
-        "auth",
-        "oauth_token",
-        "x-amz-signature",
-        "x-amz-security-token",
-        "x-amz-credential",
-    ]
-    .iter()
-    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+#[derive(PartialEq, Eq)]
+enum Sensitivity {
+    No,
+    Value,
+    Header,
+}
+
+fn sensitive(key: &str) -> Sensitivity {
+    let mut normalized = String::with_capacity(key.len());
+    let mut previous_lowercase = false;
+    for byte in key.bytes() {
+        if previous_lowercase && byte.is_ascii_uppercase() {
+            normalized.push('_');
+        }
+        normalized.push(if byte == b'-' {
+            '_'
+        } else {
+            byte.to_ascii_lowercase() as char
+        });
+        previous_lowercase = byte.is_ascii_lowercase();
+    }
+    let mut segments = normalized.split('_');
+    if segments
+        .clone()
+        .any(|segment| matches!(segment, "authorization" | "cookie"))
+    {
+        return Sensitivity::Header;
+    }
+    if matches!(
+        segments.next_back(),
+        Some(
+            "token"
+                | "secret"
+                | "password"
+                | "passwd"
+                | "key"
+                | "apikey"
+                | "signature"
+                | "sig"
+                | "sign"
+                | "session"
+                | "sessionid"
+                | "credential"
+                | "credentials"
+                | "auth"
+        )
+    ) || normalized == "jsessionid"
+    {
+        Sensitivity::Value
+    } else {
+        Sensitivity::No
+    }
 }
 
 /// Defence in depth for accidental raw parameters and headers; no regex.
@@ -67,7 +95,11 @@ pub fn redact(input: &str) -> String {
             while value < bytes.len() && matches!(bytes[value], b' ' | b'\t' | b'"' | b'\'') {
                 value += 1;
             }
-            if sensitive(key) && value < bytes.len() && matches!(bytes[value], b'=' | b':') {
+            let sensitivity = sensitive(key);
+            if sensitivity != Sensitivity::No
+                && value < bytes.len()
+                && matches!(bytes[value], b'=' | b':')
+            {
                 value += 1;
                 while value < bytes.len() && matches!(bytes[value], b' ' | b'\t') {
                     value += 1;
@@ -80,16 +112,16 @@ pub fn redact(input: &str) -> String {
                     value += 1;
                 }
                 output.push_str(&input[copied..value]);
-                let header =
-                    key.eq_ignore_ascii_case("authorization") || key.eq_ignore_ascii_case("cookie");
                 cursor = value;
                 while cursor < bytes.len() {
                     let byte = bytes[cursor];
-                    let end = if let Some(quote) = quote {
+                    let end = if sensitivity == Sensitivity::Header {
+                        matches!(byte, b'\n' | b'\r')
+                    } else if let Some(quote) = quote {
                         byte == quote || matches!(byte, b'\n' | b'\r')
                     } else {
                         matches!(byte, b'&' | b'#' | b'\n' | b'\r' | b'"' | b'\'')
-                            || (!header && byte.is_ascii_whitespace())
+                            || byte.is_ascii_whitespace()
                     };
                     if end {
                         break;
@@ -213,7 +245,7 @@ struct Files {
 impl Files {
     fn open(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let file = Self::open_file(&dir.join("eagle.log"))?;
+        let file = Self::open_file(&dir.join("eagle.log"), false)?;
         let size = file.metadata()?.len();
         Ok(Self {
             dir: dir.to_owned(),
@@ -222,9 +254,12 @@ impl Files {
         })
     }
 
-    fn open_file(path: &Path) -> io::Result<File> {
+    fn open_file(path: &Path, truncate: bool) -> io::Result<File> {
         let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        options.create(true).write(true).truncate(truncate);
+        if !truncate {
+            options.append(true);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -235,16 +270,7 @@ impl Files {
 
     fn write(&mut self, line: &str) -> io::Result<()> {
         if self.size + line.len() as u64 > FILE_BYTES {
-            self.file.take(); // Close before renaming on Windows.
-            let previous = self.dir.join("eagle.previous.log");
-            match fs::remove_file(&previous) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            fs::rename(self.dir.join("eagle.log"), previous)?;
-            self.file = Some(Self::open_file(&self.dir.join("eagle.log"))?);
-            self.size = 0;
+            self.rotate()?;
         }
         let file = self
             .file
@@ -252,6 +278,30 @@ impl Files {
             .ok_or_else(|| io::Error::other("log file unavailable"))?;
         file.write_all(line.as_bytes())?;
         self.size += line.len() as u64;
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        self.file.take(); // Close before renaming on Windows.
+        let result = (|| {
+            let previous = self.dir.join("eagle.previous.log");
+            match fs::remove_file(&previous) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            fs::rename(self.dir.join("eagle.log"), previous)
+        })();
+        if let Err(error) = result {
+            static REPORT: Once = Once::new();
+            REPORT.call_once(|| {
+                let _ = writeln!(io::stderr().lock(), "log rotation failed: {error}");
+            });
+            self.file = Some(Self::open_file(&self.dir.join("eagle.log"), true)?);
+        } else {
+            self.file = Some(Self::open_file(&self.dir.join("eagle.log"), false)?);
+        }
+        self.size = 0;
         Ok(())
     }
 
@@ -588,6 +638,41 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn header_values_are_hidden_to_end_of_line() {
+        let out = redact("Set-Cookie: sid=LEAK; Path=/; HttpOnly\ntrack_id=42");
+        assert!(!out.contains("LEAK") && !out.contains("HttpOnly"));
+        assert!(out.ends_with("track_id=42"));
+    }
+
+    #[test]
+    fn header_and_parameter_spellings_are_masked() {
+        for input in [
+            "X-API-Key: LEAK",
+            "x_api_key=LEAK",
+            "Proxy-Authorization: Basic LEAK",
+            "X-Auth-Token: LEAK",
+            "client-secret=LEAK",
+            "sessionid=LEAK",
+            "JSESSIONID=LEAK",
+            "{\"refreshToken\":\"LEAK\"}",
+        ] {
+            assert!(!redact(input).contains("LEAK"), "{input}");
+        }
+    }
+
+    #[test]
+    fn ordinary_fields_are_kept() {
+        for input in [
+            "track_id=42 provider=vk",
+            "monkey=1",
+            "keyboard=us",
+            "tokens_total=3",
+        ] {
+            assert_eq!(redact(input), input);
+        }
+    }
     fn directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "eagle-log-test-{}-{}",
@@ -678,6 +763,25 @@ mod tests {
         );
         drop(state);
         drop(backend);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_rotation_keeps_logging_within_bounds() {
+        let dir = directory();
+        let previous = dir.join("eagle.previous.log");
+        fs::create_dir(&previous).unwrap();
+        fs::write(previous.join("blocker"), "x").unwrap();
+        let mut files = Files::open(&dir).unwrap();
+        let line = "x".repeat(999) + "\n";
+        for _ in 0..3000 {
+            files.write(&line).unwrap();
+        }
+        files.write("last line\n").unwrap();
+        let path = dir.join("eagle.log");
+        assert!(fs::metadata(&path).unwrap().len() <= FILE_BYTES);
+        assert!(fs::read_to_string(path).unwrap().ends_with("last line\n"));
+        drop(files);
         fs::remove_dir_all(dir).unwrap();
     }
 

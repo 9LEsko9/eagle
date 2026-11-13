@@ -27,6 +27,10 @@ class SamplerTest(unittest.TestCase):
         self.assertGreater(after[0] - before[0], process_elapsed * 0.7)
         self.assertLess(after[0] - before[0], process_elapsed * 1.3)
         self.assertGreater(after[1], 0)
+        if platform.system() == 'Darwin':
+            peak = after[3]['lifetime_max_phys_footprint_bytes']
+            if peak is not None:
+                self.assertGreaterEqual(peak, after[1])
         if after[2] is not None:
             self.assertTrue(measure.thread_deltas(before[2], after[2]))
 

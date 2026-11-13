@@ -2,7 +2,7 @@
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
     Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
+    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
 };
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
@@ -12,9 +12,10 @@ use eagle_engine::{PositionAnchor, State};
 use slint::{ComponentHandle, Model, VecModel};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     ops::Range,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -33,6 +34,7 @@ fn image(cover: &eagle_palette::Cover) -> slint::Image {
 fn track_item(item: LibraryItem) -> TrackItem {
     let seconds = item.track.duration_ms / 1000;
     TrackItem {
+        occurrence: Default::default(),
         blocked_reason: item.blocked_reason.clone().unwrap_or_default().into(),
         id: item.track.id.to_string().into(),
         album_id: item
@@ -102,8 +104,58 @@ struct Bridge {
     /// Visible ranges reported by the lists, as (first, count).
     row_window: Cell<(usize, usize)>,
     card_window: Cell<(usize, usize)>,
+    images: RefCell<HashMap<usize, (Weak<eagle_palette::Cover>, slint::Image)>>,
+    queue_ids: RefCell<Vec<u64>>,
+    queue_current: Cell<Option<u64>>,
 }
 impl Bridge {
+    fn image(&self, cover: &Arc<eagle_palette::Cover>) -> slint::Image {
+        let key = Arc::as_ptr(cover) as usize;
+        let mut images = self.images.borrow_mut();
+        if let Some((source, image)) = images.get(&key)
+            && source
+                .upgrade()
+                .is_some_and(|source| Arc::ptr_eq(&source, cover))
+        {
+            return image.clone();
+        }
+        let converted = image(cover);
+        images.insert(key, (Arc::downgrade(cover), converted.clone()));
+        converted
+    }
+    fn release_unused_images(&self, ui: &DesktopWindow) {
+        let mut active = vec![
+            ui.global::<Library>().get_cover(),
+            ui.global::<Player>().get_cover(),
+        ];
+        active.extend(
+            Self::padded(self.row_window.get(), self.rows.row_count())
+                .filter_map(|index| self.rows.row_data(index))
+                .map(|row| row.cover),
+        );
+        active.extend(
+            self.card_range(self.card_window.get())
+                .filter_map(|index| self.cards.row_data(index))
+                .map(|card| card.cover),
+        );
+        active.extend(
+            ui.global::<Library>()
+                .get_queue()
+                .iter()
+                .map(|row| row.cover),
+        );
+        self.images
+            .borrow_mut()
+            .retain(|_, (_, image)| active.contains(image));
+    }
+    fn card_range(&self, window: (usize, usize)) -> Range<usize> {
+        // The grid reports its one-row overscan; do not add track-row margins here.
+        window.0.min(self.cards.row_count())
+            ..window
+                .0
+                .saturating_add(window.1)
+                .min(self.cards.row_count())
+    }
     fn padded(window: (usize, usize), len: usize) -> Range<usize> {
         let start = window.0.saturating_sub(MARGIN).min(len);
         let end = (window.0 + window.1 + MARGIN).min(len);
@@ -149,11 +201,8 @@ impl Bridge {
         if !force && self.card_window.get() == (first, count) {
             return;
         }
-        let old = Self::padded(
-            self.card_window.replace((first, count)),
-            self.cards.row_count(),
-        );
-        let new = Self::padded((first, count), self.cards.row_count());
+        let old = self.card_range(self.card_window.replace((first, count)));
+        let new = self.card_range((first, count));
         for index in old.filter(|i| !new.contains(i)) {
             if let Some(mut card) = self.cards.row_data(index)
                 && card.cover.size().width > 0
@@ -171,10 +220,10 @@ impl Bridge {
             let _ = self.sender.send(Command::Thumbnails(keys));
         }
     }
-    fn thumbnail(&self, ui: &DesktopWindow, key: &str, cover: &eagle_palette::Cover) {
+    fn thumbnail(&self, ui: &DesktopWindow, key: &str, cover: &Arc<eagle_palette::Cover>) {
         if let Some(id) = key.strip_prefix("h:") {
             if ui.global::<Library>().get_header_id().as_str() == id {
-                ui.global::<Library>().set_cover(image(cover));
+                ui.global::<Library>().set_cover(self.image(cover));
             }
         } else if let Some(id) = key.strip_prefix("t:") {
             if !ui.global::<Ui>().get_list_covers() {
@@ -186,27 +235,31 @@ impl Bridge {
                 if let Some(mut row) = self.rows.row_data(index)
                     && row.id.as_str() == id
                 {
-                    row.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    row.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
                     self.rows.set_row_data(index, row);
                 }
             }
             let queue = ui.global::<Library>().get_queue();
-            for index in 0..queue.row_count() {
+            for index in 0..if ui.global::<Ui>().get_panel_open() {
+                queue.row_count()
+            } else {
+                0
+            } {
                 if let Some(mut row) = queue.row_data(index)
                     && row.id.as_str() == id
                 {
-                    row.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    row.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
                     queue.set_row_data(index, row);
                 }
             }
         } else {
             let mut converted = None;
-            let range = Self::padded(self.card_window.get(), self.cards.row_count());
+            let range = self.card_range(self.card_window.get());
             for index in range {
                 if let Some(mut card) = self.cards.row_data(index)
                     && card.key.as_str() == key
                 {
-                    card.cover = converted.get_or_insert_with(|| image(cover)).clone();
+                    card.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
                     self.cards.set_row_data(index, card);
                 }
             }
@@ -279,23 +332,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let current = snapshot
                 .current
                 .and_then(|id| snapshot.queue.iter().position(|(item, _)| *item == id));
-            let mut queue: Vec<_> = current.map_or_else(Vec::new, |index| {
+            let queue: Vec<_> = current.map_or_else(Vec::new, |index| {
                 snapshot.queue[index + 1..]
                     .iter()
                     .map(|(_, track)| track.clone())
                     .collect()
             });
-            if snapshot.player.repeat == eagle_app::session::Repeat::All
-                && let Some(index) = current
-            {
-                queue.extend(
-                    snapshot.queue[..index]
-                        .iter()
-                        .map(|(_, track)| track.clone()),
-                );
-            }
-            queue.truncate(4);
-            apply(ui, Event::Queue(queue), bridge);
             apply(
                 ui,
                 Event::QueueOrder {
@@ -304,6 +346,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 },
                 bridge,
             );
+            apply(ui, Event::Queue(queue), bridge);
             apply(ui, Event::Player(snapshot.player), bridge);
             if let Some(position) = snapshot.position {
                 apply(ui, Event::Position(position), bridge);
@@ -381,8 +424,34 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let (first, count) = bridge.card_window.get();
             bridge.update_cards(first, count, true);
         }
-        Event::Thumbnail(key, cover) => bridge.thumbnail(ui, &key, &cover),
+        Event::Thumbnail(key, cover, cancel) => {
+            if !cancel.load(std::sync::atomic::Ordering::Acquire) {
+                bridge.thumbnail(ui, &key, &cover);
+            }
+        }
         Event::QueueOrder { entries, current } => {
+            let same_order = {
+                let ids = bridge.queue_ids.borrow();
+                ids.len() == entries.len()
+                    && ids.iter().zip(&entries).all(|(old, (id, _))| old == id)
+            };
+            if same_order {
+                let old_current = bridge.queue_current.replace(current);
+                if old_current != current {
+                    let model = ui.global::<Library>().get_queue_order();
+                    for (index, id) in bridge.queue_ids.borrow().iter().enumerate() {
+                        if (Some(*id) == old_current || Some(*id) == current)
+                            && let Some(mut row) = model.row_data(index)
+                        {
+                            row.current = Some(*id) == current;
+                            model.set_row_data(index, row);
+                        }
+                    }
+                }
+                return;
+            }
+            *bridge.queue_ids.borrow_mut() = entries.iter().map(|(id, _)| *id).collect();
+            bridge.queue_current.set(current);
             let items = entries
                 .into_iter()
                 .map(|(id, track)| QueueItem {
@@ -406,19 +475,35 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .iter()
                 .map(|t| format!("t:{}", t.id))
                 .collect::<Vec<_>>();
+            let ids = bridge.queue_ids.borrow();
+            let start = bridge
+                .queue_current
+                .get()
+                .and_then(|id| ids.iter().position(|entry| *entry == id))
+                .map_or(ids.len(), |index| index + 1);
             let items = tracks
                 .into_iter()
-                .map(|track| {
-                    track_item(LibraryItem {
+                .enumerate()
+                .map(|(index, track)| {
+                    let mut item = track_item(LibraryItem {
+                        sources: Vec::new(),
                         blocked_reason: None,
                         track,
                         liked: false,
-                    })
+                    });
+                    item.occurrence = ids
+                        .get(start + index)
+                        .map_or_else(String::new, u64::to_string)
+                        .into();
+                    item
                 })
                 .collect::<Vec<_>>();
             ui.global::<Library>()
                 .set_queue(Rc::new(VecModel::from(items)).into());
-            if ui.global::<Ui>().get_list_covers() && !keys.is_empty() {
+            if ui.global::<Ui>().get_list_covers()
+                && ui.global::<Ui>().get_panel_open()
+                && !keys.is_empty()
+            {
                 let _ = bridge.sender.send(Command::Thumbnails(keys));
             }
         }
@@ -435,6 +520,11 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             library.set_playlist_revision("".into());
             ui.global::<Ui>().set_confirm_delete(false);
             bridge.cards.set_vec(Vec::new());
+            // Session reconciles the next library against its previous rows. Keep the
+            // same rows here so its subsequent indexed deltas still apply.
+            bridge.clear_rows();
+            bridge.row_window.set((0, 0));
+            bridge.card_window.set((0, 0));
             ui.global::<Ui>().set_route(route(view));
             ui.global::<Ui>().set_error("".into());
         }
@@ -469,10 +559,9 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 if state.track.is_none() {
                     String::new()
                 } else {
-                    state.bitrate_kbps.map_or_else(
-                        || "Битрейт неизвестен".to_owned(),
-                        |value| format!("{value} кбит/с"),
-                    )
+                    state
+                        .bitrate_kbps
+                        .map_or_else(String::new, |value| format!("{value} кбит/с"))
                 }
                 .into(),
             );
@@ -508,7 +597,14 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         .into(),
                 );
                 player.set_title(track.title.as_str().into());
-                player.set_source(track.id.provider().into());
+                // The provider's own name comes from the connected list; an unknown key shows as is.
+                let key = track.id.provider();
+                let providers = ui.global::<Ui>().get_providers();
+                let name = providers
+                    .iter()
+                    .find(|p| p.id == key)
+                    .map_or_else(|| key.into(), |p| p.name);
+                player.set_source(name);
                 player.set_artist(
                     track
                         .artists
@@ -666,16 +762,52 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
         Event::Error(message) => ui.global::<Ui>().set_error(message.into()),
         Event::Cover(target, id, cover) => {
             if matches!(target, eagle_app::session::CoverTarget::Collection) {
-                ui.global::<Library>().set_cover(image(&cover));
+                ui.global::<Library>().set_cover(bridge.image(&cover));
                 return;
             }
             if ui.global::<Player>().get_track_id().as_str() == id.to_string() {
-                ui.global::<Player>().set_cover(image(&cover));
+                ui.global::<Player>().set_cover(bridge.image(&cover));
                 COVER_COLOR.with(|c| *c.borrow_mut() = cover.dominant);
                 apply_colors(ui);
             }
         }
-        Event::Account => ui.global::<Ui>().set_signed_in(true),
+        Event::Account => {
+            ui.global::<Ui>().set_signed_in(true);
+            ui.global::<Player>().set_cover(slint::Image::default());
+            ui.global::<Library>().set_cover(slint::Image::default());
+            bridge.clear_rows();
+            for index in 0..bridge.cards.row_count() {
+                if let Some(mut card) = bridge.cards.row_data(index) {
+                    card.cover = slint::Image::default();
+                    bridge.cards.set_row_data(index, card);
+                }
+            }
+        }
+        // No dialog yet: until the user can answer, nothing is sent to the provider.
+        Event::LikesBackfillOffer { .. } => {}
+        Event::Providers(all) => {
+            let items: Vec<ProviderItem> = all
+                .into_iter()
+                .map(|p| {
+                    let (token_auth, hint, help_url) = match &p.auth {
+                        eagle_core::AuthMethod::Token { hint, help_url } => {
+                            (true, *hint, help_url.unwrap_or_default())
+                        }
+                        _ => (false, "", ""),
+                    };
+                    ProviderItem {
+                        id: p.id.into(),
+                        name: p.name.into(),
+                        hint: hint.into(),
+                        help_url: help_url.into(),
+                        token_auth,
+                        signed_in: p.signed_in,
+                    }
+                })
+                .collect();
+            ui.global::<Ui>()
+                .set_providers(Rc::new(VecModel::from(items)).into());
+        }
     }
 }
 
@@ -831,21 +963,9 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         let _ = tx.send(Command::CacheLimit(limit));
     });
     let tx = sender.clone();
-    actions.on_shift_queue(move |id, delta| {
+    actions.on_jump_to(move |id| {
         if let Ok(id) = id.parse() {
-            let _ = tx.send(Command::ShiftQueue { id, delta });
-        }
-    });
-    let tx = sender.clone();
-    actions.on_move_queue(move |id, to| {
-        if let (Ok(id), Ok(to)) = (id.parse(), usize::try_from(to)) {
-            let _ = tx.send(Command::MoveQueue { id, to });
-        }
-    });
-    let tx = sender.clone();
-    actions.on_play_next(move |id| {
-        if let Ok(id) = id.parse() {
-            let _ = tx.send(Command::PlayNext(id));
+            let _ = tx.send(Command::JumpTo(id));
         }
     });
     let tx = sender.clone();
@@ -916,7 +1036,8 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     actions.on_visible_rows(move |first, count| {
         if let Some(ui) = weak.upgrade() {
             with_bridge(|bridge| {
-                bridge.rows_visible(&ui, first.max(0) as usize, count.max(0) as usize)
+                bridge.rows_visible(&ui, first.max(0) as usize, count.max(0) as usize);
+                bridge.release_unused_images(&ui);
             });
         }
     });
@@ -926,8 +1047,39 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             with_bridge(|bridge| bridge.list_covers_changed(&ui));
         }
     });
+    let weak = ui.as_weak();
+    actions.on_panel_content({
+        let weak = ui.as_weak();
+        move |open| {
+            if let Some(ui) = weak.upgrade() {
+                let queue = ui.global::<Library>().get_queue();
+                if open && ui.global::<Ui>().get_list_covers() {
+                    let keys = queue
+                        .iter()
+                        .map(|row| format!("t:{}", row.id))
+                        .collect::<Vec<_>>();
+                    with_bridge(|bridge| {
+                        let _ = bridge.sender.send(Command::Thumbnails(keys));
+                    });
+                } else {
+                    for index in 0..queue.row_count() {
+                        if let Some(mut row) = queue.row_data(index) {
+                            row.cover = slint::Image::default();
+                            queue.set_row_data(index, row);
+                        }
+                    }
+                    with_bridge(|bridge| bridge.release_unused_images(&ui));
+                }
+            }
+        }
+    });
     actions.on_visible_cards(move |first, count| {
-        with_bridge(|bridge| bridge.cards_visible(first.max(0) as usize, count.max(0) as usize));
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| {
+                bridge.cards_visible(first.max(0) as usize, count.max(0) as usize);
+                bridge.release_unused_images(&ui);
+            });
+        }
     });
     let tx = sender.clone();
     actions.on_seek(move |seconds| {
@@ -998,10 +1150,18 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         }
     });
     let tx = sender.clone();
-    actions.on_login(move |token| {
-        let _ = tx.send(Command::Login(eagle_app::session::Token::new(
-            token.to_string(),
-        )));
+    actions.on_login(move |provider, token| {
+        let _ = tx.send(Command::Login {
+            provider: provider.to_string(),
+            token: eagle_app::session::Token::new(token.to_string()),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_logout(move |provider| {
+        let _ = tx.send(Command::Logout {
+            provider: provider.to_string(),
+            keep_saved: false,
+        });
     });
     let tx = sender.clone();
     let weak = ui.as_weak();
@@ -1057,11 +1217,25 @@ pub(super) fn initialize(
             sender,
             row_window: Cell::new((0, 0)),
             card_window: Cell::new((0, 0)),
+            images: RefCell::new(HashMap::new()),
+            queue_ids: RefCell::new(Vec::new()),
+            queue_current: Cell::new(None),
         }))
     });
 }
 pub(super) fn deliver(ui: &DesktopWindow, event: Event) {
-    with_bridge(|bridge| apply(ui, event, bridge));
+    with_bridge(|bridge| {
+        apply(ui, event, bridge);
+        bridge.release_unused_images(ui);
+    });
+}
+pub(super) fn retry_artwork(ui: &DesktopWindow) {
+    with_bridge(|bridge| {
+        let (first, count) = bridge.row_window.get();
+        bridge.update_rows(ui, first, count, true);
+        let (first, count) = bridge.card_window.get();
+        bridge.update_cards(first, count, true);
+    });
 }
 pub(super) fn clear() {
     UI_BRIDGE.with(|bridge| bridge.borrow_mut().take());
@@ -1117,8 +1291,12 @@ pub(super) mod tests {
             sender: session.sender(),
             row_window: Cell::new((0, 1)),
             card_window: Cell::new((0, 0)),
+            images: RefCell::new(HashMap::new()),
+            queue_ids: RefCell::new(Vec::new()),
+            queue_current: Cell::new(None),
         };
         let item = |id: &str| LibraryItem {
+            sources: Vec::new(),
             blocked_reason: None,
             track: Arc::new(
                 serde_json::from_value(serde_json::json!({
@@ -1130,18 +1308,33 @@ pub(super) mod tests {
             ),
             liked: false,
         };
-        let cover = eagle_palette::Cover {
+        let cover = Arc::new(eagle_palette::Cover {
             rgba: vec![255; 4],
             width: 1,
             height: 1,
             dominant: [0; 3],
-        };
+        });
+        apply(
+            &ui,
+            Event::LibraryReset((0..8).map(|id| item(&id.to_string())).collect()),
+            &bridge,
+        );
+        apply(&ui, Event::View(View::History), &bridge);
+        apply(
+            &ui,
+            Event::Library(vec![LibraryDelta::Remove { index: 7 }]),
+            &bridge,
+        );
+        assert_eq!(rows.row_count(), 7);
+        assert_eq!(rows.row_data(6).unwrap().id.as_str(), "yandex:6");
         apply(
             &ui,
             Event::LibraryReset(vec![item("1"), item("2")]),
             &bridge,
         );
+        assert_eq!(bridge.image(&cover), bridge.image(&cover));
         bridge.thumbnail(&ui, "t:yandex:1", &cover);
+        assert_eq!(bridge.images.borrow().len(), 1);
         assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
         apply(
             &ui,
@@ -1152,6 +1345,45 @@ pub(super) mod tests {
             &bridge,
         );
         assert_eq!(rows.row_data(1).unwrap().cover.size().width, 0);
+        bridge.release_unused_images(&ui);
+        assert!(bridge.images.borrow().is_empty());
+        apply(
+            &ui,
+            Event::Thumbnail(
+                "t:yandex:1".into(),
+                cover.clone(),
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ),
+            &bridge,
+        );
+        assert!(
+            bridge.images.borrow().is_empty(),
+            "cancelled artwork must not be converted to Slint"
+        );
+        let entries = vec![(1, item("1").track), (2, item("2").track)];
+        apply(
+            &ui,
+            Event::QueueOrder {
+                entries: entries.clone(),
+                current: Some(1),
+            },
+            &bridge,
+        );
+        let model = ui.global::<Library>().get_queue_order();
+        apply(
+            &ui,
+            Event::QueueOrder {
+                entries,
+                current: Some(2),
+            },
+            &bridge,
+        );
+        assert!(std::ptr::eq(
+            model.as_any(),
+            ui.global::<Library>().get_queue_order().as_any()
+        ));
+        assert!(!model.row_data(0).unwrap().current);
+        assert!(model.row_data(1).unwrap().current);
         bridge.thumbnail(&ui, "t:yandex:1", &cover);
         apply(
             &ui,
@@ -1252,10 +1484,7 @@ pub(super) mod tests {
             ..Default::default()
         };
         apply(&ui, Event::Player(Arc::new(unknown)), &bridge);
-        assert_eq!(
-            ui.global::<Player>().get_quality().as_str(),
-            "Битрейт неизвестен"
-        );
+        assert_eq!(ui.global::<Player>().get_quality().as_str(), "");
         apply(&ui, Event::Downloads(Vec::new()), &bridge);
         assert_eq!(ui.global::<Storage>().get_jobs().row_count(), 0);
         assert_eq!(rows.row_count(), 1);

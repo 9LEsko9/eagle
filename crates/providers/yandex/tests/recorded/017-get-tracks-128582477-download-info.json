@@ -1,0 +1,32 @@
+{
+  "body": {
+    "invocationInfo": {
+      "app-name": "music-resource-provider",
+      "exec-duration-millis": 35,
+      "hostname": "hostname",
+      "req-id": "1794588729755126-12399203187132244015"
+    },
+    "result": [
+      {
+        "bitrateInKbps": 192,
+        "codec": "mp3",
+        "direct": false,
+        "downloadInfoUrl": "https://api.music.yandex.net/get-mp3/stub?sign=stub&ts=0",
+        "gain": false,
+        "preview": false
+      },
+      {
+        "bitrateInKbps": 320,
+        "codec": "mp3",
+        "direct": false,
+        "downloadInfoUrl": "https://api.music.yandex.net/get-mp3/stub?sign=stub&ts=0",
+        "gain": false,
+        "preview": false
+      }
+    ]
+  },
+  "method": "GET",
+  "path": "/tracks/128582477/download-info",
+  "query": "",
+  "status": 200
+}

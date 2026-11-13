@@ -1,0 +1,391 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": 13,
+      "hostname": "hostname",
+      "req-id": "1794588729658291-14763338160940487566"
+    },
+    "result": [
+      {
+        "albums": [
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "57ee974b.p.10367783/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 10367783,
+                "name": "свидетельство о смерти",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "bests": [
+              103839794,
+              103839797,
+              103839798
+            ],
+            "contentWarning": "explicit",
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [
+              "explicit",
+              "exclamationIcon:671a23afcec5646906723a52",
+              "descriptionText:67370c8e13b92b0a60256675"
+            ],
+            "genre": "postpunk",
+            "id": 22259811,
+            "labels": [
+              {
+                "id": 3700717,
+                "name": "ICONIC PROMO"
+              }
+            ],
+            "likesCount": 2124,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "releaseDate": "1994-09-29T00:00:00+03:00",
+            "title": "Кто плачет, тот живёт",
+            "trackCount": 11,
+            "trackPosition": {
+              "index": 5,
+              "volume": 1
+            },
+            "veryImportant": false,
+            "year": 1994
+          }
+        ],
+        "artists": [
+          {
+            "available": true,
+            "composer": false,
+            "cover": {
+              "prefix": "57ee974b.p.10367783/",
+              "type": "from-artist-photos",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [],
+            "id": 10367783,
+            "name": "свидетельство о смерти",
+            "various": false
+          }
+        ],
+        "available": true,
+        "availableForOptions": [
+          "bookmate"
+        ],
+        "availableForPremiumUsers": true,
+        "availableFullWithoutPermission": false,
+        "coverUri": "avatars.yandex.net/stub/%%",
+        "derivedColors": {
+          "accent": "#999999",
+          "average": "#1e1e1e",
+          "miniPlayer": "#b7b7b7",
+          "waveText": "#e0e0e0"
+        },
+        "disclaimers": [],
+        "durationMs": 233770,
+        "fade": {
+          "inStart": 0.0,
+          "inStop": 1.5,
+          "outStart": 223.0,
+          "outStop": 224.8
+        },
+        "fileSize": 0,
+        "id": "103839798",
+        "lyricsAvailable": false,
+        "lyricsInfo": {
+          "hasAvailableSyncLyrics": true,
+          "hasAvailableTextLyrics": true
+        },
+        "major": {
+          "id": 0,
+          "name": "-"
+        },
+        "ogImage": "avatars.yandex.net/stub/%%",
+        "previewDurationMs": 30000,
+        "r128": {
+          "i": -17.76,
+          "tp": -5.49
+        },
+        "realId": "103839798",
+        "rememberPosition": false,
+        "specialAudioResources": [
+          "smart_preview"
+        ],
+        "storageDir": "51327_109b74ca.36526310.1.609676",
+        "title": "Чуть-чуть меня",
+        "trackSharingFlag": "COVER_ONLY",
+        "trackSource": "OWN",
+        "type": "music"
+      },
+      {
+        "albums": [
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "e2bff45e.a.18131694-2",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 5998267,
+                "name": "Kælan Mikla",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "bests": [
+              79362491,
+              91231038
+            ],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "postpunk",
+            "id": 18131694,
+            "labels": [
+              {
+                "id": 55544,
+                "name": "Artoffact"
+              }
+            ],
+            "likesCount": 1070,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "releaseDate": "2021-10-15T00:00:00+03:00",
+            "title": "Undir Köldum Norðurljósum",
+            "trackCount": 10,
+            "trackPosition": {
+              "index": 2,
+              "volume": 1
+            },
+            "veryImportant": false,
+            "year": 2021
+          }
+        ],
+        "artists": [
+          {
+            "available": true,
+            "composer": false,
+            "cover": {
+              "prefix": "e2bff45e.a.18131694-2",
+              "type": "from-album-cover",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [],
+            "id": 5998267,
+            "name": "Kælan Mikla",
+            "various": false
+          }
+        ],
+        "available": true,
+        "availableForOptions": [
+          "bookmate"
+        ],
+        "availableForPremiumUsers": true,
+        "availableFullWithoutPermission": false,
+        "clipIds": [
+          419982
+        ],
+        "coverUri": "avatars.yandex.net/stub/%%",
+        "derivedColors": {
+          "accent": "#8ea3a3",
+          "average": "#1b2121",
+          "miniPlayer": "#afbfbf",
+          "waveText": "#c1ffff"
+        },
+        "disclaimers": [],
+        "durationMs": 253190,
+        "fade": {
+          "inStart": 0.4,
+          "inStop": 5.4,
+          "outStart": 245.7,
+          "outStop": 249.6
+        },
+        "fileSize": 0,
+        "id": "79362491",
+        "lyricsAvailable": true,
+        "lyricsInfo": {
+          "hasAvailableSyncLyrics": false,
+          "hasAvailableTextLyrics": true
+        },
+        "major": {
+          "id": 0,
+          "name": "-"
+        },
+        "ogImage": "avatars.yandex.net/stub/%%",
+        "previewDurationMs": 30000,
+        "r128": {
+          "i": -9.96,
+          "tp": 0.24
+        },
+        "realId": "79362491",
+        "rememberPosition": false,
+        "specialAudioResources": [
+          "smart_preview"
+        ],
+        "storageDir": "51327_109b74ca.36526310.1.609676",
+        "title": "Sólstöður",
+        "trackSharingFlag": "COVER_ONLY",
+        "trackSource": "OWN",
+        "type": "music"
+      },
+      {
+        "albums": [
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "1c43129a.p.16697404/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "cutoutCover": {
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 16697404,
+                "name": "violetta sokolova",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "bests": [],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "postpunk",
+            "id": 24775197,
+            "labels": [
+              {
+                "id": 4681441,
+                "name": "Koala Music"
+              }
+            ],
+            "likesCount": 345,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "releaseDate": "2023-02-03T00:00:00+03:00",
+            "title": "Деревья, сгнившие до ствола",
+            "trackCount": 1,
+            "trackPosition": {
+              "index": 1,
+              "volume": 1
+            },
+            "type": "single",
+            "veryImportant": false,
+            "year": 2023
+          }
+        ],
+        "artists": [
+          {
+            "available": true,
+            "composer": false,
+            "cover": {
+              "prefix": "1c43129a.p.16697404/",
+              "type": "from-artist-photos",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "cutoutCover": {
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [],
+            "id": 16697404,
+            "name": "violetta sokolova",
+            "various": false
+          }
+        ],
+        "available": true,
+        "availableForOptions": [
+          "bookmate"
+        ],
+        "availableForPremiumUsers": true,
+        "availableFullWithoutPermission": false,
+        "coverUri": "avatars.yandex.net/stub/%%",
+        "derivedColors": {
+          "accent": "#9d9499",
+          "average": "#1f1d1e",
+          "miniPlayer": "#bab4b7",
+          "waveText": "#e0e0e0"
+        },
+        "disclaimers": [],
+        "durationMs": 130400,
+        "fade": {
+          "inStart": 0.0,
+          "inStop": 1.5,
+          "outStart": 128.9,
+          "outStop": 130.4
+        },
+        "fileSize": 0,
+        "id": "111096363",
+        "lyricsAvailable": false,
+        "lyricsInfo": {
+          "hasAvailableSyncLyrics": true,
+          "hasAvailableTextLyrics": true
+        },
+        "major": {
+          "id": 0,
+          "name": "-"
+        },
+        "ogImage": "avatars.yandex.net/stub/%%",
+        "previewDurationMs": 30000,
+        "r128": {
+          "i": -8.48,
+          "tp": 0.43
+        },
+        "realId": "111096363",
+        "rememberPosition": false,
+        "specialAudioResources": [
+          "smart_preview"
+        ],
+        "storageDir": "51327_109b74ca.36526310.1.609676",
+        "title": "Деревья, сгнившие до ствола",
+        "trackSharingFlag": "COVER_ONLY",
+        "trackSource": "OWN",
+        "type": "music"
+      }
+    ]
+  },
+  "method": "POST",
+  "path": "/tracks",
+  "query": "",
+  "status": 200
+}

@@ -32,6 +32,100 @@ fn decoded(name: &str, rate: u32) -> Vec<[f32; 2]> {
     frames
 }
 #[test]
+fn decoded_output_is_unchanged() {
+    let expected = [
+        ("continuous.mp3", 44100, 0x52f3854f7baf3ee5u64),
+        ("continuous.wav", 44100, 0xa5c8c79d002b44adu64),
+        ("long-vbr-no-index.mp3", 354816, 0xc213c9776eed64a9u64),
+        ("long-vbr.aac", 354304, 0x53380979b9865e20u64),
+        ("long-vbr.mp3", 352800, 0x07bbe8e7c2d69201u64),
+        ("split-0.mp3", 22050, 0x2e09d5f7a6deb6b5u64),
+        ("split-0.wav", 22050, 0x0a0666edd595d879u64),
+        ("split-1.mp3", 22050, 0x5bba62c374f70f7du64),
+        ("split-1.wav", 22050, 0xe39f6dfd519b98c9u64),
+        ("tone-44100-1.aac", 12288, 0x31122d6b9af6741du64),
+        ("tone-44100-1.flac", 11025, 0x0c208893d07e4cd9u64),
+        ("tone-44100-1.m4a", 11025, 0x765bf87f1195bd99u64),
+        ("tone-44100-1.mp3", 11025, 0xec7b91c389e3596du64),
+        ("tone-44100-1.ogg", 11025, 0xa8b38fa0d83c108du64),
+        ("tone-44100-1.opus", 12000, 0x54f278ee13aa48a9u64),
+        ("tone-44100-1.wav", 11025, 0x0c208893d07e4cd9u64),
+        ("tone-44100-2.aac", 12288, 0x870be727ca018b6cu64),
+        ("tone-44100-2.flac", 11025, 0x0c208893d07e4cd9u64),
+        ("tone-44100-2.m4a", 11025, 0xf117f8d26f77f31fu64),
+        ("tone-44100-2.mp3", 11025, 0xe9bad0916dbcc8edu64),
+        ("tone-44100-2.ogg", 11025, 0xa8b38fa0d83c108du64),
+        ("tone-44100-2.opus", 12000, 0x7f62afd57ab4ad4bu64),
+        ("tone-44100-2.wav", 11025, 0x0c208893d07e4cd9u64),
+        ("tone-48000-1.aac", 13312, 0x198df4f4fb7b6c5du64),
+        ("tone-48000-1.flac", 12000, 0x3da0cf9858b35da1u64),
+        ("tone-48000-1.m4a", 12000, 0x3202f99d26d61755u64),
+        ("tone-48000-1.mp3", 12000, 0x907111e49eb86865u64),
+        ("tone-48000-1.ogg", 12000, 0x95d5f48c4278c8cdu64),
+        ("tone-48000-1.opus", 12000, 0xd3652923f09fe169u64),
+        ("tone-48000-1.wav", 12000, 0x3da0cf9858b35da1u64),
+        ("tone-48000-2.aac", 13312, 0x48a1033a27dba4c5u64),
+        ("tone-48000-2.flac", 12000, 0x3da0cf9858b35da1u64),
+        ("tone-48000-2.m4a", 12000, 0x1afdc46c9a16360bu64),
+        ("tone-48000-2.mp3", 12000, 0x4494e84da353fe41u64),
+        ("tone-48000-2.ogg", 12000, 0x95d5f48c4278c8cdu64),
+        ("tone-48000-2.opus", 12000, 0xe1ddab3a31996dd1u64),
+        ("tone-48000-2.wav", 12000, 0x3da0cf9858b35da1u64),
+    ];
+    for (name, expected_count, expected_hash) in expected {
+        let open = || {
+            let reader = fixture(name)
+                .open(Interrupt {
+                    generation: Arc::new(AtomicU32::new(0)),
+                    expected: 0,
+                    preload: false,
+                    seeking: Arc::new(AtomicBool::new(false)),
+                })
+                .unwrap();
+            Decoder::open(reader).unwrap()
+        };
+        let mut decoder = open();
+        let mut reference = open();
+        let mut hash = 0xcbf29ce484222325u64;
+        let mut reference_hash = hash;
+        let mut count = 0;
+        let mut reference_count = 0;
+        for (decoder, hash, count, original) in [
+            (&mut decoder, &mut hash, &mut count, false),
+            (
+                &mut reference,
+                &mut reference_hash,
+                &mut reference_count,
+                true,
+            ),
+        ] {
+            loop {
+                let chunk = if original {
+                    decoder.next_reference()
+                } else {
+                    decoder.next()
+                }
+                .unwrap();
+                let Some(chunk) = chunk else { break };
+                *count += chunk.frames.len();
+                for frame in chunk.frames {
+                    for sample in frame {
+                        for byte in sample.to_bits().to_le_bytes() {
+                            *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!((count, hash), (reference_count, reference_hash), "{name}");
+        assert_eq!(count, expected_count, "{name}");
+        // PCM and FLAC fixtures decode exactly on every platform.
+        if name.ends_with(".wav") || name.ends_with(".flac") {
+            assert_eq!(hash, expected_hash, "{name}");
+        }
+    }
+}
+#[test]
 fn all_v1_codecs_mono_and_stereo_at_both_rates_decode() {
     for rate in [44100, 48000] {
         for channels in [1, 2] {
@@ -105,6 +199,48 @@ fn queue_frames(names: &[&str], rate: u32) -> Vec<Frame> {
         }
     }
     frames
+}
+
+fn worker_with_preloaded_next() -> (Worker, rtrb::Consumer<Frame>) {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let mut worker = Worker::new(
+        Config::default(),
+        Arc::new(Shared::default()),
+        commands,
+        events,
+    );
+    worker.sources = vec![fixture("split-0.wav"), fixture("long-vbr.mp3")];
+    let (output, mut consumer) = Output::offline(44100);
+    worker.output = Some(output);
+    worker.prepare().unwrap();
+    worker.preload = Some((1, worker.open_decoder(1).unwrap()));
+    while worker.decode_index == 0 {
+        worker.produce(0).unwrap();
+        while consumer.pop().is_ok() {}
+    }
+    (worker, consumer)
+}
+
+#[test]
+fn track_change_reuses_the_preloaded_decoder() {
+    let (mut worker, _) = worker_with_preloaded_next();
+    assert_eq!(worker.open_count, 2);
+    worker.prepare().unwrap();
+    assert_eq!(worker.open_count, 2);
+}
+
+#[test]
+fn preloaded_decoder_honours_restart_position() {
+    let (mut worker, mut consumer) = worker_with_preloaded_next();
+    worker.restart_position = Duration::from_millis(1500);
+    worker.prepare().unwrap();
+    worker.produce(0).unwrap();
+    let frame = consumer.pop().unwrap();
+    assert_eq!(frame.track, 1);
+    assert_eq!(frame.position, 66150);
+    let reference = decoded("long-vbr.mp3", 44100);
+    assert!((frame.samples[0] - reference[66150][0]).abs() < 0.0001);
 }
 #[test]
 fn continuous_split_recording_keeps_the_resampler_history_and_exact_track_positions() {

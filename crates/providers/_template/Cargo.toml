@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 eagle contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "eagle-provider-template"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[dependencies]
+eagle-provider-sdk = { path = "../../provider-sdk" }
+
+[dev-dependencies]
+eagle-provider-sdk = { path = "../../provider-sdk", features = ["testkit"] }

@@ -4,6 +4,40 @@ import { Ui, Actions } from "../globals/bridge.slint";
 import { TextButton } from "../components/button.slint";
 import { Field } from "../components/controls.slint";
 
+component ProviderRow inherits VerticalLayout {
+    in property <string> id;
+    in property <string> name;
+    in property <string> hint;
+    in property <string> help-url;
+    in property <bool> token-auth;
+    in property <bool> signed-in;
+    spacing: 12px;
+    padding-bottom: 28px;
+    Text { text: root.name; color: Theme.t.tx; font-size: Type.title; font-weight: 700; wrap: word-wrap; }
+    Text {
+        text: !root.token-auth ? @tr("Вход не нужен") : root.signed-in ? @tr("Вход выполнен") : @tr("Введите токен. Он сохранится в системном хранилище секретов.");
+        color: Theme.t.tx2;
+        font-size: Type.body;
+        wrap: word-wrap;
+    }
+    if root.token-auth && !root.signed-in : VerticalLayout {
+        spacing: 12px;
+        token := Field {
+            placeholder: root.hint;
+            password: true;
+            accepted(text) => { Actions.login(root.id, text); self.text = ""; }
+        }
+        HorizontalLayout {
+            alignment: start;
+            TextButton { text: @tr("Войти"); primary: true; clicked => { Actions.login(root.id, token.text); token.text = ""; } }
+        }
+    }
+    if root.token-auth && root.signed-in : HorizontalLayout {
+        alignment: start;
+        TextButton { text: @tr("Выйти"); outline: true; clicked => { Actions.logout(root.id); } }
+    }
+}
+
 export component LoginScreen inherits VerticalLayout {
     alignment: start;
     HorizontalLayout {
@@ -11,34 +45,14 @@ export component LoginScreen inherits VerticalLayout {
             max-width: 440px;
             horizontal-stretch: 1;
             spacing: 0px;
-            Text { text: @tr("Вход в Яндекс Музыку"); color: Theme.t.tx; font-size: Type.display; font-weight: 700; letter-spacing: -0.8px; wrap: word-wrap; }
-            Text {
-                text: Ui.signed-in ? @tr("Вход выполнен") : @tr("Введите токен Яндекса. Он сохранится в системном хранилище секретов.");
-                color: Theme.t.tx2;
-                font-size: Type.body;
-                wrap: word-wrap;
-                height: self.preferred-height + 24px;
-                vertical-alignment: center;
-            }
-            if !Ui.signed-in : VerticalLayout {
-                spacing: 12px;
-                token := Field {
-                    init => { self.focus-input(); }
-                    placeholder: @tr("Токен");
-                    password: true;
-                    accepted(text) => { Actions.login(text); self.text = ""; }
-                }
-                HorizontalLayout {
-                    alignment: start;
-                    TextButton { text: @tr("Войти"); primary: true; clicked => { Actions.login(token.text); token.text = ""; } }
-                }
-            }
-            Text {
-                text: @tr("VK пока недоступен: провайдер не подключён.");
-                color: Theme.t.tx2;
-                font-size: Type.meta;
-                height: 48px;
-                vertical-alignment: bottom;
+            Text { text: @tr("Сервисы"); color: Theme.t.tx; font-size: Type.display; font-weight: 700; letter-spacing: -0.8px; wrap: word-wrap; height: self.preferred-height + 24px; }
+            for provider in Ui.providers : ProviderRow {
+                id: provider.id;
+                name: provider.name;
+                hint: provider.hint;
+                help-url: provider.help-url;
+                token-auth: provider.token-auth;
+                signed-in: provider.signed-in;
             }
         }
         Rectangle { horizontal-stretch: 0.001; }

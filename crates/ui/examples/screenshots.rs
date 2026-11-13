@@ -58,10 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RepaintBufferType::NewBuffer,
         ))))?;
     } else {
-        slint::BackendSelector::new()
-            .backend_name("winit".into())
-            .renderer_name("software".into())
-            .select()?;
+        eagle_ui::Renderer::from_args(std::env::args())?.select()?;
     }
     let ui = DesktopWindow::new()?;
     slint::select_bundled_translation("ru")?;
@@ -99,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .map(|(i, (title, artist, album, duration))| TrackItem {
+            occurrence: Default::default(),
             blocked_reason: Default::default(),
             id: format!("fixture:{i}").into(),
             album_id: format!("fixture:album:{i}").into(),
@@ -190,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_track_id("fixture:0".into());
     ui.global::<Player>().set_title("Магистраль".into());
     ui.global::<Player>().set_artist("Шум волн".into());
-    ui.global::<Player>().set_source("yandex".into());
+    ui.global::<Player>().set_source("Яндекс Музыка".into());
     ui.global::<Player>().set_length(262.);
     ui.global::<Player>().set_quality("320 кбит/с".into());
     ui.global::<Player>().set_shown(84.);
@@ -385,6 +383,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("oled", ThemeMode::Oled, Route::Playlist, true, false, 1280.),
         (
+            "paused-graphite",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "paused-paper",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "paused-oled",
+            ThemeMode::Oled,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
             "albums",
             ThemeMode::Graphite,
             Route::Albums,
@@ -470,7 +492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Route::Playlist,
             true,
             false,
-            920.,
+            1000.,
         ),
         (
             "compact",
@@ -546,12 +568,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
                 shown.clear();
             }
-            ui.global::<Player>()
-                .set_status(if name.starts_with("saved-blocked") {
+            ui.global::<Player>().set_status(
+                if name.starts_with("saved-blocked") || name.starts_with("paused-") {
                     Status::Paused
                 } else {
                     Status::Playing
-                });
+                },
+            );
             if name.starts_with("saved-blocked") {
                 shown[0].available = false;
                 shown[0].blocked_reason = "Провайдер подтвердил потерю доступа".into();

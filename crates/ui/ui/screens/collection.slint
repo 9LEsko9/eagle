@@ -246,6 +246,7 @@ export component CollectionScreen inherits VerticalLayout {
             cards: Library.cards;
             top: -flick.viewport-y;
             view-height: flick.height;
+            anchor-changed(top) => { flick.viewport-y = -top; }
         }
     }
     if !root.grid && Library.tracks.length > 0 : VerticalLayout {

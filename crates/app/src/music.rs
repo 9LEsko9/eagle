@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use eagle_core::{Encryption, Provider, Quality, SignedUrl, Stream, TrackId};
+use crate::providers::Providers;
+use eagle_core::{Encryption, Provider, Quality, SignedUrl, Stream, Token, TrackId};
 use eagle_net::{Client, Priority, Request};
 use eagle_store::{Cache, RangeMap, Store};
 use std::{
@@ -148,7 +149,7 @@ pub(crate) fn metadata(
     let valid_cover = |path: &Path, size| {
         fs::metadata(path)
             .ok()
-            .filter(|m| m.len() <= 8 * 1024 * 1024)
+            .filter(|m| m.len() <= eagle_palette::MAX_COVER_BYTES as u64)
             .and_then(|_| fs::read(path).ok())
             .and_then(|bytes| eagle_palette::decode_cover(&bytes, size).ok())
             .is_some()
@@ -175,7 +176,7 @@ pub(crate) fn metadata(
                 format!("https://{}", cover.replace("%%", "600x600"))
             };
             let mut request = Request::get(SignedUrl::new(url));
-            request.limit = 8 * 1024 * 1024;
+            request.limit = eagle_palette::MAX_COVER_BYTES;
             let response = net.request(Priority::Metadata, request, None)?;
             eagle_palette::process(&response.bytes, &temp_small, &temp_large)?
         } else {
@@ -214,23 +215,23 @@ pub(crate) fn sync(store: &Store, provider: &dyn Provider) -> Result<()> {
         store.put_tracks(&p.tracks)?;
         playlists.push((p.id.to_string(), serde_json::to_string(&p)?));
     }
-    store.replace_playlists(provider.name(), playlists)?;
+    store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
-/// Writes metadata page by page; publishes the ordered likes only after every page succeeds.
+/// Writes metadata page by page; merges the provider's likes only after every page succeeds.
 pub(crate) fn sync_likes(store: &Store, provider: &dyn Provider) -> Result<()> {
     let mut cursor = None;
     let mut ids = Vec::new();
     loop {
         let page = provider.likes(cursor.as_deref())?;
         store.put_tracks(&page.items)?;
-        ids.extend(page.items.iter().map(|track| track.id.to_string()));
+        ids.extend(page.items.iter().map(|track| track.id.clone()));
         cursor = page.next;
         if cursor.is_none() {
             break;
         }
     }
-    store.replace_likes(ids)?;
+    store.sync_provider_likes(provider.info().id, &ids)?;
     Ok(())
 }
 /// Playlist titles only (one request), so the sidebar fills before the slow likes sync.
@@ -241,38 +242,55 @@ pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<(
         .iter()
         .map(|p| Ok((p.id.to_string(), serde_json::to_string(p)?)))
         .collect::<Result<Vec<_>>>()?;
-    store.replace_playlists(provider.name(), playlists)?;
+    store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
+}
+/// Asks for the provider token without echoing it.
+fn prompt_token() -> std::io::Result<Token> {
+    rpassword::prompt_password("Токен: ").map(Token::new)
 }
 pub fn run(args: &[String], root: &Path) -> Result<()> {
     if args.is_empty() {
         println!(
-            "eagle-cli yandex login|status|search <текст>|play <yandex:id>|likes|playlists|album <id>|playlist <id>|like <id>|unlike <id>|sync\neagle-cli play <provider:id> [--standard] [--save]"
+            "eagle-cli [провайдер] login|status|search <текст>|play <provider:id>|likes|playlists|album <id>|playlist <id>|like <id>|unlike <id>|sync\neagle-cli play <provider:id> [--standard] [--save]"
         );
         return Ok(());
     }
-    let (command, tail) = if args[0] == "yandex" {
-        let (a, b) = args[1..].split_first().ok_or("укажите команду Яндекса")?;
-        (a.as_str(), b)
-    } else {
-        (args[0].as_str(), &args[1..])
-    };
     let net = Arc::new(Client::new()?);
-    let provider = eagle_yandex::Yandex::new(net.clone());
+    if args[0] == "play" {
+        return crate::playback::run(&args[1..], root, net);
+    }
+    let providers = Providers::new(crate::providers::builtin(net.clone()), &[])
+        .with_tokens(Arc::new(crate::tokens::Keyring));
+    // Without a provider id the command goes to the first provider by priority.
+    let (provider, words) = match providers.get(&args[0]) {
+        Some(provider) => (provider, &args[1..]),
+        None => (providers.all().first().ok_or("нет провайдеров")?, args),
+    };
+    let (command, tail) = words
+        .split_first()
+        .map(|(command, tail)| (command.as_str(), tail))
+        .ok_or("укажите команду провайдера")?;
+    if command == "play" {
+        return crate::playback::run(tail, root, net);
+    }
     if command == "login" {
-        let account = provider.login(eagle_yandex::prompt_token()?)?;
+        let token = prompt_token()?;
+        let account = providers.sign_in(provider.as_ref(), token)?;
         println!("Вход выполнен: {}", account.id);
-        sync(&Store::open(root)?, &provider)?;
+        sync(&Store::open(root)?, provider.as_ref())?;
         return Ok(());
     }
     if command == "status" {
-        let a = provider.account()?;
+        let a = providers.restore(provider.as_ref())?;
         println!("Аккаунт: {}, Plus: {}", a.id, a.subscription);
         return Ok(());
     }
     if command == "play" {
         return crate::playback::run(tail, root, net);
     }
+    // Other commands work only with the saved token; a missing one fails with `Auth` below.
+    let _ = providers.restore(provider.as_ref());
     let store = Store::open(root)?;
     let tid =
         || -> Result<TrackId> { Ok(tail.first().ok_or("укажите provider:id")?.parse()?) };
@@ -337,13 +355,13 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         }
         "like" | "unlike" => {
             provider.set_liked(&tid()?, command == "like")?;
-            sync(&store, &provider)?;
+            sync(&store, provider.as_ref())?;
         }
         "dislike" | "undislike" => {
             provider.set_disliked(&tid()?, command == "dislike")?;
-            sync(&store, &provider)?;
+            sync(&store, provider.as_ref())?;
         }
-        "sync" => sync(&store, &provider)?,
+        "sync" => sync(&store, provider.as_ref())?,
         _ => return Err("неизвестная команда; запустите eagle-cli без аргументов".into()),
     }
     Ok(())
@@ -355,7 +373,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
     let _cache = Cache::open(&root.join("audio"), LIMIT * 4, &store)?;
     for n in 0..1000 {
         store.put_track(&eagle_core::Track {
-            id: format!("yandex:{n}").parse()?,
+            id: format!("fixture:{n}").parse()?,
             title: "Benchmark fixture".into(),
             artists: vec![],
             album: None,
@@ -363,6 +381,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         })?;
     }
     // Hold 100 decoded RGB thumbnails (64 x 64) as a defined cover-cache workload.
@@ -470,6 +489,7 @@ mod metadata_tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         metadata(&store, &net, &root, &track).unwrap();
         let cover = root.join("covers/yandex_coverless-600.png");

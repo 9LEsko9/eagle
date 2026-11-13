@@ -98,6 +98,7 @@ mod tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         let entry = PlaybackEntry {
             id: 1,
@@ -126,7 +127,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("metadata.sqlite");
         let c = rusqlite::Connection::open(&path).unwrap();
-        c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO settings VALUES('existing','kept'); PRAGMA user_version=1;").unwrap();
+        c.execute_batch("CREATE TABLE tracks(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO settings VALUES('existing','kept'); PRAGMA user_version=1;").unwrap();
         drop(c);
         let store = Store::open(&root).unwrap();
         assert_eq!(store.setting("existing").unwrap().as_deref(), Some("kept"));

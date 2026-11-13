@@ -28,8 +28,11 @@ const DECODED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Job {
-    /// Routing key for the UI, e.g. `t:yandex:1` for a track row.
+    /// Routing key for the UI, e.g. `t:fixture:1` for a track row.
     pub key: String,
+    /// Provider namespace; the service also adds the current account context.
+    pub context: String,
+    pub reply: Option<Arc<dyn Fn(Arc<eagle_palette::Cover>) + Send + Sync>>,
     /// File stem in the cover cache.
     pub stem: String,
     /// Provider URI template (`%%` is the size); `None` uses only what is on disk.
@@ -39,6 +42,7 @@ pub(crate) struct Job {
 }
 
 struct Queue {
+    context: String,
     pending: VecDeque<Job>,
     closed: bool,
     active: bool,
@@ -49,6 +53,7 @@ struct Queue {
 impl Default for Queue {
     fn default() -> Self {
         Self {
+            context: String::new(),
             pending: VecDeque::new(),
             closed: false,
             active: true,
@@ -65,6 +70,18 @@ struct Shared {
     ready: Condvar,
 }
 
+#[derive(Clone)]
+pub(crate) struct Handle(Arc<Shared>);
+impl Handle {
+    pub(crate) fn request(&self, jobs: Vec<Job>) {
+        let mut queue = self.0.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if !queue.active {
+            return;
+        }
+        enqueue(&mut queue.pending, jobs);
+        self.0.ready.notify_one();
+    }
+}
 pub(crate) struct Covers {
     shared: Arc<Shared>,
     worker: Option<thread::JoinHandle<()>>,
@@ -87,12 +104,23 @@ impl Covers {
         })
     }
     pub(crate) fn request(&self, jobs: Vec<Job>) {
+        self.handle().request(jobs);
+    }
+    pub(crate) fn handle(&self) -> Handle {
+        Handle(self.shared.clone())
+    }
+    pub(crate) fn set_context(&self, context: &str) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
-        if !queue.active {
+        if queue.context == context {
             return;
         }
-        enqueue(&mut queue.pending, jobs);
-        self.shared.ready.notify_one();
+        queue.context = context.into();
+        queue.decoded = Decoded::default();
+        invalidate(&mut queue);
+    }
+    pub(crate) fn invalidate(&self) {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        invalidate(&mut queue);
     }
     pub(crate) fn set_active(&self, active: bool) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -125,16 +153,51 @@ impl Drop for Covers {
     }
 }
 
+fn invalidate(queue: &mut Queue) {
+    queue.generation = queue.generation.wrapping_add(1);
+    queue.cancel.store(true, Ordering::Release);
+    queue.cancel = Arc::new(AtomicBool::new(false));
+    queue.pending.clear();
+}
+fn image_key(context: &str, job: &Job) -> String {
+    let provider = if job.context.is_empty() {
+        job.key.split(':').nth(1).unwrap_or("")
+    } else {
+        &job.context
+    };
+    format!(
+        "{context}\0{provider}\0{}",
+        job.uri.as_deref().unwrap_or(&job.stem)
+    )
+}
+fn publish(
+    job: Job,
+    cover: Arc<eagle_palette::Cover>,
+    cancel: Arc<AtomicBool>,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) {
+    if let Some(reply) = job.reply {
+        reply(cover);
+    } else {
+        emit(Event::Thumbnail(job.key, cover, cancel));
+    }
+}
+
 fn enqueue(pending: &mut VecDeque<Job>, batch: Vec<Job>) {
     for job in batch.into_iter().rev() {
-        if job.key.starts_with("h:") {
-            pending.retain(|p| !p.key.starts_with("h:"));
+        if job.key.starts_with("h:") || job.key.starts_with("now:") {
+            pending.retain(|p| {
+                !(p.key.starts_with("h:") && job.key.starts_with("h:"))
+                    && !(p.key.starts_with("now:") && job.key.starts_with("now:"))
+            });
         } else {
             pending.retain(|p| p.key != job.key || p.size != job.size);
         }
         pending.push_front(job);
         if pending.len() > PENDING {
-            let index = pending.iter().rposition(|p| !p.key.starts_with("h:"));
+            let index = pending
+                .iter()
+                .rposition(|p| !p.key.starts_with("h:") && !p.key.starts_with("now:"));
             if let Some(index) = index {
                 pending.remove(index);
             }
@@ -145,7 +208,8 @@ fn enqueue(pending: &mut VecDeque<Job>, batch: Vec<Job>) {
 fn next_job(pending: &mut VecDeque<Job>) -> Option<Job> {
     let index = pending
         .iter()
-        .position(|job| job.key.starts_with("h:"))
+        .position(|job| job.key.starts_with("now:"))
+        .or_else(|| pending.iter().position(|job| job.key.starts_with("h:")))
         .unwrap_or(0);
     pending.remove(index)
 }
@@ -201,7 +265,7 @@ fn run_with(
     mut loader: impl FnMut(&Job, Arc<AtomicBool>) -> Result<Option<eagle_palette::Cover>>,
 ) {
     loop {
-        let (job, generation, cancel) = {
+        let (job, key, generation, cancel) = {
             let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
             while queue.pending.is_empty() && !queue.closed {
                 queue = shared.ready.wait(queue).unwrap_or_else(|e| e.into_inner());
@@ -212,26 +276,29 @@ fn run_with(
             let Some(job) = next_job(&mut queue.pending) else {
                 continue;
             };
-            if let Some(cover) = queue.decoded.get(&job.key, job.size) {
-                emit(Event::Thumbnail(job.key, cover));
+            let key = image_key(&queue.context, &job);
+            if let Some(cover) = queue.decoded.get(&key, job.size) {
+                let cancel = queue.cancel.clone();
+                drop(queue);
+                publish(job, cover, cancel, emit);
                 continue;
             }
-            (job, queue.generation, queue.cancel.clone())
+            (job, key, queue.generation, queue.cancel.clone())
         };
-        match loader(&job, cancel) {
+        match loader(&job, cancel.clone()) {
             Ok(Some(cover)) => {
                 let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
                 if queue.closed || !queue.active || queue.generation != generation {
                     continue;
                 }
                 let cover = Arc::new(cover);
-                queue
-                    .decoded
-                    .insert(job.key.clone(), job.size, cover.clone());
-                emit(Event::Thumbnail(job.key, cover));
+                queue.decoded.insert(key, job.size, cover.clone());
+                let cancel = queue.cancel.clone();
+                drop(queue);
+                publish(job, cover, cancel, emit);
             }
             Ok(None) => {}
-            Err(error) => log::debug!(error = error.to_string().as_str(); "cover unavailable"),
+            Err(_) => log::debug!("cover unavailable or exceeds image limits"),
         }
     }
 }
@@ -245,16 +312,23 @@ fn load(
     let small = dir.join(format!("{}-64.png", job.stem));
     let large = dir.join(format!("{}-600.png", job.stem));
     let path = if job.size <= 64 { &small } else { &large };
-    if !path.exists() {
-        let Some(uri) = &job.uri else {
-            return Ok(None);
-        };
-        download(net, uri, &small, &large, cancel.clone())?;
+    let decode = || -> Result<eagle_palette::Cover> {
+        if std::fs::metadata(path)?.len() > eagle_palette::MAX_COVER_BYTES as u64 {
+            return Err("cover exceeds byte limit".into());
+        }
+        eagle_palette::decode_cover(&std::fs::read(path)?, job.size)
+    };
+    if let Ok(cover) = decode() {
+        return Ok(Some(cover));
     }
-    Ok(Some(eagle_palette::decode_cover(
-        &std::fs::read(path)?,
-        job.size,
-    )?))
+    let Some(uri) = &job.uri else {
+        return Ok(None);
+    };
+    download(net, uri, &small, &large, cancel.clone())?;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    Ok(Some(decode()?))
 }
 
 /// Fetches the 600 px artwork once and writes both cached sizes.
@@ -272,7 +346,7 @@ fn download(
         format!("https://{sized}")
     };
     let mut request = Request::get(SignedUrl::new(url));
-    request.limit = 8 * 1024 * 1024;
+    request.limit = eagle_palette::MAX_COVER_BYTES;
     let response = net.request_cancellable(
         Priority::Background,
         request,
@@ -295,10 +369,62 @@ mod tests {
     fn job(key: &str) -> Job {
         Job {
             key: key.into(),
+            context: "fixture".into(),
+            reply: None,
             stem: key.into(),
             uri: None,
             size: 64,
         }
+    }
+    #[test]
+    fn source_key_deduplicates_targets_but_separates_accounts_and_providers() {
+        let mut a = job("t:fixture:1");
+        a.uri = Some("shared-source".into());
+        let mut b = a.clone();
+        b.key = "h:fixture:album".into();
+        assert_eq!(image_key("account-a", &a), image_key("account-a", &b));
+        assert_ne!(image_key("account-a", &a), image_key("account-b", &b));
+        b.context = "other-provider".into();
+        assert_ne!(image_key("account-a", &a), image_key("account-a", &b));
+        a.uri = None;
+        b.context = a.context.clone();
+        b.uri = None;
+        b.stem = a.stem.clone();
+        assert_eq!(image_key("account-a", &a), image_key("account-a", &b));
+    }
+    #[test]
+    fn player_then_header_then_visible_thumbnail() {
+        let mut pending = VecDeque::new();
+        enqueue(
+            &mut pending,
+            vec![
+                job("t:fixture:1"),
+                job("h:fixture:album"),
+                job("now:fixture:1"),
+            ],
+        );
+        assert_eq!(next_job(&mut pending).unwrap().key, "now:fixture:1");
+        assert_eq!(next_job(&mut pending).unwrap().key, "h:fixture:album");
+        assert_eq!(next_job(&mut pending).unwrap().key, "t:fixture:1");
+    }
+    #[test]
+    fn account_and_screen_invalidation_cancel_results_already_waiting_for_ui() {
+        let service = Covers {
+            shared: Arc::new(Shared::default()),
+            worker: None,
+        };
+        service.request(vec![job("t:fixture:1")]);
+        let first = service.shared.queue.lock().unwrap().cancel.clone();
+        service.invalidate();
+        assert!(first.load(Ordering::Acquire));
+        assert!(service.shared.queue.lock().unwrap().pending.is_empty());
+        let next = service.shared.queue.lock().unwrap().cancel.clone();
+        service.set_context("another-account");
+        assert!(next.load(Ordering::Acquire));
+        assert_eq!(
+            service.shared.queue.lock().unwrap().context,
+            "another-account"
+        );
     }
     #[test]
     fn newest_batch_first_without_duplicates_and_bounded() {
@@ -465,7 +591,7 @@ mod tests {
             worker: Some(worker),
         };
         service.request(vec![job("cached")]);
-        let Event::Thumbnail(_, cached) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        let Event::Thumbnail(_, cached, _) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
         else {
             panic!("expected thumbnail")
         };
@@ -479,7 +605,7 @@ mod tests {
         service.set_active(true);
         service.request(vec![job("resumed")]);
         release_tx.send(()).unwrap();
-        let Event::Thumbnail(key, _) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        let Event::Thumbnail(key, _, _) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
         else {
             panic!("expected thumbnail")
         };
@@ -491,7 +617,7 @@ mod tests {
                 .decoded
                 .entries
                 .iter()
-                .all(|(key, _, _)| key == "resumed")
+                .all(|(key, _, _)| key.ends_with("\0resumed"))
         );
         drop(queue);
         drop(service);

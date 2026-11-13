@@ -13,3 +13,5 @@ license = "GPL-3.0-or-later"
 thiserror.workspace = true
 log.workspace = true
 serde = { version = "1", features = ["derive"] }
+eagle-provider-sdk = { path = "../provider-sdk" }
+unicode-normalization = "0.1"

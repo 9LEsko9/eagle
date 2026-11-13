@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 export enum Status { idle, loading, playing, paused, buffering }
 export enum Route { saved, history, library, search, album, playlist, login, settings, albums, artists, artist, radio }
-export struct TrackItem { blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
+export struct TrackItem { occurrence: string, blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
 export struct CollectionItem { id: string, title: string }
 // Album or artist tile. `key` routes artwork; `id` opens it.
 export struct CardItem { id: string, key: string, title: string, subtitle: string, cover: image, round: bool, route: Route }
 export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color }
 export struct QueueItem { id: string, title: string, artist: string, current: bool }
 export struct DownloadItem { id: string, track: string, quality: string, status: string, error: string, pausable: bool, retryable: bool, cancellable: bool, saved: bool }
+// One connectable service. `token-auth` providers get a token field; `hint` is its placeholder.
+export struct ProviderItem { id: string, name: string, hint: string, help-url: string, token-auth: bool, signed-in: bool }
 export global Storage {
     in property <string> cache-usage;
     in property <string> staging-usage;
@@ -64,6 +66,9 @@ export global Ui {
     in property <bool> visible-to-user: true;
     in-out property <Route> route: Route.library;
     in-out property <bool> panel-open;
+    in-out property <bool> queue-editor-open;
+    in-out property <string> queue-focused-occurrence;
+    in-out property <length> queue-scroll-y;
     in-out property <bool> drawer-open;
     in-out property <bool> list-covers: true;
     in-out property <bool> compact;
@@ -71,6 +76,7 @@ export global Ui {
     in property <bool> autostart;
     in-out property <string> error;
     in property <bool> signed-in;
+    in property <[ProviderItem]> providers;
     in property <bool> busy;
     in property <bool> playlist-busy;
     in property <bool> radio-ready;
@@ -83,6 +89,7 @@ export global Ui {
     in-out property <bool> confirm-delete;
 }
 export global Actions {
+    callback panel-content(bool);
     callback save(string);
     callback save-all();
     callback preferences-changed();
@@ -93,10 +100,8 @@ export global Actions {
     callback autostart(bool);
     callback move-storage(string);
     callback remove-saved(string);
+    callback jump-to(string);
     callback enqueue-next(string);
-    callback move-queue(string, int);
-    callback shift-queue(string, int);
-    callback play-next(string);
     callback play(string);
     callback play-row(int);
     callback play-all(bool);
@@ -119,7 +124,8 @@ export global Actions {
     callback refresh-playlist(string);
     callback radio-start();
     callback radio-more();
-    callback login(string);
+    callback login(string, string);
+    callback logout(string);
     callback like-collection();
     // On-screen ranges (first index, count) so artwork loads only for what is visible.
     callback visible-rows(int, int);

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Two blocking workers, priority/FIFO scheduling and bounded HTTP responses.
-use eagle_core::{SignedUrl, Token};
+use eagle_core::Token;
+use eagle_provider_sdk::Http;
 pub mod growing;
 pub mod policy;
 pub mod system_network;
+pub use eagle_provider_sdk::{HttpError as Error, Priority, Request, Response};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
@@ -12,54 +14,6 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[derive(Clone, Copy)]
-pub enum Priority {
-    Playback = 0,
-    Preload = 1,
-    Metadata = 2,
-    Background = 3,
-}
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("ETag или размер файла изменился; повторите воспроизведение")]
-    Changed,
-    #[error("{0}")]
-    Source(&'static str),
-    #[error("HTTP {0}")]
-    Status(u16),
-    #[error("ошибка сети или таймаут")]
-    Network,
-    #[error("ответ сервера слишком большой")]
-    TooLarge,
-    #[error("сетевой агент остановлен")]
-    Stopped,
-    #[error("очередь сети заполнена")]
-    QueueFull,
-}
-pub struct Request {
-    pub url: SignedUrl,
-    pub method: &'static str,
-    pub headers: Vec<(String, String)>,
-    pub token: Option<Token>,
-    pub form: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
-    pub range: Option<(u64, u64)>,
-    pub limit: usize,
-}
-impl Request {
-    pub fn get(url: SignedUrl) -> Self {
-        Self {
-            url,
-            method: "GET",
-            headers: vec![],
-            token: None,
-            form: vec![],
-            body: None,
-            range: None,
-            limit: 16 * 1024 * 1024,
-        }
-    }
-}
 pub struct ResponseHead {
     pub status: u16,
     pub content_range: Option<String>,
@@ -71,12 +25,6 @@ pub trait BodySink: Send + Sync {
     fn begin(&self, head: &ResponseHead) -> Result<(), Error>;
     fn write(&self, bytes: &[u8]) -> Result<(), Error>;
     fn limit(&self) -> u64;
-}
-pub struct Response {
-    pub status: u16,
-    pub bytes: Vec<u8>,
-    pub content_range: Option<String>,
-    pub etag: Option<String>,
 }
 type Job = Box<dyn FnOnce(&ureq::Agent) + Send>;
 #[derive(Default)]
@@ -102,6 +50,16 @@ pub struct Client {
     counters: Arc<Counters>,
     shared: Arc<Shared>,
     workers: Vec<thread::JoinHandle<()>>,
+}
+impl Http for Client {
+    fn request(
+        &self,
+        priority: Priority,
+        request: Request,
+        refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
+    ) -> Result<Response, Error> {
+        Client::request(self, priority, request, refresh)
+    }
 }
 impl Client {
     pub fn new() -> std::io::Result<Self> {
@@ -452,6 +410,7 @@ impl Drop for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eagle_core::SignedUrl;
     use std::{
         io::Write,
         net::TcpListener,
@@ -545,6 +504,30 @@ mod tests {
             Err(Error::Status(308))
         ));
         assert_eq!(client.stats().requests, 1);
+        server.join().unwrap();
+    }
+    #[test]
+    fn http_trait_reports_unauthorized_without_refresh() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let client = Client::new().unwrap();
+        let http: &dyn Http = &client;
+        let mut request = Request::get(SignedUrl::new(format!("http://{addr}/")));
+        request.token = Some(Token::new("fixture".into()));
+        assert!(matches!(
+            http.request(Priority::Metadata, request, None),
+            Err(Error::Status(401))
+        ));
         server.join().unwrap();
     }
     #[test]

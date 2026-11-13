@@ -1,0 +1,422 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": "288",
+      "hostname": "hostname",
+      "req-id": "1794588727942890-8019993834456649417"
+    },
+    "result": {
+      "albums": {
+        "order": 0,
+        "perPage": 10,
+        "results": [
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "4813bd90.a.15748586-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 171,
+                "name": "сборник",
+                "various": true
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "availableRegions": [
+              "kw",
+              "am",
+              "jo",
+              "tm",
+              "uz",
+              "kg",
+              "ru",
+              "bh",
+              "ae",
+              "az",
+              "ua",
+              "iq",
+              "il",
+              "eg",
+              "qa",
+              "md",
+              "tj",
+              "om",
+              "kz",
+              "ge",
+              "sa"
+            ],
+            "bests": [
+              368215,
+              133083
+            ],
+            "contentWarning": "explicit",
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [
+              "explicit",
+              "exclamationIcon:671a23afcec5646906723a52",
+              "descriptionText:67370c8e13b92b0a60256675"
+            ],
+            "genre": "soundtrack",
+            "id": 31713657,
+            "labels": [
+              "Warner Music Records"
+            ],
+            "likesCount": 5350,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "releaseDate": "2009-03-31T00:00:00+04:00",
+            "storageDir": "dcf27ab3.a.31713657-1",
+            "title": "Queen Of The Damned (Music From The Motion Picture)",
+            "trackCount": 10,
+            "type": "compilation",
+            "veryImportant": false,
+            "year": 2009
+          },
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "fcc8311c.a.20082802-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 11316836,
+                "name": "Ådne Lyngstad Nilsen",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "availableRegions": [
+              "tj",
+              "md",
+              "am",
+              "az",
+              "tm",
+              "uz",
+              "kg",
+              "ru",
+              "kz",
+              "ge",
+              "by",
+              "ua"
+            ],
+            "bests": [],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "soundtrack",
+            "id": 19204860,
+            "labels": [
+              "1150574 Records DK"
+            ],
+            "likesCount": 21,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "releaseDate": "2021-11-05T00:00:00+03:00",
+            "storageDir": "ec64aca6.a.19204860-1",
+            "title": "Queen",
+            "trackCount": 7,
+            "version": "Original Motion Picture Soundtrack",
+            "veryImportant": false,
+            "year": 2021
+          },
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "007e9eed.p.79215/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 79215,
+                "name": "Queen",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "availableRegions": [
+              "by",
+              "ua",
+              "ru"
+            ],
+            "bests": [
+              2181527,
+              2181530,
+              2181534
+            ],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "hardrock",
+            "id": 215683,
+            "labels": [
+              "Universal International",
+              "Queen"
+            ],
+            "likesCount": 9160,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "releaseDate": "2011-01-01T00:00:00+03:00",
+            "storageDir": "88270bd7.a.215683-1",
+            "title": "Queen",
+            "trackCount": 16,
+            "version": "Deluxe Edition 2011 Remaster",
+            "veryImportant": false,
+            "year": 1973
+          },
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31105,
+                "name": "Colin Firth",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31103,
+                "name": "Stellan Skarsgard",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31106,
+                "name": "Amanda Seyfried",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31114,
+                "name": "Christine Baranski",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31111,
+                "name": "Julie Walters",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "ebf5d1d7.a.5534869-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 31109,
+                "name": "Pierce Brosnan",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "availableRegions": [
+              "kw",
+              "am",
+              "jo",
+              "tm",
+              "uz",
+              "kg",
+              "ru",
+              "bh",
+              "ae",
+              "az",
+              "by",
+              "ua",
+              "iq",
+              "il",
+              "eg",
+              "qa",
+              "md",
+              "tj",
+              "om",
+              "kz",
+              "ge",
+              "sa"
+            ],
+            "bests": [],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "musical",
+            "id": 5534869,
+            "labels": [
+              "Littlestar Services"
+            ],
+            "likesCount": 286,
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "releaseDate": "2018-07-06T00:00:00+03:00",
+            "storageDir": "ebf5d1d7.a.5534869-1",
+            "title": "Dancing Queen",
+            "trackCount": 1,
+            "type": "single",
+            "veryImportant": false,
+            "year": 2018
+          },
+          {
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "6d53462a.a.44356405-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 13035118,
+                "name": "Yashhh",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForMobile": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availablePartially": false,
+            "availableRegions": [
+              "by",
+              "ru"
+            ],
+            "bests": [],
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "disclaimers": [],
+            "genre": "bollywood",
+            "id": 32112714,
+            "labels": [],
+            "listeningFinished": false,
+            "metaType": "music",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "recent": false,
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "releaseDate": "2024-02-09T00:00:00+03:00",
+            "storageDir": "6f1715df.a.32112714-1",
+            "title": "Queen",
+            "trackCount": 1,
+            "type": "single",
+            "veryImportant": false,
+            "year": 2024
+          }
+        ],
+        "total": 18128
+      },
+      "page": 0,
+      "perPage": 10,
+      "searchRequestId": "music-web-mobile-production-music-60.mow.yp-c.yandex.net-1794588727942890-8019993834456649417-1794588727965",
+      "text": "Queen",
+      "type": "album"
+    }
+  },
+  "method": "GET",
+  "path": "/search",
+  "query": "nocorrect=true&page=0&text=Queen&type=album",
+  "status": 200
+}

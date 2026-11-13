@@ -134,15 +134,17 @@ def mac_seconds_per_tick():
 
 
 def mac_sample(pid):
-    # rusage_info_v2: UUID followed by 18 uint64 fields (Darwin sys/resource.h).
+    # rusage_info_v4: UUID + 35 uint64 fields, including lifetime peak at index 28.
     class Usage(C.Structure):
-        _fields_ = [('uuid', C.c_byte * 16), ('values', C.c_uint64 * 18)]
+        _fields_ = [('uuid', C.c_byte * 16), ('values', C.c_uint64 * 35)]
     lib = C.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     usage = Usage()
-    if lib.proc_pid_rusage(pid, 2, C.byref(usage)) != 0:
+    has_peak = lib.proc_pid_rusage(pid, 4, C.byref(usage)) == 0
+    if not has_peak and lib.proc_pid_rusage(pid, 2, C.byref(usage)) != 0:
         raise OSError(C.get_errno(), 'proc_pid_rusage')
     return ((usage.values[0] + usage.values[1]) * mac_seconds_per_tick(), usage.values[7], None,
-            {'package_idle_wakeups': usage.values[2], 'interrupt_wakeups': usage.values[3]})
+            {'package_idle_wakeups': usage.values[2], 'interrupt_wakeups': usage.values[3],
+             'lifetime_max_phys_footprint_bytes': usage.values[28] if has_peak else None})
 
 
 def windows_sample(pid):

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Type } from "../globals/theme.slint";
-import { TrackItem, Actions, Player, Route, Ui } from "../globals/bridge.slint";
+import { TrackItem, Actions, Player, Route, Status, Ui } from "../globals/bridge.slint";
 import { IconButton } from "icon-button.slint";
+import { Artwork } from "cover.slint";
+import { GlyphSwap } from "glyph-swap.slint";
 
 // Column widths shared with the table header.
 export global TrackColumns {
@@ -21,7 +23,7 @@ export component TrackRowView inherits Rectangle {
     in property <bool> show-album;
     // Asks the list to open the shared «ещё» menu for this row.
     callback menu(TrackItem);
-    private property <bool> lit: touch.has-hover || heart.hovered || more.hovered || play-control.hovered || focus.has-focus;
+    private property <bool> lit: touch.has-hover || heart.hovered || heart.focused || more.hovered || more.focused || play-control.hovered || play-control.focused || focus.has-focus;
     private property <bool> current: item.id != "" && item.id == Player.track-id;
     height: TrackColumns.row-height;
     border-radius: 8px;
@@ -29,11 +31,9 @@ export component TrackRowView inherits Rectangle {
     accessible-label: item.title + ", " + item.artist + (item.blocked-reason != "" ? ", " + item.blocked-reason : "");
     accessible-action-default => { if item.available { Actions.play-row(root.number - 1); } }
     background: root.lit ? Theme.t.surf : transparent;
-    border-width: focus.has-focus ? 2px : 0px;
-    border-color: Theme.t.tx;
     forward-focus: focus;
     focus := FocusScope { key-pressed(e) => { if e.text == "\n" && root.item.available { Actions.play-row(root.number - 1); return accept; } return reject; } }
-    touch := TouchArea { clicked => { focus.focus(); } double-clicked => { if root.item.available { Actions.play-row(root.number - 1); } } }
+    touch := TouchArea { double-clicked => { if root.item.available { Actions.play-row(root.number - 1); } } }
     HorizontalLayout {
         padding-left: TrackColumns.inset;
         padding-right: TrackColumns.inset;
@@ -56,22 +56,34 @@ export component TrackRowView inherits Rectangle {
                 visible: root.current && !root.lit;
             }
             play-control := IconButton {
-                icon: @image-url("../icons/play.svg");
-                icon-size: 14px;
-                label: @tr("Играть трек");
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                icon-size: 0px;
+                label: root.current && Player.status == Status.playing ? @tr("Приостановить трек") : @tr("Играть трек");
                 reveal: root.lit;
-                clicked => { if root.item.available { Actions.play-row(root.number - 1); } }
+                clicked => { if root.item.available { if root.current { Actions.toggle-play(); } else { Actions.play-row(root.number - 1); } } }
+            }
+            GlyphSwap {
+                x: play-control.x;
+                y: play-control.y;
+                width: play-control.width;
+                height: play-control.height;
+                on: root.current && Player.status == Status.playing;
+                off-icon: @image-url("../icons/play.svg");
+                on-icon: @image-url("../icons/pause.svg");
+                off-offset: 1px;
+                icon-size: 14px;
+                fg: Theme.t.tx;
+                opacity: root.lit || play-control.focused ? 1 : 0;
             }
         }
         if Ui.list-covers : Rectangle {
             width: 40px;
-            Rectangle {
+            Artwork {
                 width: Ui.compact ? 32px : 40px;
                 height: Ui.compact ? 32px : 40px;
-                border-radius: 4px;
-                clip: true;
-                background: Theme.t.surf;
-                Image { source: root.item.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                radius: 4px;
+                image: root.item.cover;
             }
         }
         VerticalLayout {
@@ -113,8 +125,9 @@ export component TrackRowView inherits Rectangle {
             width: TrackColumns.actions;
             spacing: 2px;
             alignment: end;
-            padding-top: 11px;
-            padding-bottom: 11px;
+            // Centre the 32 px buttons in the row, whatever its height.
+            padding-top: (TrackColumns.row-height - 32px) / 2;
+            padding-bottom: (TrackColumns.row-height - 32px) / 2;
             heart := IconButton {
                 icon: @image-url("../icons/heart.svg");
                 active-icon: @image-url("../icons/heart-filled.svg");

@@ -1,0 +1,2 @@
+1794585930687 WARN eagle_ui failed to change Dock visibility
+2026-11-13 19:05:30.727 eagle-ui-skia-baseline[49155:9442314] _LSModifyNotification(result->notificationID, keyCount, codesToSet, 0, NULL, NULL, NULL) returned error -50 on line 282 in NotificationTracker *createTrackerForMask(KeyMask, id, CFTypeRef)

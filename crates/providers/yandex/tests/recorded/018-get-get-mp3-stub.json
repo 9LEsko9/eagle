@@ -1,0 +1,7 @@
+{
+  "body_base64": "PGRvd25sb2FkLWluZm8+PGhvc3Q+c3R1Yi5pbnZhbGlkPC9ob3N0PjxwYXRoPi9zdHViPC9wYXRoPjx0cz4wPC90cz48cmVnaW9uPi0xPC9yZWdpb24+PHM+c3R1Yjwvcz48L2Rvd25sb2FkLWluZm8+",
+  "method": "GET",
+  "path": "/get-mp3/stub",
+  "query": "ts=0",
+  "status": 200
+}

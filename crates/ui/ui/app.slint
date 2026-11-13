@@ -63,6 +63,7 @@ component Sidebar inherits VerticalLayout {
 
 export component DesktopWindow inherits Window {
     title: "eagle";
+    icon: @image-url("../assets/brand/icon-256.png");
     preferred-width: 1280px;
     preferred-height: 880px;
     min-width: 560px;
@@ -75,6 +76,18 @@ export component DesktopWindow inherits Window {
         Layout.width = self.width;
         if !Layout.compact { Ui.drawer-open = false; }
     }
+    private property <float> panel-lifetime: Ui.panel-open ? 1 : 0;
+    animate panel-lifetime { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; }
+    changed panel-lifetime => {
+        if root.panel-lifetime == 0 || root.panel-lifetime == 1 {
+            Actions.panel-content(Ui.panel-open);
+        }
+    }
+    // The drawer slides in 24 px and fades; it leaves the tree once the exit has finished.
+    private property <float> drawer-lifetime: Ui.drawer-open ? 1 : 0;
+    animate drawer-lifetime { duration: Motion.base; }
+    private property <length> drawer-offset: Ui.drawer-open ? 0px : -24px;
+    animate drawer-offset { duration: Motion.base; easing: cubic-bezier(0.2, 0, 0, 1); }
     private property <length> bar-height: 80px;
     keys := FocusScope {
         VerticalLayout {
@@ -131,9 +144,8 @@ export component DesktopWindow inherits Window {
             PlayerBar { height: root.bar-height; }
         }
         // Floating «Сейчас играет» on windows too narrow for a third column.
-        if Layout.narrow : NowPlayingCard {
+        if Layout.narrow && (Ui.panel-open || root.panel-lifetime > 0) : NowPlayingCard {
             floating: true;
-            visible: Ui.panel-open;
             x: parent.width - self.width - 16px;
             y: 16px;
             height: parent.height - root.bar-height - 32px;
@@ -146,11 +158,12 @@ export component DesktopWindow inherits Window {
             y: 0;
             clicked => { Ui.drawer-open = false; }
         }
-        if Layout.compact && Ui.drawer-open : Rectangle {
-            x: 0;
+        if Layout.compact && (Ui.drawer-open || root.drawer-lifetime > 0) : Rectangle {
+            x: root.drawer-offset;
             y: 0;
             width: 224px;
             height: parent.height - root.bar-height;
+            opacity: root.drawer-lifetime;
             background: Theme.t.bg;
             border-width: 0px;
             drop-shadow-blur: 24px;

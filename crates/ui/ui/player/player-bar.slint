@@ -7,6 +7,7 @@ import { PlayPause } from "../components/play-pause.slint";
 import { SeekSlider } from "../components/slider.slint";
 
 export component PlayerBar inherits Rectangle {
+    private property <bool> tight: Layout.width < 835px;
     private property <float> unmuted: 0.7;
     pure function clock(seconds: float) -> string {
         return floor(seconds / 60) + ":" + (mod(floor(seconds), 60) < 10 ? "0" : "") + mod(floor(seconds), 60);
@@ -17,13 +18,14 @@ export component PlayerBar inherits Rectangle {
     Rectangle { y: 0; height: 1px; background: Theme.t.ln; }
     Timer { interval: 250ms; running: Player.status == Status.playing && Ui.visible-to-user; triggered => { Player.shown = Player.position(); } }
     HorizontalLayout {
-        padding-left: Layout.tight ? 12px : 16px;
-        padding-right: Layout.tight ? 12px : 20px;
-        spacing: Layout.tight ? 12px : 24px;
+        padding-left: root.tight ? 12px : 16px;
+        padding-right: root.tight ? 12px : 20px;
+        spacing: root.tight ? 12px : 24px;
         // Track: cover, title, like.
         HorizontalLayout {
             horizontal-stretch: 1;
-            min-width: Layout.tight ? 120px : 200px;
+            preferred-width: 0px;
+            min-width: root.tight ? 120px : 200px;
             spacing: 12px;
             alignment: start;
             VerticalLayout {
@@ -31,7 +33,8 @@ export component PlayerBar inherits Rectangle {
                 Cover { image: Player.cover; fg: Player.colors.tx; clicked => { Ui.panel-open = !Ui.panel-open; } }
             }
             VerticalLayout {
-                max-width: 240px;
+                horizontal-stretch: 1;
+                min-width: 0px;
                 spacing: 1px;
                 alignment: center;
                 // Title opens the album, artist opens the artist page.
@@ -47,6 +50,7 @@ export component PlayerBar inherits Rectangle {
                         font-weight: 600;
                         overflow: elide;
                         opacity: title-touch.has-hover ? 0.75 : 1;
+                        animate opacity { duration: Motion.fast; }
                     }
                     title-touch := TouchArea {
                         enabled: Player.album-id != "";
@@ -64,6 +68,7 @@ export component PlayerBar inherits Rectangle {
                         color: artist-touch.has-hover ? Player.colors.tx : Player.colors.tx2;
                         font-size: Type.meta;
                         overflow: elide;
+                        animate color { duration: Motion.fast; }
                     }
                     artist-touch := TouchArea {
                         enabled: Player.artist-id != "";
@@ -72,7 +77,7 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
             }
-            if Player.title != "" && !Layout.tight : VerticalLayout {
+            if Player.title != "" && !root.tight : VerticalLayout {
                 alignment: center;
                 IconButton {
                     icon: @image-url("../icons/heart.svg");
@@ -89,15 +94,13 @@ export component PlayerBar inherits Rectangle {
         }
         // Transport and progress.
         VerticalLayout {
-            horizontal-stretch: 1.4;
-            min-width: Layout.tight ? 200px : 300px;
-            max-width: 600px;
+            width: clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 600px);
             alignment: center;
-            spacing: 2px;
+            spacing: 0px;
             HorizontalLayout {
                 alignment: center;
                 spacing: 14px;
-                if !Layout.tight : VerticalLayout {
+                if !root.tight : VerticalLayout {
                     alignment: center;
                     IconButton { icon: @image-url("../icons/shuffle.svg"); label: @tr("Перемешивание"); show-mark: true; active: Player.shuffle; fg: Player.colors.tx2; active-fg: Player.colors.tx; clicked => { Actions.toggle-shuffle(); } }
                 }
@@ -110,7 +113,7 @@ export component PlayerBar inherits Rectangle {
                     alignment: center;
                     IconButton { size: 36px; icon-size: 20px; icon: @image-url("../icons/next.svg"); label: @tr("Следующий трек"); fg: Player.colors.tx; clicked => { Actions.next(); } }
                 }
-                if !Layout.tight : VerticalLayout {
+                if !root.tight : VerticalLayout {
                     alignment: center;
                     IconButton {
                         icon: Player.repeat == 2 ? @image-url("../icons/repeat-one.svg") : @image-url("../icons/repeat.svg");
@@ -125,7 +128,7 @@ export component PlayerBar inherits Rectangle {
             }
             HorizontalLayout {
                 spacing: 10px;
-                Text { text: root.clock(Player.shown); color: Player.colors.tx2; font-size: Type.tiny; width: 36px; horizontal-alignment: right; vertical-alignment: center; }
+                Text { text: root.clock(Player.shown); color: Player.colors.tx2; font-size: Type.tiny; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
                 SeekSlider {
                     horizontal-stretch: 1;
                     label: @tr("Позиция");
@@ -140,13 +143,14 @@ export component PlayerBar inherits Rectangle {
                         Actions.seek(Player.length * f);
                     }
                 }
-                Text { text: root.clock(Player.length); color: Player.colors.tx2; font-size: Type.tiny; width: 36px; vertical-alignment: center; }
+                Text { text: root.clock(Player.length); color: Player.colors.tx2; font-size: Type.tiny; width: 40px; vertical-alignment: center; }
             }
         }
         // Panel and volume.
         HorizontalLayout {
             horizontal-stretch: 1;
-            min-width: Layout.tight ? 72px : 200px;
+            preferred-width: 0px;
+            min-width: root.tight ? 120px : 200px;
             spacing: 4px;
             alignment: end;
             VerticalLayout {

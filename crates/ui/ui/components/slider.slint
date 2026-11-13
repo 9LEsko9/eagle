@@ -20,7 +20,7 @@ export component SeekSlider inherits Rectangle {
         return min(1, max(0, x / max(1px, root.width)));
     }
     min-width: 64px;
-    height: 16px;
+    height: 24px;
     private property <bool> dragging;
     private property <float> drag;
     private property <float> v: dragging ? drag : min(1, max(0, value));
@@ -63,7 +63,7 @@ export component SeekSlider inherits Rectangle {
         width: label-text.preferred-width + 12px;
         height: 20px;
         x: max(0px, min(parent.width - self.width, parent.width * self.f - self.width / 2));
-        y: -24px;
+        y: parent.height / 2 - 32px;
         border-radius: 6px;
         background: root.fg;
         label-text := Text {
@@ -82,7 +82,9 @@ export component SeekSlider inherits Rectangle {
             return reject;
         }
     }
+    // Reaches 4 px below the strip for a 28 px hit area; nothing interactive sits there.
     touch := TouchArea {
+        height: parent.height + 4px;
         mouse-cursor: pointer;
         pointer-event(e) => {
             if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {

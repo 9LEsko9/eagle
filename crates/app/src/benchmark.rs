@@ -9,9 +9,23 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Fixture;
+/// What the fixture implements; capability-driven routing reaches only these methods.
+const fn capabilities() -> Capabilities {
+    let mut c = Capabilities::none();
+    c.search_tracks = true;
+    c.likes = true;
+    c.playlists_read = true;
+    c
+}
 impl Provider for Fixture {
-    fn name(&self) -> &str {
-        "yandex"
+    fn info(&self) -> &ProviderInfo {
+        static INFO: ProviderInfo = ProviderInfo {
+            id: "fixture",
+            name: "fixture",
+            auth: AuthMethod::None,
+            capabilities: capabilities(),
+        };
+        &INFO
     }
     fn account(&self) -> std::result::Result<Account, ProviderError> {
         Err(ProviderError::Unavailable)
@@ -46,7 +60,7 @@ impl Provider for Fixture {
         let items = (start..end)
             .map(|n| {
                 Ok(Track {
-                    id: format!("yandex:{n}").parse()?,
+                    id: format!("fixture:{n}").parse()?,
                     title: format!("Fixture {n} {}", "metadata ".repeat(32)),
                     artists: vec![],
                     album: None,
@@ -54,6 +68,7 @@ impl Provider for Fixture {
                     duration_ms: 1000,
                     cover: None,
                     availability: Availability::Available,
+                    isrc: None,
                 })
             })
             .collect::<std::result::Result<Vec<_>, ProviderError>>()?;
@@ -106,12 +121,23 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
             settle(root, pass)?;
         }
     } else {
+        // The decoded cache is keyed by source, so each key needs its own file name: hard links to
+        // the one fixture image give every key a separate entry without copying the bytes.
+        let dir = root.join("covers");
+        for (prefix, count, edge) in [("t", 10_000, 64), ("a", 1000, 600)] {
+            for n in 0..count {
+                let link = dir.join(format!("{prefix}{n}-{edge}.png"));
+                if !link.exists() {
+                    std::fs::hard_link(dir.join(format!("fixture-{edge}.png")), link)?;
+                }
+            }
+        }
         let (tx, rx) = mpsc::channel();
         let covers = crate::covers::Covers::start(
             root.to_owned(),
             Arc::new(eagle_net::Client::new()?),
             Arc::new(move |event| {
-                if let crate::session::Event::Thumbnail(_, _) = event {
+                if let crate::session::Event::Thumbnail(_, _, _) = event {
                     let _ = tx.send(());
                 }
             }),
@@ -128,8 +154,10 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
                         covers.request(
                             (start..(start + 20).min(count))
                                 .map(|n| crate::covers::Job {
-                                    key: format!("{prefix}:yandex:{n}"),
-                                    stem: "fixture".into(),
+                                    context: String::new(),
+                                    reply: None,
+                                    key: format!("{prefix}:fixture:{n}"),
+                                    stem: format!("{prefix}{n}"),
                                     uri: None,
                                     size,
                                 })

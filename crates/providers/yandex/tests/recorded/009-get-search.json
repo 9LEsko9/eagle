@@ -1,0 +1,275 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": "312",
+      "hostname": "hostname",
+      "req-id": "1794588728280490-4375101054220190610"
+    },
+    "result": {
+      "page": 0,
+      "perPage": 10,
+      "playlists": {
+        "order": 0,
+        "perPage": 10,
+        "results": [
+          {
+            "available": true,
+            "collective": false,
+            "cover": {
+              "custom": false,
+              "type": "pic",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "created": "2000-01-01T00:00:00+00:00",
+            "customWave": {
+              "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+              "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/custom-wave-default-playlist-background.image/%%",
+              "header": "Моя волна по плейлисту",
+              "position": "default",
+              "title": "Лучшее: Queen"
+            },
+            "description": "Queen: самые популярные треки",
+            "descriptionFormatted": "Queen: самые популярные треки",
+            "durationMs": 5094150,
+            "idForFrom": "artist_top",
+            "isBanner": false,
+            "isPremiere": false,
+            "kind": 79215,
+            "modified": "2000-01-01T00:00:00+00:00",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "owner": {
+              "login": "stub-login",
+              "name": "Яндекс Музыка",
+              "sex": "unknown",
+              "uid": "1",
+              "verified": true
+            },
+            "playlistUuid": "stub-uuid",
+            "regions": [
+              "RUSSIA_PREMIUM"
+            ],
+            "revision": 0,
+            "snapshot": 1,
+            "tags": [],
+            "title": "Лучшее: Queen",
+            "trackCount": 20,
+            "uid": "1",
+            "visibility": "public"
+          },
+          {
+            "available": true,
+            "collective": false,
+            "cover": {
+              "custom": false,
+              "type": "pic",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "created": "2000-01-01T00:00:00+00:00",
+            "customWave": {
+              "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+              "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/custom-wave-default-playlist-background.image/%%",
+              "header": "Моя волна по плейлисту",
+              "position": "default",
+              "title": "Лучшее: Queen"
+            },
+            "description": "Queen: самые популярные треки",
+            "descriptionFormatted": "Queen: самые популярные треки",
+            "durationMs": 4337020,
+            "idForFrom": "artist_top",
+            "isBanner": false,
+            "isPremiere": false,
+            "kind": 2443128,
+            "modified": "2000-01-01T00:00:00+00:00",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "owner": {
+              "login": "stub-login",
+              "name": "Яндекс Музыка",
+              "sex": "unknown",
+              "uid": "1",
+              "verified": true
+            },
+            "playlistUuid": "stub-uuid",
+            "regions": [
+              "RUSSIA_PREMIUM"
+            ],
+            "revision": 0,
+            "snapshot": 1,
+            "tags": [],
+            "title": "Лучшее: Queen",
+            "trackCount": 20,
+            "uid": "1",
+            "visibility": "public"
+          },
+          {
+            "available": true,
+            "collective": false,
+            "cover": {
+              "custom": true,
+              "dir": "/get-music-user-playlist/69910/103372440.2439.65985/",
+              "type": "pic",
+              "uri": "avatars.yandex.net/get-music-user-playlist/69910/103372440.2439.65985/%%?1701685465985",
+              "version": "1701685465985"
+            },
+            "created": "2000-01-01T00:00:00+00:00",
+            "customWave": {
+              "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+              "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/custom-wave-default-playlist-background.image/%%",
+              "header": "Моя волна по плейлисту",
+              "position": "default",
+              "title": "«Ход королевы»"
+            },
+            "description": "Детство и юность уникальной шахматистки Бет Хармон проходят под песни The Kinks, The Monkees, Shocking Blue и других артистов, чья музыка поможет полностью погрузиться в чарующую атмосферу 60-х.",
+            "descriptionFormatted": "Детство и юность уникальной шахматистки Бет Хармон проходят под песни The Kinks, The Monkees, Shocking Blue и других артистов, чья музыка поможет полностью погрузиться в чарующую атмосферу 60-х.",
+            "durationMs": 3092750,
+            "isBanner": false,
+            "isPremiere": false,
+            "kind": 2439,
+            "modified": "2000-01-01T00:00:00+00:00",
+            "ogImage": "avatars.yandex.net/get-music-user-playlist/69910/103372440.2439.65985/%%?1701685465985",
+            "owner": {
+              "login": "stub-login",
+              "name": "Яндекс Музыка",
+              "sex": "male",
+              "uid": "1",
+              "verified": true
+            },
+            "playlistUuid": "stub-uuid",
+            "regions": [
+              "RUSSIA_PREMIUM"
+            ],
+            "revision": 5,
+            "snapshot": 74,
+            "tags": [
+              {
+                "id": "57b454bb2d321384e9b87770",
+                "value": "cinema"
+              },
+              {
+                "id": "5eb588043c047856d9c0f08f",
+                "value": "music from tv series"
+              }
+            ],
+            "title": "«Ход королевы»",
+            "trackCount": 18,
+            "uid": "1",
+            "visibility": "public"
+          },
+          {
+            "available": true,
+            "collective": false,
+            "cover": {
+              "custom": true,
+              "dir": "/get-music-user-playlist/51766/572951973.1381.82831/",
+              "type": "pic",
+              "uri": "avatars.yandex.net/get-music-user-playlist/51766/572951973.1381.82831/%%?1597845186247",
+              "version": "1597845186247"
+            },
+            "created": "2000-01-01T00:00:00+00:00",
+            "customWave": {
+              "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+              "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/custom-wave-default-playlist-background.image/%%",
+              "header": "Моя волна по плейлисту",
+              "position": "default",
+              "title": "Песни Queen Джона Дикона"
+            },
+            "description": "В день рождения Джона Дикона из Queen вспоминаем те песни, в которых он в составе Queen поучаствовал как автор. Он — автор самых танцевальных песен группы и, вполне вероятно, создатель тех треков, которые состарились в дискографии Queen лучше всего.",
+            "descriptionFormatted": "В день рождения Джона Дикона из Queen вспоминаем те песни, в которых он в составе Queen поучаствовал как автор. Он &#8212; автор самых танцевальных песен группы и, вполне вероятно, создатель тех треков, которые состарились в дискографии Queen лучше всего.",
+            "durationMs": 3768960,
+            "isBanner": false,
+            "isPremiere": false,
+            "kind": 1381,
+            "modified": "2000-01-01T00:00:00+00:00",
+            "ogImage": "avatars.yandex.net/get-music-user-playlist/51766/572951973.1381.82831/%%?1597845186247",
+            "owner": {
+              "login": "stub-login",
+              "name": "Медиацентр поезда «Сапсан»",
+              "sex": "male",
+              "uid": "1",
+              "verified": true
+            },
+            "playlistUuid": "stub-uuid",
+            "regions": [
+              "RUSSIA_PREMIUM"
+            ],
+            "revision": 19,
+            "snapshot": 22,
+            "tags": [],
+            "title": "Песни Queen Джона Дикона",
+            "trackCount": 18,
+            "uid": "1",
+            "visibility": "public"
+          },
+          {
+            "available": true,
+            "backgroundColor": "",
+            "collective": false,
+            "cover": {
+              "custom": true,
+              "dir": "/get-music-user-playlist/71140/103372440.1180.2666/",
+              "type": "pic",
+              "uri": "avatars.yandex.net/get-music-user-playlist/71140/103372440.1180.2666/%%?1738921102666",
+              "version": "1738921102666"
+            },
+            "created": "2000-01-01T00:00:00+00:00",
+            "customWave": {
+              "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+              "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/custom-wave-default-playlist-background.image/%%",
+              "header": "Моя волна по плейлисту",
+              "position": "default",
+              "title": "Музыка 1980-х"
+            },
+            "description": "Нетленные рок-хиты, евродиско и легендарные синтезаторы.",
+            "descriptionFormatted": "Нетленные рок-хиты, евродиско и легендарные синтезаторы.",
+            "durationMs": 101788010,
+            "image": "",
+            "isBanner": false,
+            "isPremiere": false,
+            "kind": 1180,
+            "modified": "2000-01-01T00:00:00+00:00",
+            "ogImage": "avatars.yandex.net/get-music-user-playlist/71140/103372440.1180.2666/%%?1738921102666",
+            "owner": {
+              "login": "stub-login",
+              "name": "Яндекс Музыка",
+              "sex": "male",
+              "uid": "1",
+              "verified": true
+            },
+            "playlistUuid": "stub-uuid",
+            "regions": [
+              "RUSSIA_PREMIUM"
+            ],
+            "revision": 20,
+            "snapshot": 119,
+            "tags": [
+              {
+                "id": "5ae445f6cfd69fb3b9cc6dfd",
+                "value": "top"
+              },
+              {
+                "id": "5795cf7777d30f7fda41bcaa",
+                "value": "80s"
+              },
+              {
+                "id": "5e05b1eca993d82842b2c15f",
+                "value": "timemachine"
+              }
+            ],
+            "textColor": "#000000",
+            "title": "Музыка 1980-х",
+            "trackCount": 125,
+            "uid": "1",
+            "visibility": "public"
+          }
+        ],
+        "total": 1239
+      },
+      "searchRequestId": "music-web-mobile-production-music-81.mow.yp-c.yandex.net-1794588728280490-4375101054220190610-1794588728304",
+      "text": "Queen",
+      "type": "playlist"
+    }
+  },
+  "method": "GET",
+  "path": "/search",
+  "query": "nocorrect=true&page=0&text=Queen&type=playlist",
+  "status": 200
+}

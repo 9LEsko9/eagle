@@ -1,3 +1,4 @@
+import { ListView } from "std-widgets.slint";
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, ThemeMode, Type, Motion, Layout } from "../globals/theme.slint";
 import { Ui, Actions, Route, Player, Status, Storage } from "../globals/bridge.slint";
@@ -86,7 +87,7 @@ component AppearancePreview inherits Rectangle {
             HorizontalLayout {
                 padding: 12px;
                 spacing: 12px;
-                Artwork { image: Player.cover; width: 48px; height: 48px; radius: 6px; }
+                Artwork { image: Player.cover; width: 48px; height: 48px; radius: 6px; outline: Player.colors.tx.with-alpha(0.1); }
                 VerticalLayout {
                     horizontal-stretch: 1;
                     min-width: 0px;
@@ -233,7 +234,10 @@ export component SettingsScreen inherits Flickable {
                         text: @tr("Загрузок пока нет. Выберите «Сохранить офлайн» в меню трека.");
                         color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap;
                     }
+                    if Storage.jobs.length > 0 : ListView {
+                    height: min(440px, Storage.jobs.length * 132px);
                     for job in Storage.jobs : VerticalLayout {
+                        height: 132px;
                         padding-top: 12px; padding-bottom: 12px; spacing: 4px;
                         Text { text: job.track; color: Theme.t.tx; font-size: Type.body; overflow: elide; }
                         Text { text: job.quality + " · " + job.status; color: Theme.t.tx2; font-size: Type.meta; }
@@ -248,6 +252,7 @@ export component SettingsScreen inherits Flickable {
                             if job.cancellable : TextButton { text: @tr("Отменить"); clicked => { Actions.download-control(job.id, 2); } }
                         }
                     }
+                    }
                     SectionTitle { text: @tr("Система"); }
                     SettingRow {
                         title: @tr("Завершать при закрытии окна");
@@ -260,14 +265,10 @@ export component SettingsScreen inherits Flickable {
                         Switch { label: @tr("Автозапуск"); checked: Ui.autostart; toggled => { Actions.autostart(!Ui.autostart); } }
                     }
                     SectionTitle { text: @tr("Аккаунты"); }
-                    SettingRow {
-                        title: @tr("Яндекс Музыка");
-                        hint: Ui.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
-                        if !Ui.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
-                    }
-                    SettingRow {
-                        title: @tr("VK Музыка");
-                        hint: @tr("Пока недоступно");
+                    for provider in Ui.providers : SettingRow {
+                        title: provider.name;
+                        hint: provider.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
+                        if !provider.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
                     }
                     Text {
                         text: @tr("При закрытии окна приложение выходит.");

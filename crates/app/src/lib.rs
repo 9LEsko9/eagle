@@ -10,8 +10,11 @@ mod covers;
 mod downloads;
 pub mod music;
 mod playback;
+pub mod providers;
 pub mod session;
+mod source;
 mod storage;
+pub mod tokens;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logger =

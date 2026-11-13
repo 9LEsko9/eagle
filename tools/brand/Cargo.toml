@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 eagle contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "eagle-brand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+ico = "0.6"
+icns = { version = "0.5", default-features = false, features = ["pngio"] }
+png = "0.18"
+resvg = "0.50"
+clap = { version = "4.6.7", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

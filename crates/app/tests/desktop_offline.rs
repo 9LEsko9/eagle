@@ -76,8 +76,8 @@ struct HttpFixture {
     url: String,
 }
 impl Provider for HttpFixture {
-    fn name(&self) -> &str {
-        self.base.name()
+    fn info(&self) -> &ProviderInfo {
+        self.base.info()
     }
     fn login(&self, token: Token) -> Result<Account, ProviderError> {
         self.base.login(token)
@@ -139,7 +139,7 @@ fn download_child() {
     let base = fixture::provider();
     let tracks = base.likes(None).unwrap().items;
     let provider = Arc::new(HttpFixture { base, url });
-    let session = Session::start_with_provider(root.into(), provider, |_| {}).unwrap();
+    let session = Session::start_with_providers(root.into(), vec![provider], |_| {}).unwrap();
     for track in tracks {
         session
             .sender()
@@ -169,7 +169,7 @@ fn downloads_restart_then_survive_offline_reopen() {
     let root_guard = FixtureRoot(root.clone());
     let store = Store::open(&root).unwrap();
     store
-        .put_setting("account_uid:yandex", "fixture".into())
+        .put_setting("account:fixture", "fixture".into())
         .unwrap();
     let base = fixture::provider();
     let tracks = base.likes(None).unwrap().items;
@@ -337,7 +337,7 @@ fn downloads_restart_then_survive_offline_reopen() {
     partial_phase.store(false, Ordering::Release);
     resumed.lock().unwrap().clear();
     let provider = Arc::new(HttpFixture { base, url });
-    let session = Session::start_with_provider(root.clone(), provider, |_| {}).unwrap();
+    let session = Session::start_with_providers(root.clone(), vec![provider], |_| {}).unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let jobs = store.downloads("fixture").unwrap();
@@ -381,12 +381,12 @@ fn downloads_restart_then_survive_offline_reopen() {
         let saved: Track = serde_json::from_str(&json).unwrap();
         assert_eq!(saved.cover.as_deref(), Some("https://fixture.invalid/art"));
     }
-    let offline = Session::start_with_provider(
+    let offline = Session::start_with_providers(
         root.clone(),
-        Arc::new(HttpFixture {
+        vec![Arc::new(HttpFixture {
             base: fixture::provider(),
             url: String::new(),
-        }),
+        })],
         |_| {},
     )
     .unwrap();

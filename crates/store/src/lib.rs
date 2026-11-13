@@ -26,6 +26,8 @@ pub enum Error {
     Stopped,
     #[error("недостаточно места в незакреплённом кэше")]
     CacheFull,
+    #[error("трек не сохранён")]
+    UnknownTrack,
 }
 mod access;
 mod usage;
@@ -39,6 +41,13 @@ mod history;
 pub use downloads::{DownloadJob, DownloadState};
 mod playback;
 pub use playback::{PlaybackEntry, PlaybackState, RadioContext};
+mod groups;
+mod like_outbox;
+mod likes;
+mod profile_ops;
+pub use like_outbox::LikeJob;
+pub use likes::LikeSync;
+pub use profile_ops::Op;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
@@ -53,11 +62,11 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 fn initialize(path: &Path) -> Result<Connection, Error> {
-    let c = Connection::open(path)?;
+    let mut c = Connection::open(path)?;
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 8 {
+    if version > 14 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -124,13 +133,122 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
             CREATE INDEX radio_play_intents_account ON radio_play_intents(account,event_id);
             PRAGMA user_version=8; COMMIT;")?;
     }
+    if version < 9 {
+        migrate_profile(&c)?;
+    }
+    if version < 10 {
+        groups::migrate(&mut c)?;
+    }
+    if version < 11 {
+        likes::migrate_tables(&c)?;
+    }
+    if version < 12 {
+        likes::migrate_likes(&mut c)?;
+    }
+    if version < 13 {
+        // Databases that reached v12 before `likes_unresolved` existed.
+        c.execute_batch(
+            "BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS likes_unresolved(track TEXT PRIMARY KEY, at INTEGER NOT NULL);
+            PRAGMA user_version=13; COMMIT;",
+        )?;
+    }
+    if version < 14 {
+        // Failed like deliveries count their attempts for the retry backoff. The column check
+        // keeps the step idempotent for a database whose version was rewound by hand.
+        let has_attempts: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('like_outbox') WHERE name='attempts')",
+            [],
+            |r| r.get(0),
+        )?;
+        let add = if has_attempts {
+            ""
+        } else {
+            "ALTER TABLE like_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;"
+        };
+        c.execute_batch(&format!(
+            "BEGIN IMMEDIATE; {add} PRAGMA user_version=14; COMMIT;"
+        ))?;
+    }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
         return Err(Error::Corrupt);
     }
     Ok(c)
 }
+/// 128 random bits as hex, from the std hasher seed (not a secret).
+fn random_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut id = String::with_capacity(32);
+    for salt in 0..2u64 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(salt ^ now() as u64 ^ u64::from(std::process::id()));
+        id.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    id
+}
+/// v9: the profile owns history and playback; provider accounts live under `account:<id>`.
+/// Rows of the previous Yandex account (and signed-out rows) move to the profile; downloads,
+/// access, offline owners and play reports stay with the provider account.
+fn migrate_profile(c: &Connection) -> Result<(), Error> {
+    c.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), Error> {
+        let existing = |key: &str| -> Result<Option<String>, Error> {
+            Ok(
+                c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                    r.get(0)
+                })
+                .optional()?,
+            )
+        };
+        let profile = match existing("profile_id")? {
+            Some(profile) => profile,
+            None => {
+                let profile = random_id();
+                c.execute("INSERT INTO settings VALUES('profile_id',?1)", [&profile])?;
+                profile
+            }
+        };
+        if existing("device_id")?.is_none() {
+            c.execute("INSERT INTO settings VALUES('device_id',?1)", [random_id()])?;
+        }
+        if let Some(uid) = existing("account_uid:yandex")? {
+            c.execute(
+                "INSERT OR REPLACE INTO settings VALUES('account:yandex',?1)",
+                [&uid],
+            )?;
+            c.execute("DELETE FROM settings WHERE key='account_uid:yandex'", [])?;
+            for owner in [uid.as_str(), ""] {
+                c.execute(
+                    "UPDATE OR IGNORE history SET account=?1 WHERE account=?2",
+                    [&profile, owner],
+                )?;
+                c.execute(
+                    "UPDATE OR IGNORE playback SET account=?1 WHERE account=?2",
+                    [&profile, owner],
+                )?;
+            }
+        }
+        c.execute_batch("PRAGMA user_version=9;")?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(c.execute_batch("COMMIT;")?),
+        Err(error) => {
+            let _ = c.execute_batch("ROLLBACK;");
+            Err(error)
+        }
+    }
+}
 impl Store {
+    /// Identity of the local profile; owns history and playback.
+    pub fn profile_id(&self) -> Result<String, Error> {
+        self.setting("profile_id")?.ok_or(Error::Corrupt)
+    }
+    /// Identity of this installation, stable across restarts.
+    pub fn device_id(&self) -> Result<String, Error> {
+        self.setting("device_id")?.ok_or(Error::Corrupt)
+    }
     pub fn open(root: &Path) -> Result<Self, Error> {
         fs::create_dir_all(root)?;
         #[cfg(unix)]
@@ -172,11 +290,13 @@ impl Store {
                     job(&mut c);
                 }
             })?;
-        Ok(Self {
+        let store = Self {
             path,
             tx: Some(tx),
             worker: Some(worker),
-        })
+        };
+        store.compact_profile_if_due();
+        Ok(store)
     }
     pub fn write<T: Send + 'static>(
         &self,
@@ -220,6 +340,7 @@ impl Store {
                 ));
             }
         }
+        let owned = tracks.to_vec();
         self.write(move |c| {
             let tx = c.transaction()?;
             {
@@ -233,6 +354,11 @@ impl Store {
                     artist.execute(params![id, json])?;
                 }
             }
+            for track in &owned {
+                groups::assign(&tx, track)?;
+            }
+            let ids: Vec<String> = owned.iter().map(|t| t.id.to_string()).collect();
+            likes::resolve_likes_in(&tx, &ids)?;
             tx.commit()?;
             Ok(())
         })
@@ -257,22 +383,6 @@ impl Store {
         let id = id.to_owned();
         self.write(move |c| {
             c.execute(&sql, params![id, json])?;
-            Ok(())
-        })
-    }
-    /// Replaces Yandex likes. `ids` is newest first; rows are stored oldest first so that
-    /// `ORDER BY rowid DESC` lists the newest like first, including likes added later.
-    pub fn replace_likes(&self, ids: Vec<String>) -> Result<(), Error> {
-        self.write(move |c| {
-            let tx = c.transaction()?;
-            tx.execute("DELETE FROM likes WHERE id LIKE 'yandex:%'", [])?;
-            {
-                let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO likes VALUES(?1)")?;
-                for id in ids.iter().rev() {
-                    insert.execute([id])?;
-                }
-            }
-            tx.commit()?;
             Ok(())
         })
     }
@@ -810,19 +920,15 @@ mod tests {
                 duration_ms: 1000,
                 cover: None,
                 availability: eagle_core::Availability::Available,
+                isrc: None,
             })
             .collect::<Vec<_>>();
         store.put_tracks(&tracks).unwrap();
-        // Provider order is newest first.
-        store
-            .replace_likes(vec!["yandex:3".into(), "yandex:1".into()])
-            .unwrap();
-        store
-            .write(|c| {
-                c.execute("INSERT OR IGNORE INTO likes VALUES('yandex:2')", [])?;
-                Ok(())
-            })
-            .unwrap();
+        for n in [1, 3, 2] {
+            store
+                .like(&format!("yandex:{n}").parse().unwrap(), true, &[])
+                .unwrap();
+        }
         let ids = |sql: &str| -> Vec<String> {
             let c = store.read().unwrap();
             let mut stmt = c.prepare(sql).unwrap();
@@ -831,12 +937,13 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert_eq!(
-            ids(
-                "SELECT likes.id FROM likes JOIN tracks ON tracks.id=likes.id ORDER BY likes.rowid DESC"
-            ),
-            ["yandex:2", "yandex:3", "yandex:1"]
-        );
+        let liked: Vec<String> = store
+            .liked_tracks(&[])
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id.to_string())
+            .collect();
+        assert_eq!(liked, ["yandex:2", "yandex:3", "yandex:1"]);
         store.put_json("playlists", "vk:9", "{}".into()).unwrap();
         store
             .replace_playlists(

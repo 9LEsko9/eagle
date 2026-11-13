@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Motion } from "../globals/theme.slint";
+
+export component GlyphSwap inherits Rectangle {
+    in property <bool> on;
+    in property <image> off-icon;
+    in property <image> on-icon;
+    in property <color> fg;
+    in property <length> icon-size;
+    in property <length> off-offset;
+
+    Image {
+        width: root.icon-size;
+        height: root.icon-size;
+        x: (parent.width - self.width) / 2 + root.off-offset;
+        y: (parent.height - self.height) / 2;
+        source: root.off-icon;
+        colorize: root.fg;
+        opacity: root.on ? 0 : 1;
+        private property <float> scale: root.on ? 0.4 : 1;
+        transform-scale-x: self.scale * 100%;
+        transform-scale-y: self.scale * 100%;
+        animate opacity { duration: Motion.play; easing: ease; }
+        animate scale { duration: Motion.morph; easing: cubic-bezier(0.2, 0.9, 0.25, 1.3); }
+    }
+    Image {
+        width: root.icon-size;
+        height: root.icon-size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.on-icon;
+        colorize: root.fg;
+        opacity: root.on ? 1 : 0;
+        private property <float> scale: root.on ? 1 : 0.4;
+        transform-scale-x: self.scale * 100%;
+        transform-scale-y: self.scale * 100%;
+        animate opacity { duration: Motion.play; easing: ease; }
+        animate scale { duration: Motion.morph; easing: cubic-bezier(0.2, 0.9, 0.25, 1.3); }
+    }
+}

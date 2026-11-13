@@ -4,6 +4,7 @@ import { Library, Ui, Actions } from "../globals/bridge.slint";
 import { TrackRowView } from "../components/track-row.slint";
 import { TextButton } from "../components/button.slint";
 import { CardGrid } from "../components/cards.slint";
+import { Artwork } from "../components/cover.slint";
 import { TrackMenu, TrackTableHeader } from "collection.slint";
 
 component SectionHeading inherits Text {
@@ -27,13 +28,11 @@ export component ArtistScreen inherits Flickable {
             spacing: 24px;
             if !Layout.compact || Library.cover.width > 0 : VerticalLayout {
                 alignment: end;
-                Rectangle {
+                Artwork {
                     width: root.cover-size;
                     height: root.cover-size;
-                    border-radius: self.width / 2;
-                    clip: true;
-                    background: Theme.t.surf;
-                    Image { source: Library.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                    radius: root.cover-size / 2;
+                    image: Library.cover;
                 }
             }
             VerticalLayout {
@@ -84,6 +83,7 @@ export component ArtistScreen inherits Flickable {
             cards: Library.cards;
             top: -root.viewport-y - self.y;
             view-height: root.height;
+            anchor-changed(top) => { root.viewport-y = -top - self.y; }
         }
     }
 }

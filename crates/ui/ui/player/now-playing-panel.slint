@@ -2,27 +2,22 @@
 import { ListView } from "std-widgets.slint";
 import { Theme, Type, Motion } from "../globals/theme.slint";
 import { Player, Library, Ui, Actions, Status } from "../globals/bridge.slint";
-import { TextButton } from "../components/button.slint";
 import { IconButton } from "../components/icon-button.slint";
+import { Artwork } from "../components/cover.slint";
 
 export global Source {
-    // Provider key from the track id → human name.
+    // The bridge already puts the provider's name here; only local files have no provider.
     pure public function name(key: string) -> string {
-        return key == "yandex" ? @tr("Яндекс Музыка") : key == "vk" ? @tr("VK Музыка") : key == "file" ? @tr("Файл") : key;
+        return key == "file" ? @tr("Файл") : key;
     }
 }
 
 // The card itself. It slides 24 px and fades in; nothing around it is re-laid out per frame.
 export component NowPlayingCard inherits Rectangle {
     in property <bool> floating;
-    private property <bool> edit-queue;
-    private property <string> focused-occurrence;
-    private property <length> drag-origin;
-    private property <int> drag-index;
-    private property <string> drag-id;
     private property <length> art: self.width - 40px;
     private property <length> offset: Ui.panel-open ? 0px : 24px;
-    animate offset { duration: Motion.base; easing: cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+    animate offset { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; easing: Ui.panel-open ? cubic-bezier(0.2, 0.9, 0.25, 1.05) : cubic-bezier(0.2, 0, 0, 1); }
     width: 320px;
     Rectangle {
         x: root.offset;
@@ -31,7 +26,7 @@ export component NowPlayingCard inherits Rectangle {
         border-radius: 16px;
         background: Player.colors.bg;
         opacity: Ui.panel-open ? 1 : 0;
-        animate opacity { duration: Motion.base; }
+        animate opacity { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; }
         animate background { duration: Motion.slow; }
         drop-shadow-blur: root.floating ? 24px : 0px;
         drop-shadow-color: #0000004d;
@@ -57,16 +52,16 @@ export component NowPlayingCard inherits Rectangle {
                 height: root.art;
                 // Artwork settles back slightly while paused.
                 private property <float> s: Player.status == Status.paused ? 0.88 : 1;
-                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.15); }
-                Rectangle {
+                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+                Artwork {
                     width: parent.width * parent.s;
                     height: self.width;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    border-radius: 12px;
-                    clip: true;
-                    background: Player.colors.tx.with-alpha(0.08);
-                    Image { source: Player.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                    radius: 12px;
+                    image: Player.cover;
+                    placeholder: Player.colors.tx.with-alpha(0.08);
+                    outline: Player.colors.tx.with-alpha(0.1);
                 }
             }
             Rectangle { height: 18px; }
@@ -96,88 +91,34 @@ export component NowPlayingCard inherits Rectangle {
                 }
             }
             Text {
-                text: Player.source == "" ? "" : Source.name(Player.source) + " · " + Player.quality;
+                text: Player.source == "" ? Player.quality : Source.name(Player.source) + (Player.quality == "" ? "" : " · " + Player.quality);
                 color: Player.colors.tx2;
                 font-size: Type.small;
                 height: self.preferred-height + 6px;
                 vertical-alignment: bottom;
             }
-            TextButton { text: root.edit-queue ? @tr("Далее") : @tr("Вся очередь"); clicked => { root.edit-queue = !root.edit-queue; } }
-            if !root.edit-queue : Text {
-                text: @tr("Далее");
-                color: Player.colors.tx2;
-                font-size: Type.small;
-                font-weight: 600;
-                height: 40px;
-                vertical-alignment: center;
+            Text {
+                text: @tr("Играет далее"); color: Player.colors.tx2; font-size: Type.small;
+                font-weight: 600; height: 40px; vertical-alignment: center;
             }
-            if root.edit-queue : Rectangle {
+            if Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
+            ListView {
                 vertical-stretch: 1;
-                queue-focus := FocusScope {
-                    key-pressed(event) => {
-                        if event.text == Key.UpArrow { Actions.shift-queue(root.focused-occurrence, -1); return accept; }
-                        if event.text == Key.DownArrow { Actions.shift-queue(root.focused-occurrence, 1); return accept; }
-                        if event.text == "\n" { Actions.play-next(root.focused-occurrence); return accept; }
-                        return reject;
-                    }
-                }
-                ListView {
-                vertical-stretch: 1;
-                for entry[index] in Library.queue-order : Rectangle {
-                    height: 84px;
-                    accessible-role: list-item;
-                    accessible-label: entry.title + ", " + entry.artist;
-                    border-width: queue-focus.has-focus && root.focused-occurrence == entry.id ? 2px : 0px;
-                    border-color: Player.colors.tx2;
-                    TouchArea { clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); } }
-                    TouchArea {
-                        width: 22px;
-                        mouse-cursor: move;
-                        pointer-event(event) => {
-                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
-                                root.drag-origin = self.mouse-y;
-                                root.drag-index = index;
-                                root.drag-id = entry.id;
-                                root.focused-occurrence = entry.id;
-                                queue-focus.focus();
-                            }
-                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.drag-id == entry.id {
-                                Actions.move-queue(root.drag-id, max(0, min(Library.queue-order.length - 1, root.drag-index + round((self.mouse-y - root.drag-origin) / 84px))));
-                                root.drag-id = "";
-                            }
-                        }
-                        Text { text: "↕"; color: Player.colors.tx2; vertical-alignment: center; }
-                    }
-                    VerticalLayout {
-                        padding-left: 24px;
-                        spacing: 0px;
-                        Text { text: (entry.current ? "▶ " : "") + entry.title; color: Player.colors.tx; font-size: Type.meta; overflow: elide; }
-                        Text { text: entry.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
-                        HorizontalLayout {
-                            spacing: 0px; alignment: start;
-                            TextButton { text: "↑"; enabled: index > 0; clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); Actions.shift-queue(entry.id, -1); } }
-                            TextButton { text: "↓"; enabled: index + 1 < Library.queue-order.length; clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); Actions.shift-queue(entry.id, 1); } }
-                            TextButton { text: @tr("Следующим"); clicked => { Actions.play-next(entry.id); } }
-                        }
-                    }
-                }
-            }
-                }
-            if !root.edit-queue && Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
-            if !root.edit-queue : ListView {
-                vertical-stretch: 1;
-                for item in Library.queue : HorizontalLayout {
+                for item in Library.queue : Rectangle {
                     height: 48px;
+                    background: touch.has-hover ? Player.colors.tx.with-alpha(0.08) : transparent;
+                    touch := TouchArea { mouse-cursor: pointer; clicked => { Actions.jump-to(item.occurrence); } }
+                    HorizontalLayout {
                     spacing: 10px;
                     if Ui.list-covers : VerticalLayout {
                         alignment: center;
-                        Rectangle {
+                        Artwork {
                             width: 36px;
                             height: 36px;
-                            border-radius: 5px;
-                            clip: true;
-                            background: Player.colors.tx.with-alpha(0.08);
-                            Image { source: item.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                            radius: 5px;
+                            image: item.cover;
+                            placeholder: Player.colors.tx.with-alpha(0.08);
+                            outline: Player.colors.tx.with-alpha(0.1);
                         }
                     }
                     VerticalLayout {
@@ -187,6 +128,7 @@ export component NowPlayingCard inherits Rectangle {
                         alignment: center;
                         Text { text: item.title; color: Player.colors.tx; font-size: Type.meta; font-weight: 500; overflow: elide; }
                         Text { text: item.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
+                    }
                     }
                 }
             }
@@ -198,5 +140,8 @@ export component NowPlayingCard inherits Rectangle {
 export component NowPlayingPanel inherits Rectangle {
     width: Ui.panel-open ? 336px : 0px;
     clip: true;
-    NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }
+    animate width { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; easing: Ui.panel-open ? cubic-bezier(0.2, 0.9, 0.25, 1.05) : cubic-bezier(0.2, 0, 0, 1); }
+    private property <float> lifetime: Ui.panel-open ? 1 : 0;
+    animate lifetime { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; }
+    if Ui.panel-open || root.lifetime > 0 : NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }
 }

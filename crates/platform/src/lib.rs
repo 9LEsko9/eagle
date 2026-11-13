@@ -7,3 +7,4 @@
 pub mod autostart;
 pub mod logging;
 pub mod power;
+pub mod tokens;

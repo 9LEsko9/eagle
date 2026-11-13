@@ -1,0 +1,105 @@
+{
+  "body": {
+    "invocationInfo": {
+      "app-name": "music-accounts",
+      "exec-duration-millis": 6,
+      "hostname": "hostname",
+      "req-id": "1794588726755788-11022115106766636026"
+    },
+    "result": {
+      "account": {
+        "birthday": "2000-01-01",
+        "child": false,
+        "displayName": "Stub User",
+        "firstName": "Stub",
+        "fullName": "Stub User",
+        "hostedUser": false,
+        "login": "stub-login",
+        "nonOwnerFamilyMember": false,
+        "now": "2026-11-13T16:52:06+00:00",
+        "region": 225,
+        "regionCode": "ru",
+        "secondName": "User",
+        "serviceAvailable": true,
+        "uid": "1"
+      },
+      "advertisement": "Оформите постоянную подписку – первый месяц бесплатно!",
+      "defaultEmail": "stub@example.invalid",
+      "hasOptions": [
+        "bookmate",
+        "lumen"
+      ],
+      "masterhub": {
+        "activeSubscriptions": [],
+        "availableSubscriptions": []
+      },
+      "permissions": {
+        "default": [
+          "landing-play",
+          "feed-play",
+          "radio-play",
+          "mix-play"
+        ],
+        "until": "2026-11-14T16:52:06+00:00",
+        "values": [
+          "landing-play",
+          "feed-play",
+          "radio-play",
+          "mix-play",
+          "radio-skips",
+          "library-cache",
+          "library-play",
+          "high-quality",
+          "ads-skips",
+          "non-shuffled-play",
+          "background-play",
+          "play-premium-tracks",
+          "auto-flow",
+          "play-full-tracks",
+          "play-radio-full-tracks"
+        ]
+      },
+      "plus": {
+        "hasPlus": true,
+        "isTutorialCompleted": true
+      },
+      "pretrialActive": false,
+      "subeditor": false,
+      "subeditorLevel": 0,
+      "subscription": {
+        "autoRenewable": [
+          {
+            "expires": "2026-11-20T19:52:06+03:00",
+            "finished": false,
+            "orderId": "stub-order",
+            "product": {
+              "debug": false,
+              "duration": 1,
+              "feature": "",
+              "features": [],
+              "plus": false,
+              "price": {
+                "amount": 0.0,
+                "currency": "no-information"
+              },
+              "productId": "falllback_id",
+              "trialDuration": 0,
+              "type": "subscription"
+            },
+            "productId": "falllback_id",
+            "vendor": "Yandex",
+            "vendorHelpUrl": "https://www.yandex.ru/support/music-app/subscription.xml"
+          }
+        ],
+        "canStartTrial": false,
+        "hadAnySubscription": true,
+        "mcdonalds": false
+      },
+      "userhash": "stub-hash"
+    }
+  },
+  "method": "GET",
+  "path": "/account/status",
+  "query": "",
+  "status": 200
+}

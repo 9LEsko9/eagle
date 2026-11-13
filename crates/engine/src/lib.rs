@@ -436,6 +436,8 @@ struct Worker {
     pending_policy: Option<(u32, Vec<usize>, Repeat)>,
     pipeline: Option<Pipeline>,
     preload: Option<(usize, Decoder)>,
+    #[cfg(test)]
+    open_count: u32,
     preload_attempted: Option<usize>,
     output: Option<Output>,
     state: State,
@@ -482,6 +484,8 @@ impl Worker {
             pending_policy: None,
             pipeline: None,
             preload: None,
+            #[cfg(test)]
+            open_count: 0,
             preload_attempted: None,
             output: None,
             state: State::Idle,
@@ -834,7 +838,7 @@ impl Worker {
             || current & 1 != 0
             || self.shared.pending_interrupts.load(Ordering::Acquire) > 0
     }
-    fn open_decoder(&self, index: usize) -> Result<Decoder, Error> {
+    fn open_decoder(&mut self, index: usize) -> Result<Decoder, Error> {
         let interrupt = Interrupt {
             generation: self.shared.interrupt_generation.clone(),
             expected: self.shared.interrupt_generation.load(Ordering::Acquire),
@@ -852,6 +856,10 @@ impl Worker {
         let reader = self.sources[index]
             .open(interrupt)
             .map_err(|e| Error::Decode(e.to_string()))?;
+        #[cfg(test)]
+        {
+            self.open_count += 1;
+        }
         Decoder::open(reader)
     }
     fn prepare(&mut self) -> Result<(), Error> {
@@ -860,15 +868,9 @@ impl Worker {
         if self.output.is_none() && self.state != State::Buffering {
             self.set_state(State::Loading);
         }
-        let mut decoder = if let Some((index, decoder)) = self.preload.take() {
-            if index == self.decode_index {
-                drop(decoder);
-                self.open_decoder(self.decode_index)?
-            } else {
-                self.open_decoder(self.decode_index)?
-            }
-        } else {
-            self.open_decoder(self.decode_index)?
+        let mut decoder = match self.preload.take() {
+            Some((index, decoder)) if index == self.decode_index => decoder,
+            _ => self.open_decoder(self.decode_index)?,
         };
         if self.output.is_none() {
             self.output = Some(Output::open(
