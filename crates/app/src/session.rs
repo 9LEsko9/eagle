@@ -7539,7 +7539,9 @@ mod like_delivery_tests {
         // Like the worker: every `LikesPending` queues the next batch behind what arrived since.
         let mut answered = false;
         loop {
-            let Message::Catalog(_, reply) = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+            // Each batch commits twenty times; a slow CI disk needs more than a few seconds.
+            let Message::Catalog(_, reply) =
+                reply_rx.recv_timeout(Duration::from_secs(60)).unwrap()
             else {
                 continue;
             };
