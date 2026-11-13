@@ -517,7 +517,9 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             library.set_playlist_revision("".into());
             ui.global::<Ui>().set_confirm_delete(false);
             bridge.cards.set_vec(Vec::new());
-            bridge.rows.set_vec(Vec::new());
+            // Session reconciles the next library against its previous rows. Keep the
+            // same rows here so its subsequent indexed deltas still apply.
+            bridge.clear_rows();
             bridge.row_window.set((0, 0));
             bridge.card_window.set((0, 0));
             ui.global::<Ui>().set_route(route(view));
@@ -1322,6 +1324,19 @@ pub(super) mod tests {
             height: 1,
             dominant: [0; 3],
         });
+        apply(
+            &ui,
+            Event::LibraryReset((0..8).map(|id| item(&id.to_string())).collect()),
+            &bridge,
+        );
+        apply(&ui, Event::View(View::History), &bridge);
+        apply(
+            &ui,
+            Event::Library(vec![LibraryDelta::Remove { index: 7 }]),
+            &bridge,
+        );
+        assert_eq!(rows.row_count(), 7);
+        assert_eq!(rows.row_data(6).unwrap().id.as_str(), "yandex:6");
         apply(
             &ui,
             Event::LibraryReset(vec![item("1"), item("2")]),
