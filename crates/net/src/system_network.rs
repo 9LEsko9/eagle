@@ -70,7 +70,25 @@ fn windows_status(level: i32) -> NetworkStatus {
 
 #[cfg(any(target_os = "linux", test))]
 fn relevant_monitor_line(line: &str) -> bool {
-    line.starts_with("Connectivity is now") || line.contains("is now the primary connection")
+    line.starts_with("Connectivity is now")
+        || line.contains("is now the primary connection")
+        || line.ends_with(": connection profile changed")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn handle_monitor_line(
+    line: &str,
+    previous: &mut NetworkPolicy,
+    query: impl FnOnce() -> NetworkPolicy,
+    callback: impl FnOnce(NetworkPolicy),
+) {
+    if relevant_monitor_line(line) {
+        let policy = query();
+        if policy != *previous {
+            callback(policy);
+            *previous = policy;
+        }
+    }
 }
 
 /// An event subscription. Dropping it unregisters callbacks and stops its worker.
@@ -155,13 +173,12 @@ mod monitor {
                             break;
                         }
                         let Ok(line) = line else { break };
-                        if relevant_monitor_line(&line) {
-                            let policy = query(false);
-                            if policy != previous {
-                                callback(policy);
-                                previous = policy;
-                            }
-                        }
+                        handle_monitor_line(
+                            &line,
+                            &mut previous,
+                            || query(false),
+                            |policy| callback(policy),
+                        );
                     }
                     if !stop.load(Ordering::Acquire) && previous != NetworkPolicy::default() {
                         callback(NetworkPolicy::default());
@@ -415,9 +432,36 @@ mod tests {
         assert!(relevant_monitor_line(
             "'Home' is now the primary connection"
         ));
+        assert!(relevant_monitor_line("Home: connection profile changed"));
         assert!(!relevant_monitor_line("wlp2s0: using connection 'Home'"));
         assert!(!relevant_monitor_line(
             "Networkmanager is now in the 'connected' state"
         ));
+    }
+
+    #[test]
+    fn monitor_queries_profile_changes_and_notifies_only_on_policy_changes() {
+        let mut previous = parse_nmcli("full:no", false);
+        let metered = parse_nmcli("full:yes", false);
+        let mut queries = 0;
+        let mut notifications = Vec::new();
+        for line in [
+            "wlp2s0: using connection 'Home'",
+            "Home: connection profile changed",
+            "Home: connection profile changed",
+        ] {
+            handle_monitor_line(
+                line,
+                &mut previous,
+                || {
+                    queries += 1;
+                    metered
+                },
+                |policy| notifications.push(policy),
+            );
+        }
+        assert_eq!(queries, 2);
+        assert_eq!(notifications, vec![metered]);
+        assert_eq!(previous, metered);
     }
 }
