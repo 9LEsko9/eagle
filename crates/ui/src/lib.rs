@@ -978,11 +978,13 @@ mod tests {
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
         player_bar_centre_is_independent_of_title();
-        for width in [1000., 1280.] {
+        for width in [1000., 1067., 1068., 1127., 1128., 1129., 1280.] {
             let panel_ui = DesktopWindow::new().unwrap();
             panel_ui
                 .window()
                 .set_size(slint::LogicalSize::new(width, 880.));
+            panel_ui.global::<Ui>().set_signed_in(true);
+            panel_ui.global::<Ui>().set_route(Route::Playlist);
             panel_ui.show().unwrap();
             for index in 0..5 {
                 let label = if index % 2 == 0 {
@@ -1000,6 +1002,11 @@ mod tests {
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
             slint::platform::update_timers_and_animations();
             assert!(panel_ui.global::<Ui>().get_panel_open());
+            let close = ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель")
+                .find(|element| element.absolute_position().y < 100.)
+                .unwrap();
+            let right = close.absolute_position().x + close.size().width;
+            assert!(right <= width, "width={width}, close right={right}");
             assert!(
                 ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель").count() >= 2
             );

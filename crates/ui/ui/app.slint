@@ -99,6 +99,7 @@ export component DesktopWindow inherits Window {
                 spacing: 0;
                 if !Layout.compact : Sidebar { }
                 VerticalLayout {
+                    min-width: 0px;
                     padding-left: Layout.compact ? 20px : Layout.wide ? 48px : 32px;
                     padding-right: Layout.compact ? 20px : Layout.wide ? 48px : 32px;
                     padding-top: Layout.compact ? 12px : 40px;
