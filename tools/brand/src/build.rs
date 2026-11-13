@@ -6,11 +6,12 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use resvg::tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
 
 use crate::pack::{write_icns, write_ico, write_png};
 use crate::palette::{GRAPHITE, rgb};
+use crate::preview;
 use crate::render::{render_svg, tint, to_template};
 use crate::sources::{Source, for_size, load};
 
@@ -83,6 +84,52 @@ fn render_all(src: &Path, large: Source, sizes: &[u32]) -> Result<Vec<Pixmap>> {
 /// Creates `dir` and its parents.
 fn mkdir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))
+}
+
+/// Removes `out`, then writes every asset and the preview sheet into it.
+///
+/// Refuses to run when `out` is a dangerous target (see `check_out`).
+pub fn build_all(src: &Path, out: &Path) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    check_out(src, out, &cwd)?;
+    if out.exists() {
+        fs::remove_dir_all(out).with_context(|| format!("failed to clear {}", out.display()))?;
+    }
+    mkdir(out)?;
+    build_desktop(src, out)?;
+    build_tray(src, out)?;
+    build_ios(src, out)?;
+    build_android(src, out)?;
+    build_web(src, out)?;
+    preview::write_sheet(src, out)
+}
+
+/// Rejects an `out` directory that `build_all` must never clear.
+///
+/// Relative paths are taken from `cwd`. Refused: an empty path, the filesystem
+/// root, the source directory or any directory containing it, and any
+/// ancestor of `cwd`.
+fn check_out(src: &Path, out: &Path, cwd: &Path) -> Result<()> {
+    if out.as_os_str().is_empty() {
+        bail!("refusing to clear an empty output path");
+    }
+    let out = cwd.join(out);
+    if out.parent().is_none() {
+        bail!("refusing to clear the filesystem root {}", out.display());
+    }
+    if cwd.join(src).starts_with(&out) {
+        bail!(
+            "refusing to clear {}, which contains the source",
+            out.display()
+        );
+    }
+    if cwd.starts_with(&out) {
+        bail!(
+            "refusing to clear {}, an ancestor of the working directory",
+            out.display()
+        );
+    }
+    Ok(())
 }
 
 /// Writes the desktop icons into `out`.
@@ -220,4 +267,36 @@ pub fn build_web(src: &Path, out: &Path) -> Result<()> {
         &render_at(src, Source::Mark, MARK_SIZE)?,
         &mark.join("mark-512.png"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::check_out;
+
+    #[test]
+    fn check_out_refuses_dangerous_targets() {
+        let cwd = Path::new("/work/eagle/tools/brand");
+        let src = Path::new("/work/eagle/assets/brand/src");
+        for out in [
+            "",
+            "/",
+            "/work/eagle/assets/brand/src",
+            "/work/eagle/assets",
+            "/work",
+            "/work/eagle/tools",
+        ] {
+            assert!(
+                check_out(src, Path::new(out), cwd).is_err(),
+                "{out:?} must be refused"
+            );
+        }
+        assert!(check_out(src, Path::new("/work/eagle/assets/brand/out"), cwd).is_ok());
+        assert!(check_out(src, Path::new("out"), cwd).is_ok());
+        assert!(
+            check_out(src, Path::new("."), cwd).is_err(),
+            "relative . is the working directory"
+        );
+    }
 }

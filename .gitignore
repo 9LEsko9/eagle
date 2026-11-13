@@ -16,3 +16,6 @@ __pycache__/
 
 # Local integration evidence and agent worktrees.
 .review/
+
+# Generated brand assets (cargo run -p eagle-brand -- build).
+/assets/brand/out/

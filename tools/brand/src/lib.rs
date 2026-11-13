@@ -6,5 +6,6 @@
 pub mod build;
 pub mod pack;
 pub mod palette;
+pub mod preview;
 pub mod render;
 pub mod sources;
