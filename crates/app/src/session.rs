@@ -6969,13 +6969,13 @@ mod sync_tests {
         drop(worker);
         let _ = std::fs::remove_dir_all(root);
     }
-    fn logout_worker(
-        tag: &str,
-    ) -> (
+    /// Worker, its in-memory tokens, and the provider snapshots it emitted.
+    type LogoutHarness = (
         Worker,
         Arc<crate::tokens::MemoryTokens>,
         Arc<std::sync::Mutex<Vec<Vec<(String, bool)>>>>,
-    ) {
+    );
+    fn logout_worker(tag: &str) -> LogoutHarness {
         use eagle_provider_sdk::testkit::fake_track;
         let root = std::env::temp_dir().join(format!("eg-logout-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

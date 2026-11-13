@@ -83,6 +83,12 @@ name = "xtask"
 version = "=0.1.0"
 allow = ["GPL-3.0-or-later"]
 
+# Build-time icon tool (tools/brand), GPL like every workspace crate; not linked into the app.
+[[licenses.exceptions]]
+name = "eagle-brand"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
 [bans]
 multiple-versions = "warn"
 deny = [{ name = "tracing" }]
