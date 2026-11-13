@@ -280,15 +280,19 @@ pub(crate) fn streamed_with_hooks(
         }))
     }))
 }
-fn complete(source: &Source) -> Result<()> {
-    // This path deliberately bypasses decoding and audio output.
-    let interrupt = Interrupt {
+fn idle_interrupt() -> Interrupt {
+    Interrupt {
         generation: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         expected: 0,
         preload: false,
         seeking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let mut reader = source.open_reader(interrupt).map_err(|e| e.to_string())?;
+    }
+}
+fn complete(source: &Source) -> Result<()> {
+    // This path deliberately bypasses decoding and audio output.
+    let mut reader = source
+        .open_reader(idle_interrupt())
+        .map_err(|e| e.to_string())?;
     io::copy(&mut reader, &mut io::sink())?;
     Ok(())
 }
@@ -821,12 +825,20 @@ mod http_tests {
                             Arc::new(move || Ok(url.clone().into())),
                         )
                         .unwrap();
+                        // Format probing reads only the head and tail. Dropping its reader
+                        // would cancel a request still in flight, and the next open would
+                        // fetch the file again, so keep the download alive until it is complete.
+                        let hold = source
+                            .open_reader(idle_interrupt())
+                            .map_err(|e| e.to_string())
+                            .unwrap();
                         let actual = eagle_engine::inspect(&source, Some(48000)).unwrap();
                         let expected =
                             eagle_engine::inspect(&Source::file(fixtures.join(&name)), Some(48000))
                                 .unwrap();
                         assert_eq!(actual.frames, expected.frames, "{name}");
                         complete(&source).unwrap();
+                        drop(hold);
                         let before = net.stats();
                         assert_eq!(
                             eagle_engine::inspect(&source, Some(48000)).unwrap().frames,
