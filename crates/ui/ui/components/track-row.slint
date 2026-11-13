@@ -59,7 +59,7 @@ export component TrackRowView inherits Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 icon-size: 0px;
-                label: @tr("Играть трек");
+                label: root.current && Player.status == Status.playing ? @tr("Приостановить трек") : @tr("Играть трек");
                 reveal: root.lit;
                 clicked => { if root.item.available { if root.current { Actions.toggle-play(); } else { Actions.play-row(root.number - 1); } } }
             }

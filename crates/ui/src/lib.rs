@@ -1109,6 +1109,25 @@ mod tests {
             move |index| played_rows.borrow_mut().push(index)
         });
         slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Играть трек")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(&*played_rows.borrow(), &[0]);
+        played_rows.borrow_mut().clear();
+        ui.global::<Player>().set_track_id("yandex:1".into());
+        ui.global::<Player>().set_status(Status::Playing);
+        ElementHandle::find_by_accessible_label(&ui, "Приостановить трек")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(*toggles.borrow(), 2);
+        ui.global::<Player>().set_status(Status::Paused);
+        ElementHandle::find_by_accessible_label(&ui, "Играть трек")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(*toggles.borrow(), 3);
         ElementHandle::find_by_accessible_label(&ui, "Первый трек, Исполнитель")
             .nth(1)
             .unwrap()
