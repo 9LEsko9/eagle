@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
-    Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route, Status,
-    Theme, TrackItem, Ui, media,
+    Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
+    QueueItem, Route, Status, Storage, Theme, TrackItem, Ui, media,
 };
 use eagle_app::session::{
-    Card, Command, CommandSender, Event, Header, LibraryDelta, LibraryItem, View,
+    Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
+    View,
 };
 use eagle_engine::{PositionAnchor, State};
 use slint::{ComponentHandle, Model, VecModel};
@@ -75,6 +76,8 @@ fn card_item(card: Card) -> CardItem {
 }
 fn route(view: View) -> Route {
     match view {
+        View::Saved => Route::Saved,
+        View::History => Route::History,
         View::Library => Route::Library,
         View::Search => Route::Search,
         View::Album => Route::Album,
@@ -249,6 +252,55 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
     let rows = &bridge.rows;
     let anchor = &bridge.anchor;
     match event {
+        Event::Snapshot(snapshot) => {
+            ui.global::<Ui>().set_signed_in(snapshot.signed_in);
+            apply(ui, Event::View(snapshot.view), bridge);
+            apply(ui, Event::Collections(snapshot.collections), bridge);
+            apply(
+                ui,
+                Event::Collection {
+                    title: snapshot.title,
+                    length: snapshot.length,
+                },
+                bridge,
+            );
+            apply(ui, Event::Header(snapshot.header), bridge);
+            apply(ui, Event::LibraryReset(snapshot.rows), bridge);
+            apply(ui, Event::Cards(snapshot.cards), bridge);
+            apply(ui, Event::Busy(snapshot.busy), bridge);
+            let current = snapshot
+                .current
+                .and_then(|id| snapshot.queue.iter().position(|(item, _)| *item == id));
+            let mut queue: Vec<_> = current.map_or_else(Vec::new, |index| {
+                snapshot.queue[index + 1..]
+                    .iter()
+                    .map(|(_, track)| track.clone())
+                    .collect()
+            });
+            if snapshot.player.repeat == eagle_app::session::Repeat::All
+                && let Some(index) = current
+            {
+                queue.extend(
+                    snapshot.queue[..index]
+                        .iter()
+                        .map(|(_, track)| track.clone()),
+                );
+            }
+            queue.truncate(4);
+            apply(ui, Event::Queue(queue), bridge);
+            apply(
+                ui,
+                Event::QueueOrder {
+                    entries: snapshot.queue,
+                    current: snapshot.current,
+                },
+                bridge,
+            );
+            apply(ui, Event::Player(snapshot.player), bridge);
+            if let Some(position) = snapshot.position {
+                apply(ui, Event::Position(position), bridge);
+            }
+        }
         Event::Collections(collections) => {
             let model = ui.global::<Library>().get_playlists();
             let Some(model) = model.as_any().downcast_ref::<VecModel<CollectionItem>>() else {
@@ -305,6 +357,25 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             bridge.update_cards(first, count, true);
         }
         Event::Thumbnail(key, cover) => bridge.thumbnail(ui, &key, &cover),
+        Event::QueueOrder { entries, current } => {
+            let items = entries
+                .into_iter()
+                .map(|(id, track)| QueueItem {
+                    id: id.to_string().into(),
+                    title: track.title.as_str().into(),
+                    artist: track
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into(),
+                    current: current == Some(id),
+                })
+                .collect::<Vec<_>>();
+            ui.global::<Library>()
+                .set_queue_order(Rc::new(VecModel::from(items)).into());
+        }
         Event::Queue(tracks) => {
             let keys = tracks
                 .iter()
@@ -357,6 +428,17 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 State::Paused => Status::Paused,
                 State::Buffering => Status::Buffering,
             });
+            player.set_quality(
+                if state.track.is_none() {
+                    String::new()
+                } else {
+                    state.bitrate_kbps.map_or_else(
+                        || "Битрейт неизвестен".to_owned(),
+                        |value| format!("{value} кбит/с"),
+                    )
+                }
+                .into(),
+            );
             player.set_volume(state.volume);
             player.set_liked(state.liked);
             player.set_shuffle(state.shuffle);
@@ -400,6 +482,17 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         .into(),
                 );
                 player.set_length(track.duration_ms as f32 / 1000.);
+            } else {
+                player.set_track_id("".into());
+                player.set_album_id("".into());
+                player.set_artist_id("".into());
+                player.set_title("".into());
+                player.set_artist("".into());
+                player.set_source("".into());
+                player.set_length(0.);
+                player.set_shown(0.);
+                player.set_cover(slint::Image::default());
+                *anchor.lock().unwrap_or_else(|p| p.into_inner()) = None;
             }
         }
         Event::Position(position) => {
@@ -449,6 +542,65 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             bridge.clear_rows();
             rows.set_vec(items.into_iter().map(track_item).collect::<Vec<_>>());
             bridge.refresh_rows(ui);
+        }
+        Event::Storage {
+            cache_bytes,
+            saved_bytes,
+            limit,
+            folder,
+        } => {
+            let storage = ui.global::<Storage>();
+            storage.set_cache_usage(format!("{:.1} МиБ", cache_bytes as f64 / 1048576.).into());
+            storage.set_saved_usage(format!("{:.1} МиБ", saved_bytes as f64 / 1048576.).into());
+            storage.set_folder(folder.to_string_lossy().as_ref().into());
+            storage.set_cache_limit(if limit <= 512 * 1024 * 1024 {
+                0
+            } else if limit <= 2 * 1024 * 1024 * 1024 {
+                1
+            } else {
+                2
+            });
+        }
+        Event::Downloads(jobs) => {
+            let items = jobs
+                .into_iter()
+                .map(|job| DownloadItem {
+                    id: job.id.to_string().into(),
+                    track: job.track.to_string().into(),
+                    quality: match job.quality {
+                        Quality::High => "320 кбит/с",
+                        Quality::Standard => "До 192 кбит/с",
+                    }
+                    .into(),
+                    status: match job.state {
+                        DownloadState::Queued => "В очереди",
+                        DownloadState::Running => "Сохраняется",
+                        DownloadState::Paused => "На паузе",
+                        DownloadState::Cancelled => "Отменено",
+                        DownloadState::Failed => "Ошибка",
+                        DownloadState::AudioReady => "Подготовка обложки",
+                        DownloadState::Saved => "Сохранено",
+                    }
+                    .into(),
+                    error: job.error.unwrap_or_default().into(),
+                    pausable: matches!(job.state, DownloadState::Queued | DownloadState::Running),
+                    retryable: matches!(
+                        job.state,
+                        DownloadState::Paused | DownloadState::Failed | DownloadState::Cancelled
+                    ),
+                    saved: job.state == DownloadState::Saved,
+                    cancellable: matches!(
+                        job.state,
+                        DownloadState::Queued
+                            | DownloadState::Running
+                            | DownloadState::Paused
+                            | DownloadState::Failed
+                            | DownloadState::AudioReady
+                    ),
+                })
+                .collect::<Vec<_>>();
+            ui.global::<Storage>()
+                .set_jobs(Rc::new(VecModel::from(items)).into());
         }
         Event::Error(message) => ui.global::<Ui>().set_error(message.into()),
         Event::Cover(target, id, cover) => {
@@ -513,6 +665,80 @@ fn like_optimistically(ui: &DesktopWindow, rows: &VecModel<TrackItem>, id: &str)
 
 pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     let actions = ui.global::<Actions>();
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_save(move |id| {
+        if let (Ok(id), Some(ui)) = (id.parse(), weak.upgrade()) {
+            let quality = if ui.global::<Storage>().get_quality() == 0 {
+                Quality::Standard
+            } else {
+                Quality::High
+            };
+            let _ = tx.send(Command::Save { id, quality });
+        }
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_save_all(move || {
+        if let Some(ui) = weak.upgrade() {
+            let quality = if ui.global::<Storage>().get_quality() == 0 {
+                Quality::Standard
+            } else {
+                Quality::High
+            };
+            let _ = tx.send(Command::SaveAll(quality));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_download_control(move |id, action| {
+        if let Ok(id) = id.parse() {
+            let command = match action {
+                0 => Command::PauseDownload(id),
+                1 => Command::RetryDownload(id),
+                2 => Command::CancelDownload(id),
+                _ => return,
+            };
+            let _ = tx.send(command);
+        }
+    });
+    let tx = sender.clone();
+    actions.on_downloads(move || {
+        let _ = tx.send(Command::Downloads);
+    });
+    let tx = sender.clone();
+    actions.on_remove_saved(move |id| {
+        if let Ok(id) = id.parse() {
+            let _ = tx.send(Command::RemoveSaved(id));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_cache_limit(move |choice| {
+        let limit = match choice {
+            0 => 512 * 1024 * 1024,
+            1 => 2 * 1024 * 1024 * 1024,
+            2 => 8 * 1024 * 1024 * 1024,
+            _ => return,
+        };
+        let _ = tx.send(Command::CacheLimit(limit));
+    });
+    let tx = sender.clone();
+    actions.on_move_queue(move |id, to| {
+        if let (Ok(id), Ok(to)) = (id.parse(), usize::try_from(to)) {
+            let _ = tx.send(Command::MoveQueue { id, to });
+        }
+    });
+    let tx = sender.clone();
+    actions.on_play_next(move |id| {
+        if let Ok(id) = id.parse() {
+            let _ = tx.send(Command::PlayNext(id));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_enqueue_next(move |id| {
+        if let Ok(id) = id.parse() {
+            let _ = tx.send(Command::EnqueueNext(id));
+        }
+    });
     let tx = sender.clone();
     actions.on_play_all(move |shuffle| {
         let _ = tx.send(Command::PlayAll(shuffle));
@@ -680,6 +906,8 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             ui.global::<Ui>().set_create_playlist(false);
         }
         let view = match route {
+            Route::Saved => View::Saved,
+            Route::History => View::History,
             Route::Library => View::Library,
             Route::Search => View::Search,
             Route::Album => View::Album,
@@ -690,6 +918,9 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             Route::Artists => View::Artists,
             Route::Artist => View::Artist,
         };
+        if route == Route::Settings {
+            let _ = sender.send(Command::Downloads);
+        }
         let _ = sender.send(Command::Open(view));
     });
 }
@@ -821,6 +1052,74 @@ pub(super) mod tests {
         bridge.list_covers_changed(&ui);
         bridge.thumbnail(&ui, "t:yandex:1", &cover);
         assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
+        ui.global::<Library>()
+            .set_playlists(Rc::new(VecModel::<CollectionItem>::default()).into());
+        let track = item("7").track;
+        let snapshot = eagle_app::session::SessionSnapshot {
+            view: View::Library,
+            rows: vec![item("7")],
+            cards: vec![],
+            collections: vec![],
+            title: "Local".into(),
+            length: Duration::from_secs(20),
+            header: Header::default(),
+            busy: false,
+            signed_in: true,
+            player: Arc::new(eagle_app::session::PlayerState {
+                track: Some(track.clone()),
+                bitrate_kbps: Some(128),
+                status: State::Paused,
+                ..Default::default()
+            }),
+            queue: vec![(1, track.clone()), (2, track)],
+            current: Some(1),
+            position: Some(PositionAnchor {
+                track: 0,
+                position: Duration::from_secs(4),
+                audible_at: Instant::now(),
+                state: State::Paused,
+            }),
+        };
+        apply(&ui, Event::Snapshot(Box::new(snapshot)), &bridge);
+        assert_eq!(ui.global::<Player>().get_quality().as_str(), "128 кбит/с");
+        let queue = ui.global::<Library>().get_queue_order();
+        assert_eq!(queue.row_count(), 2);
+        assert_eq!(queue.row_data(0).unwrap().id.as_str(), "1");
+        assert_eq!(queue.row_data(1).unwrap().id.as_str(), "2");
+        assert!(queue.row_data(0).unwrap().current);
+        assert!(!queue.row_data(1).unwrap().current);
+        apply(
+            &ui,
+            Event::Storage {
+                cache_bytes: 1048576,
+                saved_bytes: 2097152,
+                limit: 536870912,
+                folder: "/tmp/audio".into(),
+            },
+            &bridge,
+        );
+        assert_eq!(ui.global::<Storage>().get_cache_usage().as_str(), "1.0 МиБ");
+        assert_eq!(ui.global::<Storage>().get_saved_usage().as_str(), "2.0 МиБ");
+        assert_eq!(ui.global::<Storage>().get_cache_limit(), 0);
+        let unknown = eagle_app::session::PlayerState {
+            track: Some(item("7").track),
+            ..Default::default()
+        };
+        apply(&ui, Event::Player(Arc::new(unknown)), &bridge);
+        assert_eq!(
+            ui.global::<Player>().get_quality().as_str(),
+            "Битрейт неизвестен"
+        );
+        apply(&ui, Event::Downloads(Vec::new()), &bridge);
+        assert_eq!(ui.global::<Storage>().get_jobs().row_count(), 0);
+        assert_eq!(rows.row_count(), 1);
+        assert_eq!(ui.global::<Player>().get_track_id(), "yandex:7");
+        assert_eq!(ui.global::<Player>().get_shown(), 4.);
+        assert_eq!(ui.global::<Library>().get_queue().row_count(), 1);
+        assert_eq!(ui.global::<Library>().get_title(), "Local");
+        apply(&ui, Event::Player(Arc::default()), &bridge);
+        assert_eq!(ui.global::<Player>().get_track_id(), "");
+        assert_eq!(ui.global::<Player>().get_shown(), 0.);
     }
     #[test]
     fn padded_window_is_clamped_to_the_list() {

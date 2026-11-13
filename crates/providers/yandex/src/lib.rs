@@ -570,6 +570,9 @@ impl Provider for Yandex {
             };
             let url = direct_link(&response.bytes)?;
             return Ok(Stream {
+                bitrate_kbps: variant["bitrateInKbps"]
+                    .as_u64()
+                    .and_then(|b| u32::try_from(b).ok()),
                 url: SignedUrl::new(url),
                 codec: "mp3".into(),
                 expires_at: SystemTime::now() + Duration::from_secs(50),
@@ -580,7 +583,6 @@ impl Provider for Yandex {
     }
 }
 fn select_variant(v: &Value, quality: Quality) -> Result<&Value, ProviderError> {
-    let target = if quality == Quality::High { 320 } else { 192 };
     let variant = v
         .as_array()
         .ok_or(ProviderError::ApiChanged)?
@@ -588,10 +590,13 @@ fn select_variant(v: &Value, quality: Quality) -> Result<&Value, ProviderError> 
         .filter(|v| {
             v["codec"] == "mp3"
                 && v["preview"] != true
-                && v["bitrateInKbps"].as_u64().is_some_and(|b| b <= target)
+                && v["bitrateInKbps"].as_u64().is_some_and(|b| match quality {
+                    Quality::High => b == 320,
+                    Quality::Standard => (1..=192).contains(&b),
+                })
         })
         .max_by_key(|v| v["bitrateInKbps"].as_u64())
-        .ok_or(ProviderError::Unavailable)?;
+        .ok_or(ProviderError::UnsupportedQuality)?;
     Ok(variant)
 }
 fn direct_link(xml: &[u8]) -> Result<String, ProviderError> {
@@ -808,7 +813,34 @@ mod tests {
         );
         assert!(matches!(
             select_variant(&serde_json::json!([]), Quality::High),
-            Err(ProviderError::Unavailable)
+            Err(ProviderError::UnsupportedQuality)
+        ));
+    }
+    #[test]
+    fn unavailable_quality_never_falls_back_or_selects_invalid_bitrate() {
+        let low = serde_json::json!([
+            {"codec":"mp3","bitrateInKbps":128,"preview":false},
+            {"codec":"mp3","bitrateInKbps":320,"preview":true},
+            {"codec":"aac","bitrateInKbps":320,"preview":false}
+        ]);
+        assert!(matches!(
+            select_variant(&low, Quality::High),
+            Err(ProviderError::UnsupportedQuality)
+        ));
+        assert_eq!(
+            select_variant(&low, Quality::Standard).unwrap()["bitrateInKbps"],
+            128
+        );
+        assert!(matches!(
+            select_variant(
+                &serde_json::json!([{ "codec":"mp3", "bitrateInKbps":0 }]),
+                Quality::Standard
+            ),
+            Err(ProviderError::UnsupportedQuality)
+        ));
+        assert!(matches!(
+            select_variant(&serde_json::json!({}), Quality::High),
+            Err(ProviderError::ApiChanged)
         ));
     }
     #[test]

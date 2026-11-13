@@ -89,6 +89,15 @@ pub fn run(root: PathBuf, software: bool) -> Result<(), Box<dyn std::error::Erro
     let sender = session.sender();
     bridge::initialize(event_rows.clone(), cards, event_anchor, sender.clone());
     bridge::bind(&ui, sender.clone());
+    let preferences_root = root.clone();
+    let weak = ui.as_weak();
+    ui.global::<Actions>().on_preferences_changed(move || {
+        if let Some(ui) = weak.upgrade()
+            && let Err(error) = preferences::Preferences::capture(&ui).save(&preferences_root)
+        {
+            log::warn!("window preferences: {error}");
+        }
+    });
     slint::invoke_from_event_loop({
         let weak = ui.as_weak();
         let anchor = anchor.clone();

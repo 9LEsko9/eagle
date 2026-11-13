@@ -20,8 +20,10 @@ export global Theme {
 export global Motion {
     in-out property <bool> reduced;
     out property <duration> fast: reduced ? 0ms : 180ms;
-    out property <duration> base: reduced ? 0ms : 300ms;
-    out property <duration> slow: reduced ? 0ms : 500ms;
+    out property <duration> base: reduced ? 0ms : 250ms;
+    out property <duration> slow: reduced ? 0ms : 350ms;
+    out property <duration> play: reduced ? 0ms : 200ms;
+    out property <duration> heart: reduced ? 0ms : 200ms;
     out property <duration> swipe: reduced ? 0ms : 550ms;
 }
 export global Type {

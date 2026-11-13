@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop-facing commands and incremental events. No UI types cross this boundary.
-use eagle_core::{Album, Artist, Playlist, Provider, Quality, Track, TrackId};
-pub use eagle_core::{Availability, Token};
+use eagle_core::{Album, Artist, Playlist, Provider, Track, TrackId};
+pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
+pub use eagle_store::DownloadState;
 use eagle_store::{Cache, Store};
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, mpsc},
     thread,
@@ -87,6 +88,8 @@ fn card_job(card: &Card) -> crate::covers::Job {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
+    Saved,
+    History,
     Library,
     Search,
     Album,
@@ -102,6 +105,27 @@ pub enum View {
 }
 
 pub enum Command {
+    /// One coherent state reply, ordered before subsequent worker events.
+    Snapshot,
+    Downloads,
+    SaveAll(Quality),
+    CacheLimit(u64),
+    RemoveSaved(i64),
+    Save {
+        id: TrackId,
+        quality: Quality,
+    },
+    PauseDownload(i64),
+    CancelDownload(i64),
+    RetryDownload(i64),
+    /// Move an existing occurrence, identified independently of the track ID.
+    MoveQueue {
+        id: u64,
+        to: usize,
+    },
+    PlayNext(u64),
+    /// Add a fresh occurrence from local metadata immediately after the current one.
+    EnqueueNext(TrackId),
     Open(View),
     Library,
     /// Checks a stored token and, if it is valid, syncs in the background.
@@ -163,6 +187,7 @@ pub enum Repeat {
 }
 #[derive(Debug)]
 pub struct PlayerState {
+    pub bitrate_kbps: Option<u32>,
     pub track: Option<Arc<Track>>,
     pub status: State,
     pub volume: f32,
@@ -173,6 +198,7 @@ pub struct PlayerState {
 impl Default for PlayerState {
     fn default() -> Self {
         Self {
+            bitrate_kbps: None,
             track: None,
             status: State::Idle,
             volume: 1.,
@@ -213,7 +239,31 @@ pub struct Collection {
     pub id: TrackId,
     pub title: String,
 }
+#[derive(Clone)]
+pub struct SessionSnapshot {
+    pub view: View,
+    pub rows: Vec<LibraryItem>,
+    pub cards: Vec<Card>,
+    pub collections: Vec<Collection>,
+    pub title: String,
+    pub length: Duration,
+    pub header: Header,
+    pub busy: bool,
+    pub signed_in: bool,
+    pub player: Arc<PlayerState>,
+    pub queue: Vec<(u64, Arc<Track>)>,
+    pub current: Option<u64>,
+    pub position: Option<PositionAnchor>,
+}
 pub enum Event {
+    Snapshot(Box<SessionSnapshot>),
+    Downloads(Vec<eagle_store::DownloadJob>),
+    Storage {
+        cache_bytes: u64,
+        saved_bytes: u64,
+        limit: u64,
+        folder: PathBuf,
+    },
     Collections(Vec<Collection>),
     PlaylistCreated(TrackId),
     PlaylistDeleted(TrackId),
@@ -224,6 +274,10 @@ pub enum Event {
         length: Duration,
     },
     Queue(Vec<Arc<Track>>),
+    QueueOrder {
+        entries: Vec<(u64, Arc<Track>)>,
+        current: Option<u64>,
+    },
     View(View),
     Busy(bool),
     Player(Arc<PlayerState>),
@@ -371,6 +425,7 @@ enum Message {
     Command(Command),
     Catalog(u64, std::result::Result<CatalogReply, String>),
     Engine(u64, eagle_engine::Event),
+    Bitrate(u64, u64, Option<u32>),
 }
 #[derive(Clone)]
 pub struct CommandSender(mpsc::Sender<Message>);
@@ -430,18 +485,31 @@ struct Worker {
     engine: Option<Engine>,
     engine_events: Option<thread::JoinHandle<()>>,
     engine_generation: u64,
+    audio_bitrates: HashMap<u64, Option<u32>>,
     tx: mpsc::Sender<Message>,
     rows: Vec<LibraryItem>,
     queue: Vec<Arc<Track>>,
     queue_likes: HashSet<TrackId>,
     queue_original: Vec<Arc<Track>>,
+    queue_ids: HashMap<usize, u64>,
+    next_queue_id: u64,
     current: usize,
+    account: String,
+    last_checkpoint: Instant,
+    history_recorded: bool,
+    restored_position: Duration,
+    collections: Vec<Collection>,
+    title: String,
+    length: Duration,
+    header: Header,
+    busy: bool,
     engine_queue: Vec<Arc<Track>>,
     view_generation: u64,
     view: View,
     playlist_id: Option<TrackId>,
     cards: Vec<Card>,
     covers: crate::covers::Covers,
+    downloads: crate::downloads::Downloads,
     last_position: Option<PositionAnchor>,
     player: Arc<PlayerState>,
     emit: Arc<dyn Fn(Event) + Send + Sync>,
@@ -455,11 +523,19 @@ impl Worker {
         let store = Arc::new(Store::open(&root)?);
         let cache = Arc::new(Cache::open(
             &root.join("audio"),
-            2 * 1024 * 1024 * 1024,
+            store
+                .setting("cache_limit")?
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| (256 * 1024 * 1024..=128 * 1024 * 1024 * 1024).contains(value))
+                .unwrap_or(2 * 1024 * 1024 * 1024),
             &store,
         )?);
         let net = Arc::new(eagle_net::Client::new()?);
+        #[cfg(not(test))]
         let provider: Arc<dyn Provider> = Arc::new(eagle_yandex::Yandex::new(net.clone()));
+        // Session tests must never touch the user's keychain or live account.
+        #[cfg(test)]
+        let provider: Arc<dyn Provider> = sync_tests::offline_provider();
         let (catalog, requests) = mpsc::channel();
         let services = Catalog {
             covers: RefCell::new(VecDeque::new()),
@@ -477,7 +553,17 @@ impl Worker {
                 services.run(requests, replies);
             })?;
         let covers = crate::covers::Covers::start(root.clone(), net.clone(), emit.clone())?;
-        Ok(Self {
+        let downloads = crate::downloads::Downloads::start(
+            root.clone(),
+            store.clone(),
+            cache.clone(),
+            net.clone(),
+            provider.clone(),
+            emit.clone(),
+        )?;
+        let account = store.setting(ACCOUNT_UID)?.unwrap_or_default();
+        downloads.account(account.clone());
+        let mut worker = Self {
             store,
             cache,
             net,
@@ -487,31 +573,267 @@ impl Worker {
             engine: None,
             engine_events: None,
             engine_generation: 0,
+            audio_bitrates: HashMap::new(),
             tx,
             rows: Vec::new(),
             queue: Vec::new(),
             queue_likes: HashSet::new(),
             queue_original: Vec::new(),
+            queue_ids: HashMap::new(),
+            next_queue_id: 1,
             current: 0,
+            account,
+            last_checkpoint: Instant::now(),
+            history_recorded: false,
+            restored_position: Duration::ZERO,
+            collections: Vec::new(),
+            title: String::new(),
+            length: Duration::ZERO,
+            header: Header::default(),
+            busy: false,
             engine_queue: Vec::new(),
             view_generation: 0,
             view: View::Library,
             playlist_id: None,
             cards: Vec::new(),
             covers,
+            downloads,
             last_position: None,
             player: Arc::default(),
             emit,
-        })
+        };
+        worker.restore_playback()?;
+        Ok(worker)
+    }
+    fn restore_playback(&mut self) -> Result<()> {
+        let Some(saved) = self.store.playback(&self.account)? else {
+            return Ok(());
+        };
+        // Entries retain the original order; order contains occurrence IDs, not track IDs.
+        let entries: std::collections::HashMap<_, _> = saved
+            .entries
+            .iter()
+            .map(|entry| (entry.id, Arc::new(entry.track.clone())))
+            .collect();
+        self.queue_original = saved
+            .entries
+            .iter()
+            .map(|e| entries[&e.id].clone())
+            .collect();
+        self.queue_ids = entries
+            .iter()
+            .map(|(id, track)| (Arc::as_ptr(track) as usize, *id))
+            .collect();
+        self.next_queue_id = saved
+            .entries
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("исчерпаны идентификаторы очереди")?;
+        self.queue = saved.order.iter().map(|id| entries[id].clone()).collect();
+        self.current = saved
+            .current
+            .and_then(|id| saved.order.iter().position(|i| *i == id))
+            .unwrap_or(0);
+        self.restored_position = Duration::from_millis(saved.position_ms).min(
+            self.queue
+                .get(self.current)
+                .map_or(Duration::ZERO, |t| Duration::from_millis(t.duration_ms)),
+        );
+        let player = Arc::make_mut(&mut self.player);
+        self.queue_likes = {
+            let c = self.store.read()?;
+            let mut statement = c.prepare("SELECT id FROM likes")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(|id| id.parse().ok())
+                .collect()
+        };
+        player.track = self.queue.get(self.current).cloned();
+        player.liked = player
+            .track
+            .as_ref()
+            .is_some_and(|track| self.queue_likes.contains(&track.id));
+        player.status = if player.track.is_some() {
+            State::Paused
+        } else {
+            State::Idle
+        };
+        player.shuffle = saved.shuffle;
+        player.repeat = match saved.repeat {
+            1 => Repeat::All,
+            2 => Repeat::One,
+            _ => Repeat::Off,
+        };
+        if player.track.is_some() {
+            self.last_position = Some(PositionAnchor {
+                track: 0,
+                position: self.restored_position,
+                audible_at: Instant::now(),
+                state: State::Paused,
+            });
+        }
+        Ok(())
+    }
+    fn occurrence_id(&self, track: &Arc<Track>) -> u64 {
+        self.queue_ids
+            .get(&(Arc::as_ptr(track) as usize))
+            .copied()
+            .unwrap_or(0)
+    }
+    fn assign_occurrences(&mut self) -> Result<()> {
+        for track in &self.queue_original {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.queue_ids.entry(Arc::as_ptr(track) as usize)
+            {
+                let id = self.next_queue_id;
+                self.next_queue_id = id
+                    .checked_add(1)
+                    .ok_or("исчерпаны идентификаторы очереди")?;
+                entry.insert(id);
+            }
+        }
+        Ok(())
+    }
+    fn checkpoint(&mut self) -> Result<()> {
+        // A full disk must not turn the periodic checkpoint into a busy retry loop.
+        self.last_checkpoint = Instant::now();
+        self.assign_occurrences()?;
+        let position = self
+            .last_position
+            .as_ref()
+            .map_or(self.restored_position, |anchor| {
+                position_now(anchor, Instant::now())
+            });
+        let state = eagle_store::PlaybackState {
+            entries: self
+                .queue_original
+                .iter()
+                .map(|track| eagle_store::PlaybackEntry {
+                    id: self.occurrence_id(track),
+                    track: (**track).clone(),
+                })
+                .collect(),
+            order: self
+                .queue
+                .iter()
+                .map(|track| self.occurrence_id(track))
+                .collect(),
+            current: self
+                .queue
+                .get(self.current)
+                .map(|track| self.occurrence_id(track)),
+            position_ms: position.as_millis().min(u128::from(u64::MAX)) as u64,
+            shuffle: self.player.shuffle,
+            repeat: match self.player.repeat {
+                Repeat::Off => 0,
+                Repeat::All => 1,
+                Repeat::One => 2,
+            },
+        };
+        self.store.save_playback(&self.account, state)?;
+        self.last_checkpoint = Instant::now();
+        Ok(())
+    }
+    fn storage(&self) -> Result<()> {
+        let (cache_bytes, saved_bytes) = self.cache.usage(&self.store)?;
+        (self.emit)(Event::Storage {
+            cache_bytes,
+            saved_bytes,
+            limit: self.cache.limit(),
+            folder: self.cache.root().to_owned(),
+        });
+        Ok(())
+    }
+    fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            view: self.view,
+            rows: self.rows.clone(),
+            cards: self.cards.clone(),
+            collections: self.collections.clone(),
+            title: self.title.clone(),
+            length: self.length,
+            header: self.header.clone(),
+            busy: self.busy,
+            signed_in: !self.account.is_empty(),
+            player: self.player.clone(),
+            queue: self
+                .queue
+                .iter()
+                .map(|track| (self.occurrence_id(track), track.clone()))
+                .collect(),
+            current: self
+                .queue
+                .get(self.current)
+                .map(|track| self.occurrence_id(track)),
+            position: self.last_position.clone(),
+        }
+    }
+    fn move_queue(&mut self, id: u64, to: usize) -> Result<()> {
+        if to >= self.queue.len() {
+            return Err("неверная позиция очереди".into());
+        }
+        let from = self
+            .queue
+            .iter()
+            .position(|track| self.occurrence_id(track) == id)
+            .ok_or("элемент очереди не найден")?;
+        let current = self.queue.get(self.current).cloned();
+        let track = self.queue.remove(from);
+        self.queue.insert(to, track);
+        self.current = current
+            .and_then(|track| self.queue.iter().position(|item| Arc::ptr_eq(item, &track)))
+            .unwrap_or(0);
+        self.configure_playback()?;
+        self.emit_queue();
+        Ok(())
     }
     fn run(&mut self, rx: mpsc::Receiver<Message>) -> Result<()> {
         (self.emit)(Event::Player(self.player.clone()));
+        self.emit_queue();
+        if let Some(position) = &self.last_position {
+            (self.emit)(Event::Position(position.clone()));
+        }
+        if let Some(track) = &self.player.track
+            && let Some(catalog) = &self.catalog
+        {
+            let _ = catalog.send(CatalogRequest::Cover(track.clone(), CoverTarget::Player, 0));
+        }
         self.request(Command::Collections)?;
         self.request(Command::Library)?;
         self.background(Command::Restore)?;
-        while let Ok(message) = rx.recv() {
+        loop {
+            let message = if self.player.status == State::Playing {
+                let remaining =
+                    Duration::from_secs(10).saturating_sub(self.last_checkpoint.elapsed());
+                match rx.recv_timeout(remaining) {
+                    Ok(message) => message,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Err(error) = self.checkpoint() {
+                            (self.emit)(Event::Error(error.to_string()));
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match rx.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                }
+            };
             match message {
-                Message::Command(Command::Shutdown) => break,
+                Message::Command(Command::Shutdown) => {
+                    self.downloads.account(String::new());
+                    if let Err(error) = self.checkpoint() {
+                        (self.emit)(Event::Error(error.to_string()));
+                    }
+                    break;
+                }
                 Message::Command(command) => {
                     if let Err(e) = self.command(command) {
                         (self.emit)(Event::Error(e.to_string()));
@@ -521,6 +843,9 @@ impl Worker {
                     self.engine_event(event)
                 }
                 Message::Engine(_, _) => {}
+                Message::Bitrate(generation, id, bitrate) => {
+                    self.apply_bitrate(generation, id, bitrate);
+                }
                 Message::Catalog(generation, reply) => {
                     if generation != 0
                         && generation != self.view_generation
@@ -538,6 +863,7 @@ impl Worker {
                             Ok(CatalogReply::PlaylistChanged(..) | CatalogReply::PlaylistFailed(_))
                         )
                     {
+                        self.busy = false;
                         (self.emit)(Event::Busy(false));
                     }
                     match reply {
@@ -554,6 +880,8 @@ impl Worker {
                                     self.view_generation,
                                 ));
                             }
+                            self.title = title.clone();
+                            self.length = length;
                             self.publish(items);
                             (self.emit)(Event::Collection { title, length });
                         }
@@ -583,7 +911,10 @@ impl Worker {
                             }
                             self.publish(items);
                             self.cards = cards.clone();
+                            self.title = title.clone();
+                            self.length = length;
                             (self.emit)(Event::Collection { title, length });
+                            self.header = header.clone();
                             (self.emit)(Event::Header(header));
                             (self.emit)(Event::Cards(cards));
                         }
@@ -593,6 +924,9 @@ impl Worker {
                             (self.emit)(Event::Cards(cards));
                         }
                         Ok(CatalogReply::CollectionLiked(id, liked)) => {
+                            if self.header.id == id.to_string() {
+                                self.header.liked = liked;
+                            }
                             (self.emit)(Event::CollectionLiked(id, liked))
                         }
                         Ok(CatalogReply::LikeFailed(id, liked, message)) => {
@@ -608,6 +942,7 @@ impl Worker {
                             (self.emit)(Event::PlaylistMutationFailed(message));
                         }
                         Ok(CatalogReply::Collections(collections)) => {
+                            self.collections = collections.clone();
                             (self.emit)(Event::Collections(collections))
                         }
                         Ok(CatalogReply::Unchanged) => {}
@@ -618,6 +953,7 @@ impl Worker {
                             if changed {
                                 self.reset_account_view()?;
                             }
+                            self.downloads.account(self.account.clone());
                             (self.emit)(Event::Account);
                             self.background(Command::SyncCollections)?;
                             self.background(Command::SyncLibrary)?;
@@ -678,6 +1014,28 @@ impl Worker {
         Ok(())
     }
     fn reset_account_view(&mut self) -> Result<()> {
+        self.checkpoint()?;
+        self.stop_engine();
+        self.queue.clear();
+        self.queue_original.clear();
+        self.queue_ids.clear();
+        self.engine_queue.clear();
+        self.current = 0;
+        self.restored_position = Duration::ZERO;
+        self.last_position = None;
+        self.account = self.store.setting(ACCOUNT_UID)?.unwrap_or_default();
+        self.downloads.account(self.account.clone());
+        self.player = Arc::default();
+        self.restore_playback()?;
+        self.emit_queue();
+        self.collections.clear();
+        self.cards.clear();
+        self.header = Header::default();
+        self.title.clear();
+        self.length = Duration::ZERO;
+        self.publish(Vec::new());
+        (self.emit)(Event::Cards(Vec::new()));
+        (self.emit)(Event::Header(Header::default()));
         self.queue_likes.clear();
         Arc::make_mut(&mut self.player).liked = false;
         (self.emit)(Event::Player(self.player.clone()));
@@ -694,7 +1052,7 @@ impl Worker {
             View::Album | View::Artist => {
                 (self.emit)(Event::Header(Header::default()));
             }
-            View::Playlist => {
+            View::Playlist | View::Saved | View::History => {
                 self.command(Command::Open(View::Library))?;
             }
             _ => {}
@@ -709,25 +1067,32 @@ impl Worker {
         deleted: Option<TrackId>,
     ) -> Result<()> {
         (self.emit)(Event::PlaylistMutationBusy(false));
+        self.collections = collections.clone();
         (self.emit)(Event::Collections(collections));
         if let Some(playlist) = created {
             (self.emit)(Event::PlaylistCreated(playlist.id.clone()));
             if generation == self.view_generation {
                 self.playlist_id = Some(playlist.id.clone());
+                self.title.clear();
+                self.header = Header::default();
+                self.length = Duration::ZERO;
                 self.view = View::Playlist;
                 self.view_generation += 1;
                 (self.emit)(Event::View(View::Playlist));
                 self.publish(Vec::new());
                 self.cards.clear();
+                self.title = playlist.title.clone();
+                self.length = Duration::ZERO;
                 (self.emit)(Event::Collection {
                     title: playlist.title,
                     length: Duration::ZERO,
                 });
-                (self.emit)(Event::Header(Header {
+                self.header = Header {
                     id: playlist.id.to_string(),
                     deletable: true,
                     ..Header::default()
-                }));
+                };
+                (self.emit)(Event::Header(self.header.clone()));
             }
         } else if let Some(id) = deleted {
             (self.emit)(Event::PlaylistDeleted(id.clone()));
@@ -846,6 +1211,7 @@ impl Worker {
                 | Command::Artists
         ) {
             self.view_generation += 1;
+            self.busy = true;
             (self.emit)(Event::Busy(true));
             self.view_generation
         } else {
@@ -859,15 +1225,191 @@ impl Worker {
         Ok(())
     }
     fn command(&mut self, command: Command) -> Result<()> {
+        let checkpoint = matches!(
+            &command,
+            Command::Play(_)
+                | Command::PlayRow(_)
+                | Command::PlayAll(_)
+                | Command::Pause
+                | Command::Resume
+                | Command::TogglePlay
+                | Command::Stop
+                | Command::Previous
+                | Command::Seek(_)
+                | Command::Volume(_)
+                | Command::ToggleShuffle
+                | Command::SetShuffle(_)
+                | Command::CycleRepeat
+                | Command::MoveQueue { .. }
+                | Command::PlayNext(_)
+                | Command::EnqueueNext(_)
+                | Command::Next
+        );
+        if matches!(&command, Command::Login(_)) {
+            self.downloads.account(String::new());
+        }
         match command {
+            Command::RemoveSaved(id) => {
+                let result = self.cache.remove_saved(&self.store, &self.account, id);
+                (self.emit)(Event::Downloads(self.store.downloads(&self.account)?));
+                self.storage()?;
+                result?;
+            }
+            Command::CacheLimit(limit) => {
+                if !(256 * 1024 * 1024..=128 * 1024 * 1024 * 1024).contains(&limit) {
+                    return Err("неверный лимит кэша".into());
+                }
+                self.store.put_setting("cache_limit", limit.to_string())?;
+                self.cache.set_limit(limit);
+                self.storage()?;
+            }
+            Command::Downloads => {
+                self.storage()?;
+                (self.emit)(Event::Downloads(self.store.downloads(&self.account)?));
+            }
+            Command::SaveAll(quality) => {
+                if self.account.is_empty() {
+                    return Err("войдите в аккаунт перед сохранением".into());
+                }
+                let tracks = self
+                    .rows
+                    .iter()
+                    .map(|row| row.track.id.clone())
+                    .collect::<Vec<_>>();
+                self.store
+                    .enqueue_downloads(&self.account, &tracks, quality)?;
+                self.downloads.wake();
+            }
+            Command::Save { id, quality } => {
+                if self.account.is_empty() {
+                    return Err("войдите в аккаунт перед сохранением".into());
+                }
+                self.store.enqueue_download(&self.account, &id, quality)?;
+                self.downloads.wake();
+            }
+            Command::PauseDownload(id)
+            | Command::CancelDownload(id)
+            | Command::RetryDownload(id) => {
+                let state = match command {
+                    Command::PauseDownload(_) => eagle_store::DownloadState::Paused,
+                    Command::CancelDownload(_) => eagle_store::DownloadState::Cancelled,
+                    _ => eagle_store::DownloadState::Queued,
+                };
+                self.store.control_download(&self.account, id, state)?;
+                self.downloads.wake();
+            }
+            Command::Snapshot => {
+                self.storage()?;
+                (self.emit)(Event::Snapshot(Box::new(self.snapshot())));
+                (self.emit)(Event::Downloads(self.store.downloads(&self.account)?));
+                if let Some(track) = &self.player.track
+                    && let Some(catalog) = &self.catalog
+                {
+                    let _ =
+                        catalog.send(CatalogRequest::Cover(track.clone(), CoverTarget::Player, 0));
+                }
+            }
+            Command::EnqueueNext(id) => {
+                let track = self
+                    .rows
+                    .iter()
+                    .map(|row| row.track.as_ref())
+                    .find(|t| t.id == id)
+                    .cloned()
+                    .or(self.store.track(&id)?)
+                    .ok_or("метаданные трека не найдены")?;
+                if track.availability != Availability::Available {
+                    return Err("трек недоступен".into());
+                }
+                let track = Arc::new(track);
+                let occurrence = self.next_queue_id;
+                self.next_queue_id = occurrence
+                    .checked_add(1)
+                    .ok_or("исчерпаны идентификаторы очереди")?;
+                let key = Arc::as_ptr(&track) as usize;
+                self.queue_ids.insert(key, occurrence);
+                if let Some(engine) = &self.engine {
+                    let result = self.source(&track).and_then(|source| {
+                        engine.enqueue(source)?;
+                        Ok(())
+                    });
+                    if let Err(error) = result {
+                        self.queue_ids.remove(&key);
+                        return Err(error);
+                    }
+                    self.engine_queue.push(track.clone());
+                }
+                let next = if self.queue.is_empty() {
+                    0
+                } else {
+                    self.current + 1
+                };
+                self.queue.insert(next, track.clone());
+                self.queue_original.push(track.clone());
+                self.assign_occurrences()?;
+                if self.player.track.is_none() {
+                    let player = Arc::make_mut(&mut self.player);
+                    player.track = Some(track);
+                    player.status = State::Paused;
+                    self.current = 0;
+                    (self.emit)(Event::Player(self.player.clone()));
+                }
+                self.configure_playback()?;
+                self.emit_queue();
+            }
+            Command::MoveQueue { id, to } => self.move_queue(id, to)?,
+            Command::PlayNext(id) => {
+                let from = self
+                    .queue
+                    .iter()
+                    .position(|track| self.occurrence_id(track) == id)
+                    .ok_or("элемент очереди не найден")?;
+                if from != self.current {
+                    let to = if from < self.current {
+                        self.current
+                    } else {
+                        self.current + 1
+                    };
+                    self.move_queue(id, to)?;
+                }
+            }
             Command::Open(view) => {
                 self.playlist_id = None;
+                self.title.clear();
+                self.length = Duration::ZERO;
+                self.header = Header::default();
+                self.busy = false;
                 self.view = view;
                 (self.emit)(Event::View(view));
                 self.view_generation += 1;
                 (self.emit)(Event::Busy(false));
                 self.cards.clear();
                 match view {
+                    View::Saved | View::History => {
+                        let tracks = if view == View::Saved {
+                            self.store.saved_tracks(&self.account)?
+                        } else {
+                            self.store.history(&self.account)?
+                        };
+                        let rows = tracks
+                            .into_iter()
+                            .map(|track| LibraryItem {
+                                track: Arc::new(track),
+                                liked: false,
+                            })
+                            .collect();
+                        self.title = if view == View::Saved {
+                            "Сохранённое"
+                        } else {
+                            "История на этом устройстве"
+                        }
+                        .to_owned();
+                        self.publish(rows);
+                        (self.emit)(Event::Collection {
+                            title: self.title.clone(),
+                            length: Duration::ZERO,
+                        });
+                    }
                     View::Library => self.request(Command::Library)?,
                     View::Albums => self.request(Command::Albums)?,
                     View::Artists => self.request(Command::Artists)?,
@@ -885,6 +1427,9 @@ impl Worker {
             Command::Thumbnails(keys) => self.thumbnails(keys),
             command @ (Command::Albums | Command::Artists) => self.request(command)?,
             Command::Artist(id) => {
+                self.title.clear();
+                self.header = Header::default();
+                self.length = Duration::ZERO;
                 self.view = View::Artist;
                 (self.emit)(Event::View(View::Artist));
                 self.publish(Vec::new());
@@ -907,6 +1452,7 @@ impl Worker {
                 };
                 if query.trim().is_empty() {
                     self.view_generation += 1;
+                    self.busy = false;
                     (self.emit)(Event::Busy(false));
                 } else {
                     self.request(command)?;
@@ -917,6 +1463,9 @@ impl Worker {
             | Command::Login(_)
             | Command::Like(_)) => self.request(command)?,
             Command::Album(id) => {
+                self.title.clear();
+                self.header = Header::default();
+                self.length = Duration::ZERO;
                 self.view = View::Album;
                 (self.emit)(Event::View(View::Album));
                 self.publish(Vec::new());
@@ -963,12 +1512,20 @@ impl Worker {
             Command::Next => {
                 if let Some(engine) = &self.engine {
                     engine.next()?;
+                } else if self.current + 1 < self.queue.len() {
+                    self.select_paused(self.current + 1);
+                } else if self.player.repeat == Repeat::All && !self.queue.is_empty() {
+                    self.select_paused(0);
                 }
             }
             Command::Previous => {
                 let paused = self.player.status == State::Paused;
                 self.current = self.current.saturating_sub(1);
-                self.play_current()?;
+                if self.engine.is_none() {
+                    self.select_paused(self.current);
+                } else {
+                    self.play_current()?;
+                }
                 if paused && let Some(engine) = &self.engine {
                     engine.pause()?;
                 }
@@ -984,16 +1541,31 @@ impl Worker {
                 } else if let Some(engine) = &self.engine {
                     engine.resume()?;
                 } else {
+                    let position = self.restored_position;
                     self.play_current()?;
+                    if let Some(engine) = &self.engine {
+                        engine.seek(position)?;
+                    }
+                    self.restored_position = position;
+                    self.last_position = Some(PositionAnchor {
+                        track: 0,
+                        position,
+                        audible_at: Instant::now(),
+                        state: State::Loading,
+                    });
                 }
             }
             Command::Stop => {
                 self.stop_engine();
+                self.restored_position = Duration::ZERO;
+                self.last_position = None;
                 Arc::make_mut(&mut self.player).status = State::Idle;
                 (self.emit)(Event::Player(self.player.clone()));
             }
             Command::TogglePlay => {
-                if self.player.status == State::Idle {
+                if self.engine.is_none() {
+                    self.command(Command::Resume)?;
+                } else if self.player.status == State::Idle {
                     self.play_current()?;
                 } else if let Some(engine) = &self.engine {
                     if self.player.status == State::Paused {
@@ -1004,6 +1576,13 @@ impl Worker {
                 }
             }
             Command::Seek(to) => {
+                self.restored_position = to;
+                self.last_position = Some(PositionAnchor {
+                    track: 0,
+                    position: to,
+                    audible_at: Instant::now(),
+                    state: self.player.status,
+                });
                 if let Some(engine) = &self.engine {
                     engine.seek(to)?;
                 }
@@ -1028,7 +1607,8 @@ impl Worker {
                 if self.player.shuffle && self.queue.len() > self.current + 1 {
                     use std::hash::{BuildHasher, RandomState};
                     let random = RandomState::new();
-                    self.queue[self.current + 1..].sort_by_cached_key(|t| random.hash_one(&t.id));
+                    self.queue[self.current + 1..]
+                        .sort_by_cached_key(|t| random.hash_one(Arc::as_ptr(t)));
                 }
                 if !self.player.shuffle && self.queue.len() > self.current + 1 {
                     let order: std::collections::HashMap<_, _> = self
@@ -1057,12 +1637,18 @@ impl Worker {
             }
             Command::Shutdown => {}
         }
+        if checkpoint {
+            self.checkpoint()?;
+        }
         Ok(())
     }
     fn play_row(&mut self, index: usize) -> Result<()> {
         let (queue, selected) = initial_queue(&self.rows, index)?;
+        self.restored_position = Duration::ZERO;
         self.queue = queue;
+        self.queue_ids.clear();
         self.queue_original = self.queue.clone();
+        self.assign_occurrences()?;
         let track = self.queue[selected].clone();
         self.queue_likes = self
             .rows
@@ -1074,13 +1660,37 @@ impl Worker {
             use std::hash::{BuildHasher, RandomState};
             self.queue.remove(selected);
             let random = RandomState::new();
-            self.queue.sort_by_cached_key(|t| random.hash_one(&t.id));
+            self.queue
+                .sort_by_cached_key(|t| random.hash_one(Arc::as_ptr(t)));
             self.queue.insert(0, track);
             self.current = 0;
         } else {
             self.current = selected;
         }
         self.play_current()
+    }
+    fn select_paused(&mut self, index: usize) {
+        self.current = index;
+        self.restored_position = Duration::ZERO;
+        self.last_position = Some(PositionAnchor {
+            track: 0,
+            position: Duration::ZERO,
+            audible_at: Instant::now(),
+            state: State::Paused,
+        });
+        let player = Arc::make_mut(&mut self.player);
+        player.track = self.queue.get(index).cloned();
+        player.bitrate_kbps = None;
+        player.liked = player
+            .track
+            .as_ref()
+            .is_some_and(|track| self.queue_likes.contains(&track.id));
+        player.status = State::Paused;
+        (self.emit)(Event::Player(self.player.clone()));
+        if let Some(position) = &self.last_position {
+            (self.emit)(Event::Position(position.clone()));
+        }
+        self.emit_queue();
     }
     fn configure_playback(&self) -> Result<()> {
         if let Some(engine) = &self.engine {
@@ -1095,11 +1705,71 @@ impl Worker {
         Ok(())
     }
     fn emit_queue(&self) {
+        (self.emit)(Event::QueueOrder {
+            entries: self
+                .queue
+                .iter()
+                .map(|track| (self.occurrence_id(track), track.clone()))
+                .collect(),
+            current: self
+                .queue
+                .get(self.current)
+                .map(|track| self.occurrence_id(track)),
+        });
         (self.emit)(Event::Queue(upcoming(
             &self.queue,
             self.current,
             self.player.repeat,
         )));
+    }
+    fn apply_bitrate(&mut self, generation: u64, occurrence: u64, bitrate: Option<u32>) {
+        if generation != self.engine_generation {
+            return;
+        }
+        self.audio_bitrates.insert(occurrence, bitrate);
+        if self
+            .player
+            .track
+            .as_ref()
+            .is_some_and(|track| self.occurrence_id(track) == occurrence)
+            && self.player.bitrate_kbps != bitrate
+        {
+            Arc::make_mut(&mut self.player).bitrate_kbps = bitrate;
+            (self.emit)(Event::Player(self.player.clone()));
+        }
+    }
+    fn source(&self, track: &Arc<Track>) -> Result<eagle_engine::Source> {
+        let provider = self.provider.clone();
+        let id = track.id.clone();
+        let resolve = Arc::new(move || {
+            let stream = provider
+                .resolve_stream(&id, Quality::High)
+                .map_err(|_| eagle_net::Error::Source("не удалось получить аудиоссылку"))?;
+            if !matches!(stream.encryption, eagle_core::Encryption::None) {
+                return Err(eagle_net::Error::Source(
+                    "шифрованный поток не поддерживается",
+                ));
+            }
+            Ok(eagle_net::growing::Location {
+                bitrate_kbps: stream.bitrate_kbps,
+                url: stream.url,
+                expires_at: Some(stream.expires_at),
+            })
+        });
+        let tx = self.tx.clone();
+        let generation = self.engine_generation;
+        let occurrence = self.occurrence_id(track);
+        crate::playback::streamed_with_bitrate(
+            self.store.clone(),
+            self.cache.clone(),
+            self.net.clone(),
+            track.id.clone(),
+            Quality::High,
+            resolve,
+            Arc::new(move |bitrate| {
+                let _ = tx.send(Message::Bitrate(generation, occurrence, bitrate));
+            }),
+        )
     }
     fn play_current(&mut self) -> Result<()> {
         let Some(track) = self.queue.get(self.current).cloned() else {
@@ -1107,7 +1777,9 @@ impl Worker {
         };
         log::info!(target: "eagle_app", provider = track.id.provider(), track_id = track.id.local(); "playback");
         self.stop_engine();
+        self.audio_bitrates.clear();
         self.last_position = None;
+        self.restored_position = Duration::ZERO;
         let mut engine = Engine::new(Config::default())?;
         engine.volume(self.player.volume)?;
         self.engine_queue = self.queue[self.current..]
@@ -1115,34 +1787,11 @@ impl Worker {
             .chain(&self.queue[..self.current])
             .cloned()
             .collect();
+        self.engine_generation = self.engine_generation.wrapping_add(1);
         for item in &self.engine_queue {
-            let provider = self.provider.clone();
-            let id = item.id.clone();
-            let resolve = Arc::new(move || {
-                let stream = provider
-                    .resolve_stream(&id, Quality::High)
-                    .map_err(|_| eagle_net::Error::Source("не удалось получить аудиоссылку"))?;
-                if !matches!(stream.encryption, eagle_core::Encryption::None) {
-                    return Err(eagle_net::Error::Source(
-                        "шифрованный поток не поддерживается",
-                    ));
-                }
-                Ok(eagle_net::growing::Location {
-                    url: stream.url,
-                    expires_at: Some(stream.expires_at),
-                })
-            });
-            engine.enqueue(crate::playback::streamed(
-                self.store.clone(),
-                self.cache.clone(),
-                self.net.clone(),
-                item.id.clone(),
-                Quality::High,
-                resolve,
-            )?)?;
+            engine.enqueue(self.source(item)?)?;
         }
         let events = engine.take_events();
-        self.engine_generation += 1;
         let generation = self.engine_generation;
         let tx = self.tx.clone();
         self.engine_events = Some(thread::Builder::new().name("eg-engine-ev".into()).spawn(
@@ -1159,6 +1808,7 @@ impl Worker {
         let state = Arc::make_mut(&mut self.player);
         state.liked = self.queue_likes.contains(&track.id);
         state.track = Some(track.clone());
+        state.bitrate_kbps = None;
         state.status = State::Loading;
         if let Some(catalog) = &self.catalog {
             let _ = catalog.send(CatalogRequest::Cover(track, CoverTarget::Player, 0));
@@ -1168,8 +1818,14 @@ impl Worker {
         Ok(())
     }
     fn engine_event(&mut self, event: eagle_engine::Event) {
+        let checkpoint = matches!(
+            &event,
+            eagle_engine::Event::TrackChanged(_)
+                | eagle_engine::Event::StateChanged(State::Paused | State::Idle)
+        );
         match event {
             eagle_engine::Event::TrackChanged(index) => {
+                self.history_recorded = false;
                 let Some(track) = self.engine_queue.get(index as usize) else {
                     return;
                 };
@@ -1179,11 +1835,18 @@ impl Worker {
                 };
                 self.current = current;
                 self.last_position = None;
+                self.restored_position = Duration::ZERO;
                 self.emit_queue();
                 if let Some(track) = self.queue.get(self.current).cloned() {
+                    let bitrate = self
+                        .audio_bitrates
+                        .get(&self.occurrence_id(&track))
+                        .copied()
+                        .flatten();
                     let state = Arc::make_mut(&mut self.player);
                     state.liked = self.queue_likes.contains(&track.id);
                     state.track = Some(track.clone());
+                    state.bitrate_kbps = bitrate;
                     if let Some(catalog) = &self.catalog {
                         let _ = catalog.send(CatalogRequest::Cover(track, CoverTarget::Player, 0));
                     }
@@ -1191,15 +1854,41 @@ impl Worker {
                 }
             }
             eagle_engine::Event::StateChanged(status) => {
+                if let Some(anchor) = &mut self.last_position {
+                    anchor.position = position_now(anchor, Instant::now());
+                    anchor.audible_at = Instant::now();
+                    anchor.state = status;
+                }
                 Arc::make_mut(&mut self.player).status = status;
                 (self.emit)(Event::Player(self.player.clone()));
             }
             eagle_engine::Event::Position(anchor) => {
+                if !self.history_recorded
+                    && anchor.state == State::Playing
+                    && anchor.position >= Duration::from_secs(1)
+                    && let Some(track) = self.player.track.as_ref()
+                {
+                    match self.store.record_play(&self.account, track) {
+                        Ok(()) => self.history_recorded = true,
+                        Err(error) => {
+                            self.history_recorded = true;
+                            (self.emit)(Event::Error(error.to_string()));
+                        }
+                    }
+                }
                 self.last_position = Some(anchor.clone());
                 (self.emit)(Event::Position(anchor));
+                if self.last_checkpoint.elapsed() >= Duration::from_secs(10)
+                    && let Err(error) = self.checkpoint()
+                {
+                    (self.emit)(Event::Error(error.to_string()));
+                }
             }
             eagle_engine::Event::Error { message, .. } => (self.emit)(Event::Error(message)),
             _ => {}
+        }
+        if checkpoint && let Err(error) = self.checkpoint() {
+            (self.emit)(Event::Error(error.to_string()));
         }
     }
 }
@@ -1764,6 +2453,7 @@ impl Clone for PlayerState {
     fn clone(&self) -> Self {
         Self {
             track: self.track.clone(),
+            bitrate_kbps: self.bitrate_kbps,
             status: self.status,
             volume: self.volume,
             liked: self.liked,
@@ -1811,6 +2501,171 @@ mod delta_tests {
             }),
             liked,
         }
+    }
+    #[test]
+    fn history_records_audible_play_once_and_separates_repeat_occurrences() {
+        let root = std::env::temp_dir().join(format!("eg-session-history-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.account = "a".into();
+        let track = row(1, false).track;
+        worker.queue = vec![track.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.engine_queue = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        Arc::make_mut(&mut worker.player).track = Some(track);
+        let anchor = |seconds, state| {
+            eagle_engine::Event::Position(PositionAnchor {
+                track: 0,
+                position: Duration::from_secs(seconds),
+                audible_at: Instant::now(),
+                state,
+            })
+        };
+        worker.engine_event(anchor(0, State::Playing));
+        worker.engine_event(anchor(2, State::Paused));
+        assert!(worker.store.history("a").unwrap().is_empty());
+        worker.engine_event(anchor(1, State::Playing));
+        worker.engine_event(anchor(2, State::Playing));
+        assert_eq!(worker.store.history("a").unwrap().len(), 1);
+        worker.engine_event(eagle_engine::Event::TrackChanged(0));
+        worker.engine_event(anchor(1, State::Playing));
+        assert_eq!(worker.store.history("a").unwrap().len(), 2);
+        assert!(worker.store.history("b").unwrap().is_empty());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn bitrate_is_scoped_to_engine_generation_and_selected_track() {
+        let root = std::env::temp_dir().join(format!("eagle-bitrate-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let current = row(1, false).track;
+        let next = Arc::new((*current).clone());
+        worker.queue = vec![current.clone(), next.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        let first = worker.occurrence_id(&current);
+        let second = worker.occurrence_id(&next);
+        assert_ne!(first, second);
+        Arc::make_mut(&mut worker.player).track = Some(current.clone());
+        worker.apply_bitrate(worker.engine_generation.wrapping_add(1), first, Some(320));
+        assert_eq!(worker.player.bitrate_kbps, None);
+        worker.apply_bitrate(worker.engine_generation, second, Some(128));
+        assert_eq!(worker.player.bitrate_kbps, None);
+        worker.apply_bitrate(worker.engine_generation, first, Some(320));
+        assert_eq!(worker.snapshot().player.bitrate_kbps, Some(320));
+        worker.apply_bitrate(worker.engine_generation, first, None);
+        assert_eq!(worker.player.bitrate_kbps, None);
+        worker.queue = vec![current, next];
+        worker.select_paused(1);
+        assert_eq!(worker.player.bitrate_kbps, None);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn durable_queue_restores_duplicates_paused_and_reorders_exact_occurrence() {
+        let root = std::env::temp_dir().join(format!("eagle-durable-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let a = row(1, true).track;
+        let duplicate = Arc::new((*a).clone());
+        let b = row(2, false).track;
+        worker.queue_original = vec![a.clone(), duplicate.clone(), b.clone()];
+        worker.queue = vec![b.clone(), duplicate, a];
+        worker.current = 1;
+        Arc::make_mut(&mut worker.player).shuffle = true;
+        Arc::make_mut(&mut worker.player).repeat = Repeat::All;
+        worker.last_position = Some(PositionAnchor {
+            track: 1,
+            position: Duration::from_millis(750),
+            audible_at: Instant::now(),
+            state: State::Paused,
+        });
+        worker.checkpoint().unwrap();
+        drop(worker);
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        assert!(worker.engine.is_none());
+        assert_eq!(worker.player.status, State::Paused);
+        assert_eq!(worker.restored_position, Duration::from_millis(750));
+        let snapshot = worker.snapshot();
+        assert_eq!(snapshot.current, Some(2));
+        assert_eq!(
+            snapshot.queue.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        assert!(snapshot.player.shuffle);
+        assert_eq!(snapshot.player.repeat, Repeat::All);
+        worker.command(Command::PlayNext(3)).unwrap();
+        assert_eq!(
+            worker
+                .snapshot()
+                .queue
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 1]
+        );
+        assert_eq!(worker.snapshot().current, Some(2));
+        worker.command(Command::MoveQueue { id: 1, to: 0 }).unwrap();
+        assert_eq!(worker.snapshot().current, Some(2));
+        let id = worker.queue[0].id.clone();
+        worker.store.put_track(worker.queue[0].as_ref()).unwrap();
+        worker.command(Command::EnqueueNext(id)).unwrap();
+        let snapshot = worker.snapshot();
+        assert_eq!(snapshot.queue.len(), 4);
+        assert_eq!(snapshot.current, Some(2));
+        assert_eq!(snapshot.queue[2].0, 4);
+        worker.command(Command::Next).unwrap();
+        assert_eq!(worker.snapshot().current, Some(4));
+        assert!(worker.engine.is_none());
+        assert_eq!(worker.player.status, State::Paused);
+        worker.command(Command::Previous).unwrap();
+        assert_eq!(worker.snapshot().current, Some(2));
+        let before = worker
+            .store
+            .playback(&worker.account)
+            .unwrap()
+            .unwrap()
+            .position_ms;
+        let anchor = PositionAnchor {
+            track: 0,
+            position: Duration::from_millis(250),
+            audible_at: Instant::now(),
+            state: State::Paused,
+        };
+        worker.engine_event(eagle_engine::Event::Position(anchor.clone()));
+        assert_eq!(
+            worker
+                .store
+                .playback(&worker.account)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            before
+        );
+        worker.last_checkpoint = Instant::now() - Duration::from_secs(10);
+        worker.engine_event(eagle_engine::Event::Position(anchor));
+        assert_eq!(
+            worker
+                .store
+                .playback(&worker.account)
+                .unwrap()
+                .unwrap()
+                .position_ms,
+            250
+        );
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn large_collections_only_reset_for_structural_changes() {
@@ -1872,6 +2727,7 @@ mod delta_tests {
         let a = row(1, false).track;
         let b = row(2, false).track;
         worker.queue = vec![a.clone(), b.clone()];
+        worker.queue_original = worker.queue.clone();
         worker.engine_queue = vec![b, a.clone()];
         worker.current = 0;
         worker.last_position = Some(PositionAnchor {
@@ -2002,9 +2858,11 @@ mod delta_tests {
         assert!(worker.queue_likes.is_empty());
         assert!(!worker.player.liked);
         assert!(worker.rows.iter().all(|row| !row.liked));
+        assert!(worker.rows.is_empty());
+        worker.publish(vec![row(1, false), row(1, false)]);
         let id = worker.rows[0].track.id.clone();
         worker.apply_liked(id.clone(), true);
-        assert!(worker.player.liked);
+        assert!(worker.player.track.is_none());
         assert!(worker.rows.iter().all(|row| row.liked));
         worker.apply_liked(id, false);
         assert!(!worker.player.liked);
@@ -2179,6 +3037,14 @@ mod stale_engine_tests {
 mod sync_tests {
     use super::*;
     use eagle_core::*;
+    pub(super) fn offline_provider() -> Arc<dyn Provider> {
+        Arc::new(Fixture {
+            fail: true,
+            empty: false,
+            gate: None,
+            calls: Arc::default(),
+        })
+    }
     struct Fixture {
         fail: bool,
         empty: bool,

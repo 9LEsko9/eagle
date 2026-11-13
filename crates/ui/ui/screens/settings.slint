@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, ThemeMode, Type, Motion, Layout } from "../globals/theme.slint";
-import { Ui, Actions, Route, Player, Status } from "../globals/bridge.slint";
+import { Ui, Actions, Route, Player, Status, Storage } from "../globals/bridge.slint";
 import { TextButton } from "../components/button.slint";
 import { Segmented, Switch } from "../components/controls.slint";
 import { Artwork } from "../components/cover.slint";
@@ -113,6 +113,7 @@ component AppearancePreview inherits Rectangle {
 }
 
 export component SettingsScreen inherits Flickable {
+    private property <string> remove-id;
     // Derived from the window (not this element) so the decision cannot feed back into layout.
     private property <length> content-width: Layout.width
         - (Layout.compact ? 0px : 208px)
@@ -151,6 +152,7 @@ export component SettingsScreen inherits Flickable {
                             selected: Theme.mode == ThemeMode.graphite ? 1 : Theme.mode == ThemeMode.paper ? 2 : Theme.mode == ThemeMode.oled ? 3 : 0;
                             picked(i) => {
                                 Theme.mode = i == 1 ? ThemeMode.graphite : i == 2 ? ThemeMode.paper : i == 3 ? ThemeMode.oled : ThemeMode.auto;
+                                Actions.preferences-changed();
                             }
                         }
                     }
@@ -160,7 +162,7 @@ export component SettingsScreen inherits Flickable {
                         Segmented {
                             options: [@tr("Выкл"), @tr("Мягкий"), @tr("Яркий")];
                             selected: Theme.tint;
-                            picked(i) => { Theme.tint = i; }
+                            picked(i) => { Theme.tint = i; Actions.preferences-changed(); }
                         }
                     }
                     SettingRow {
@@ -168,18 +170,60 @@ export component SettingsScreen inherits Flickable {
                         Segmented {
                             options: [@tr("Мелкий"), @tr("Обычный"), @tr("Крупный")];
                             selected: Type.scale < 0.95 ? 0 : Type.scale > 1.05 ? 2 : 1;
-                            picked(i) => { Type.scale = i == 0 ? 0.9 : i == 2 ? 1.15 : 1; }
+                            picked(i) => { Type.scale = i == 0 ? 0.9 : i == 2 ? 1.15 : 1; Actions.preferences-changed(); }
                         }
                     }
                     SettingRow {
                         title: @tr("Обложки в списках");
                         hint: @tr("Миниатюры у треков и в очереди");
-                        Switch { label: @tr("Обложки в списках"); checked: Ui.list-covers; toggled => { Ui.list-covers = !Ui.list-covers; Actions.list-covers-changed(); } }
+                        Switch { label: @tr("Обложки в списках"); checked: Ui.list-covers; toggled => { Ui.list-covers = !Ui.list-covers; Actions.list-covers-changed(); Actions.preferences-changed(); } }
                     }
                     SettingRow {
                         title: @tr("Уменьшить движение");
                         hint: @tr("Отключает анимации и перетекание цветов");
-                        Switch { label: @tr("Уменьшить движение"); checked: Motion.reduced; toggled => { Motion.reduced = !Motion.reduced; } }
+                        Switch { label: @tr("Уменьшить движение"); checked: Motion.reduced; toggled => { Motion.reduced = !Motion.reduced; Actions.preferences-changed(); } }
+                    }
+                    SectionTitle { text: @tr("Хранилище"); }
+                    SettingRow {
+                        title: @tr("Аудиофайлы");
+                        hint: @tr("Кэш: ") + Storage.cache-usage + @tr(" · Сохранённое: ") + Storage.saved-usage;
+                    }
+                    SettingRow {
+                        title: @tr("Лимит кэша");
+                        hint: @tr("Сохранённое не входит в лимит. Новый лимит применяется при записи в кэш.");
+                        Segmented { options: [@tr("512 МиБ"), @tr("2 ГиБ"), @tr("8 ГиБ")]; selected: Storage.cache-limit; picked(i) => { Actions.cache-limit(i); } }
+                    }
+                    SettingRow { title: @tr("Папка аудио"); hint: Storage.folder; }
+                    SettingRow { title: @tr("Лимитное подключение: неизвестно"); hint: @tr("Системный статус пока недоступен. Загрузки разрешены; используйте паузу, чтобы ограничить трафик."); }
+                    SectionTitle { text: @tr("Сохранение офлайн"); }
+                    SettingRow {
+                        title: @tr("Качество новых загрузок");
+                        hint: @tr("Выбор относится к новым заданиям. Недоступное качество будет отмечено ошибкой.");
+                        Segmented { options: [@tr("До 192"), @tr("320 кбит/с")]; selected: Storage.quality; picked(i) => { Storage.quality = i; Actions.preferences-changed(); } }
+                    }
+                    SettingRow {
+                        title: @tr("Загрузки");
+                        hint: @tr("Два задания одновременно. Пауза и отмена сохраняются после перезапуска.");
+                        TextButton { text: @tr("Обновить"); clicked => { Actions.downloads(); } }
+                    }
+                    if Storage.jobs.length == 0 : Text {
+                        text: @tr("Загрузок пока нет. Выберите «Сохранить офлайн» в меню трека.");
+                        color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap;
+                    }
+                    for job in Storage.jobs : VerticalLayout {
+                        padding-top: 12px; padding-bottom: 12px; spacing: 4px;
+                        Text { text: job.track; color: Theme.t.tx; font-size: Type.body; overflow: elide; }
+                        Text { text: job.quality + " · " + job.status; color: Theme.t.tx2; font-size: Type.meta; }
+                        if job.error != "" : Text { text: job.error; color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+                        HorizontalLayout {
+                            alignment: start; spacing: 8px;
+                            if job.saved && root.remove-id != job.id : TextButton { text: @tr("Удалить сохранённое"); clicked => { root.remove-id = job.id; } }
+                            if job.saved && root.remove-id == job.id : TextButton { text: @tr("Подтвердить удаление"); clicked => { Actions.remove-saved(job.id); root.remove-id = ""; } }
+                            if job.saved && root.remove-id == job.id : TextButton { text: @tr("Отмена"); clicked => { root.remove-id = ""; } }
+                            if job.pausable : TextButton { text: @tr("Пауза"); clicked => { Actions.download-control(job.id, 0); } }
+                            if job.retryable : TextButton { text: @tr("Продолжить"); clicked => { Actions.download-control(job.id, 1); } }
+                            if job.cancellable : TextButton { text: @tr("Отменить"); clicked => { Actions.download-control(job.id, 2); } }
+                        }
                     }
                     SectionTitle { text: @tr("Аккаунты"); }
                     SettingRow {

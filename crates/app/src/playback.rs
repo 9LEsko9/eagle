@@ -132,6 +132,23 @@ pub(crate) fn streamed(
     quality: Quality,
     resolve: Arc<eagle_net::growing::Resolve>,
 ) -> Result<Source> {
+    streamed_with_bitrate(store, cache, net, id, quality, resolve, Arc::new(|_| {}))
+}
+pub(crate) fn streamed_with_bitrate(
+    store: Arc<Store>,
+    cache: Arc<Cache>,
+    net: Arc<Client>,
+    id: TrackId,
+    quality: Quality,
+    resolve: Arc<eagle_net::growing::Resolve>,
+    on_bitrate: Arc<dyn Fn(Option<u32>) + Send + Sync>,
+) -> Result<Source> {
+    let notify = on_bitrate.clone();
+    let resolve = Arc::new(move || {
+        let location = resolve()?;
+        notify(location.bitrate_kbps);
+        Ok(location)
+    });
     let _ = cache.map(&id, quality)?;
     let slot: Mutex<std::sync::Weak<Download>> = Mutex::default();
     Ok(Source::new(move |interrupt| {
@@ -141,6 +158,7 @@ pub(crate) fn streamed(
         if let Some((path, actual)) =
             cache_hit(&store, &cache, &id, quality).map_err(|e| e.to_string())?
         {
+            on_bitrate(cache.map(&id, actual)?.and_then(|m| m.bitrate_kbps));
             let lease = if actual == Quality::High {
                 high
             } else {
@@ -168,11 +186,16 @@ pub(crate) fn streamed(
         }
         if download.is_none() {
             let mut initial = cache.map(&id, quality)?;
-            if initial.as_ref().is_some_and(|m| m.etag.is_none()) {
+            if initial.as_ref().is_some_and(|m| {
+                !m.etag
+                    .as_deref()
+                    .is_some_and(eagle_net::growing::strong_etag)
+            }) {
                 cache.discard(&store, &id, quality)?;
                 initial = None;
             }
             let initial = initial.map_or_else(Snapshot::default, |m| Snapshot {
+                bitrate_kbps: m.bitrate_kbps,
                 total: Some(m.total),
                 ranges: m.ranges,
                 etag: m.etag,
@@ -186,6 +209,7 @@ pub(crate) fn streamed(
                     return Ok(());
                 };
                 let map = RangeMap {
+                    bitrate_kbps: snapshot.bitrate_kbps,
                     total,
                     ranges: snapshot.ranges.clone(),
                     etag: snapshot.etag.clone(),
@@ -284,6 +308,7 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
                             let _ = crate::music::metadata(&store, &metadata_net, &root, &track);
                         }
                         Ok(eagle_net::growing::Location {
+                            bitrate_kbps: stream.bitrate_kbps,
                             url: stream.url,
                             expires_at: Some(stream.expires_at),
                         })
@@ -503,6 +528,50 @@ mod http_tests {
         net::TcpListener,
         sync::atomic::{AtomicBool, Ordering},
     };
+    #[test]
+    fn offline_source_reports_selected_file_bitrate_without_resolving() {
+        let root =
+            std::env::temp_dir().join(format!("eagle-offline-bitrate-{}", std::process::id()));
+        let store = Arc::new(Store::open(&root).unwrap());
+        let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT, &store).unwrap());
+        let id: TrackId = "yandex:1".parse().unwrap();
+        let mut map = RangeMap::new(1);
+        map.bitrate_kbps = Some(128);
+        cache
+            .write_chunk(&store, &id, Quality::Standard, &mut map, 0, b"x")
+            .unwrap();
+        cache.pin(&store, &id, Quality::Standard, true).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let source = streamed_with_bitrate(
+            store.clone(),
+            cache.clone(),
+            Arc::new(Client::new().unwrap()),
+            id,
+            Quality::High,
+            Arc::new(|| panic!("offline file must not resolve")),
+            Arc::new(move |bitrate| {
+                tx.send(bitrate).unwrap();
+            }),
+        )
+        .unwrap();
+        let mut reader = source
+            .open_reader(eagle_engine::Interrupt {
+                generation: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                expected: 0,
+                preload: false,
+                seeking: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"x");
+        assert_eq!(rx.recv().unwrap(), Some(128));
+        drop(reader);
+        drop(source);
+        drop(cache);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn every_format_decodes_over_http_and_complete_cache_never_resolves_again() {
         let root = std::env::temp_dir().join(format!("eagle-http-formats-{}", std::process::id()));

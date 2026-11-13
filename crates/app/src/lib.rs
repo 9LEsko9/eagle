@@ -6,6 +6,7 @@
 pub mod benchmark;
 
 mod covers;
+mod downloads;
 pub mod music;
 mod playback;
 pub mod session;

@@ -17,17 +17,30 @@ const CHUNK: u64 = 2 * 1024 * 1024;
 const LIMIT: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    pub bitrate_kbps: Option<u32>,
     pub total: Option<u64>,
     pub ranges: Vec<(u64, u64)>,
     pub etag: Option<String>,
 }
+/// Only a strong entity tag can establish byte-for-byte compatibility across requests.
+pub fn strong_etag(etag: &str) -> bool {
+    let bytes = etag.as_bytes();
+    bytes.len() >= 2
+        && bytes[0] == b'"'
+        && bytes[bytes.len() - 1] == b'"'
+        && bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|&b| b == 0x21 || (0x23..=0x7e).contains(&b) || b >= 0x80)
+}
 pub struct Location {
+    pub bitrate_kbps: Option<u32>,
     pub url: SignedUrl,
     pub expires_at: Option<SystemTime>,
 }
 impl From<SignedUrl> for Location {
     fn from(url: SignedUrl) -> Self {
         Self {
+            bitrate_kbps: None,
             url,
             expires_at: None,
         }
@@ -370,6 +383,11 @@ impl BodySink for Sink {
         {
             return Err(Error::Changed);
         }
+        if !state.snapshot.ranges.is_empty()
+            && !state.snapshot.etag.as_deref().is_some_and(strong_etag)
+        {
+            return Err(Error::Source("для докачки требуется сильный ETag"));
+        }
         let (start, end, total) = if head.status == 206 {
             let (start, end, total) = parse_range(
                 head.content_range
@@ -463,6 +481,18 @@ fn run(
             {
                 url = Some(resolve()?);
             }
+            if start > 0
+                && !shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .snapshot
+                    .ranges
+                    .is_empty()
+                && !etag.as_deref().is_some_and(strong_etag)
+            {
+                return Err(Error::Source("для докачки требуется сильный ETag"));
+            }
             let sink = Arc::new(Sink {
                 shared: shared.clone(),
                 request_start: start,
@@ -532,6 +562,7 @@ fn run(
                 .unwrap_or_else(|p| p.into_inner())
                 .sync_data()
                 .map_err(|_| Error::Source("не удалось сохранить аудиокэш"))?;
+            state.snapshot.bitrate_kbps = url.as_ref().and_then(|u| u.bitrate_kbps);
             let snapshot = state.snapshot.clone();
             let finished = state.finished;
             state.finished = false;
@@ -557,6 +588,7 @@ fn run(
                 .clone();
             invalid.ranges.clear();
             invalid.etag = None;
+            invalid.bitrate_kbps = None;
             let _ = publish(&invalid);
         }
         let mut state = shared.state.lock().unwrap_or_else(|p| p.into_inner());

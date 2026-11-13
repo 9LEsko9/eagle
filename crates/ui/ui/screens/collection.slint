@@ -20,7 +20,7 @@ export component LibraryTabs inherits Chips {
 export component TrackMenu inherits Rectangle {
     in-out property <TrackItem> item;
     private property <length> anchor-y;
-    private property <length> menu-height: (root.item.album-id != "" ? 2 : 1) * 34px + 10px;
+    private property <length> menu-height: (root.item.album-id != "" ? 4 : 3) * 34px + 10px;
     public function open(item: TrackItem, row-top: length) {
         root.item = item;
         // Below the «…» button, or above it when that would leave the list.
@@ -44,6 +44,8 @@ export component TrackMenu inherits Rectangle {
             drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 5px;
+                MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
+                MenuItem { text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
             }
@@ -139,12 +141,13 @@ export component CollectionScreen inherits VerticalLayout {
                 color: Theme.t.tx2;
                 font-size: Type.meta;
             }
-            if root.collection : HorizontalLayout {
+            if root.collection || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 spacing: 10px;
                 padding-top: 16px;
                 alignment: start;
                 TextButton { text: @tr("Слушать"); icon: @image-url("../icons/play.svg"); primary: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(false); } }
                 TextButton { text: @tr("Перемешать"); outline: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(true); } }
+                if Ui.signed-in : TextButton { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); } }
                 if Library.deletable && !Ui.confirm-delete : TextButton { text: @tr("Удалить плейлист"); outline: true; enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; } }
                 if Library.likeable : TextButton {
                     text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию");

@@ -129,6 +129,8 @@ pub enum Encryption {
 }
 #[derive(Debug)]
 pub struct Stream {
+    /// Bitrate declared by the provider, never inferred from the requested quality.
+    pub bitrate_kbps: Option<u32>,
     pub url: SignedUrl,
     pub codec: String,
     pub expires_at: SystemTime,
@@ -149,6 +151,8 @@ pub enum ProviderError {
     NotFound,
     #[error("недоступно: регион, подписка или удалённый трек")]
     Unavailable,
+    #[error("выбранное качество недоступно для этого трека")]
+    UnsupportedQuality,
     #[error("слишком много запросов; повторите позже")]
     RateLimited,
     #[error("формат API изменился")]
