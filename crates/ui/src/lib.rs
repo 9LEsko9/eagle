@@ -958,6 +958,21 @@ mod tests {
         ui.global::<Player>().set_artist("A".repeat(200).into());
         let long = play_x();
         assert!((short - long).abs() <= 0.5, "short={short}, long={long}");
+        drop(ui);
+        for width in [720., 834., 835.] {
+            let ui = DesktopWindow::new().unwrap();
+            ui.window().set_size(slint::LogicalSize::new(width, 880.));
+            ui.global::<Player>().set_title("A".repeat(200).into());
+            ui.show().unwrap();
+            let play = ElementHandle::find_by_accessible_label(&ui, "Играть")
+                .next()
+                .unwrap();
+            let centre = play.absolute_position().x + play.size().width / 2.;
+            assert!(
+                (centre - width / 2.).abs() <= 2.5,
+                "width={width}, centre={centre}"
+            );
+        }
     }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
