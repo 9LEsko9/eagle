@@ -58,23 +58,32 @@ fn itunes_trim(list: &[Atom<'_>]) -> Option<Trim> {
                 return Some(trim);
             }
         } else if atom.kind == b"meta" {
-            let metadata = atoms(atom.data.get(4..)?)?;
-            let items = atoms(child(&metadata, b"ilst")?)?;
+            let Some(metadata) = atom.data.get(4..).and_then(atoms) else {
+                continue;
+            };
+            let Some(items) = child(&metadata, b"ilst").and_then(atoms) else {
+                continue;
+            };
             for item in items.iter().filter(|a| a.kind == b"----") {
-                let fields = atoms(item.data)?;
+                let Some(fields) = atoms(item.data) else {
+                    continue;
+                };
                 if child(&fields, b"mean").and_then(|s| s.get(4..)) != Some(b"com.apple.iTunes")
                     || child(&fields, b"name").and_then(|s| s.get(4..)) != Some(b"iTunSMPB")
                 {
                     continue;
                 }
-                let text = std::str::from_utf8(child(&fields, b"data")?.get(8..)?).ok()?;
-                let mut values = text
-                    .split_whitespace()
-                    .map(|s| u64::from_str_radix(s, 16).ok());
-                let _ = values.next()??;
-                let start = values.next()??;
-                let padding = values.next()??;
-                let length = values.next()??;
+                let parsed = (|| {
+                    let text = std::str::from_utf8(child(&fields, b"data")?.get(8..)?).ok()?;
+                    let mut values = text
+                        .split_whitespace()
+                        .map(|s| u64::from_str_radix(s, 16).ok());
+                    let _ = values.next()??;
+                    Some((values.next()??, values.next()??, values.next()??))
+                })();
+                let Some((start, padding, length)) = parsed else {
+                    continue;
+                };
                 if length > 0
                     && start.checked_add(length).is_some()
                     && start < 1_920_000
@@ -237,6 +246,51 @@ mod tests {
             .is_none()
         );
     }
+    fn valid_itunes_item() -> Vec<u8> {
+        atom(
+            b"----",
+            &[
+                atom(
+                    b"mean",
+                    &[vec![0; 4], b"com.apple.iTunes".to_vec()].concat(),
+                ),
+                atom(b"name", &[vec![0; 4], b"iTunSMPB".to_vec()].concat()),
+                atom(
+                    b"data",
+                    &[
+                        vec![0; 8],
+                        b" 00000000 00000400 00000038 0000000000002EE0".to_vec(),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        )
+    }
+
+    #[test]
+    fn meta_without_ilst_does_not_hide_a_later_trim() {
+        let meta = |contents: Vec<u8>| atom(b"meta", &[vec![0; 4], contents].concat());
+        let moov = atom(
+            b"udta",
+            &[
+                meta(atom(b"free", &[])),
+                meta(atom(b"ilst", &valid_itunes_item())),
+            ]
+            .concat(),
+        );
+        let trim = parse(&moov, 48000).unwrap();
+        assert_eq!((trim.start, trim.length), (1024, 12000));
+    }
+
+    #[test]
+    fn one_malformed_freeform_item_does_not_hide_the_next() {
+        let items = [atom(b"----", &[0, 0, 0]), valid_itunes_item()].concat();
+        let moov = atom(b"meta", &[vec![0; 4], atom(b"ilst", &items)].concat());
+        let trim = parse(&moov, 48000).unwrap();
+        assert_eq!((trim.start, trim.length), (1024, 12000));
+    }
+
     #[test]
     fn simple_audio_edit_list_is_scaled_and_not_double_trimmed() {
         let mut mvhd = vec![0; 16];
