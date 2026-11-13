@@ -3,6 +3,8 @@
 
 //! Dev tool that renders the Eagle brand icons from SVG sources.
 
+pub mod build;
+pub mod pack;
 pub mod palette;
 pub mod render;
 pub mod sources;
