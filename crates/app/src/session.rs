@@ -2348,8 +2348,12 @@ impl Worker {
                     self.select_paused(index);
                 } else {
                     let paused = self.player.status == State::Paused;
+                    let previous = self.current;
                     self.current = index;
-                    self.play_current()?;
+                    if let Err(error) = self.play_current() {
+                        self.select_paused(previous);
+                        return Err(error);
+                    }
                     if paused && let Some(engine) = &self.engine {
                         engine.pause()?;
                     }
@@ -5177,6 +5181,32 @@ mod delta_tests {
         assert_eq!(worker.current, 1);
         worker.command(Command::Previous).unwrap();
         assert_eq!(worker.current, 0);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn jump_failure_restores_previous_selection_paused() {
+        let root = std::env::temp_dir().join(format!("eagle-jump-failure-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let mut unavailable = (*row(2, false).track).clone();
+        unavailable.id = "missing:2".parse().unwrap();
+        worker.queue = vec![row(1, false).track, Arc::new(unavailable)];
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        worker.select_paused(0);
+        worker.engine = Some(Engine::new(Config::default()).unwrap());
+        let target = worker.occurrence_id(&worker.queue[1]);
+        assert!(worker.command(Command::JumpTo(target)).is_err());
+        assert_eq!(worker.current, 0);
+        assert!(worker.engine.is_none());
+        assert_eq!(worker.player.status, State::Paused);
+        assert!(Arc::ptr_eq(
+            worker.player.track.as_ref().unwrap(),
+            &worker.queue[0]
+        ));
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }

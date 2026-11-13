@@ -49,8 +49,8 @@ export global Layout {
     // The sidebar becomes a drawer behind a menu button.
     out property <bool> compact: width < 860px;
     // The «Сейчас играет» panel floats over the content once a docked column (336 px)
-    // would leave the track list narrower than 420 px.
-    out property <bool> narrow: width - (compact ? 0px : 208px) - 336px < 420px;
+    // would leave the track list narrower than 460 px.
+    out property <bool> narrow: width - (compact ? 0px : 208px) - 336px < 460px;
     // The player bar drops shuffle, repeat and the volume slider.
     out property <bool> tight: width < 720px;
     // Large windows get roomier gutters.

@@ -978,6 +978,44 @@ mod tests {
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
         player_bar_centre_is_independent_of_title();
+        for width in [1000., 1280.] {
+            let panel_ui = DesktopWindow::new().unwrap();
+            panel_ui
+                .window()
+                .set_size(slint::LogicalSize::new(width, 880.));
+            panel_ui.show().unwrap();
+            for index in 0..5 {
+                let label = if index % 2 == 0 {
+                    "Показать панель"
+                } else {
+                    "Скрыть панель"
+                };
+                ElementHandle::find_by_accessible_label(&panel_ui, label)
+                    .next()
+                    .unwrap()
+                    .invoke_accessible_default_action();
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+                slint::platform::update_timers_and_animations();
+            }
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
+            slint::platform::update_timers_and_animations();
+            assert!(panel_ui.global::<Ui>().get_panel_open());
+            assert!(
+                ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель").count() >= 2
+            );
+            ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель")
+                .next()
+                .unwrap()
+                .invoke_accessible_default_action();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
+            slint::platform::update_timers_and_animations();
+            assert!(!panel_ui.global::<Ui>().get_panel_open());
+            assert_eq!(
+                ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель").count(),
+                0
+            );
+        }
+
         let window = DesktopWindow::new().unwrap();
         let weak = window.as_weak();
         window.show().unwrap();

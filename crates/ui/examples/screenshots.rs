@@ -492,7 +492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Route::Playlist,
             true,
             false,
-            920.,
+            1000.,
         ),
         (
             "compact",
