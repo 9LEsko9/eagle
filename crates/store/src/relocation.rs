@@ -9,6 +9,43 @@ use std::{
 };
 
 const TEMP_DIR: &str = ".eagle-relocation";
+const TEMP_MARKER: &str = ".eagle-owned";
+const TEMP_MARKER_CONTENTS: &[u8] = b"eagle relocation temporary directory v1\n";
+
+fn is_relocation_temp(path: &Path) -> io::Result<bool> {
+    if !fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Ok(false);
+    }
+    let marker = path.join(TEMP_MARKER);
+    if !fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
+        || fs::read(&marker)? != TEMP_MARKER_CONTENTS
+    {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_name() == TEMP_MARKER {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some((pid, sequence)) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(".eagle-relocation-"))
+            .and_then(|name| name.split_once('-'))
+        else {
+            return Ok(false);
+        };
+        if pid.is_empty()
+            || sequence.is_empty()
+            || !pid.bytes().all(|b| b.is_ascii_digit())
+            || !sequence.bytes().all(|b| b.is_ascii_digit())
+            || !entry.file_type()?.is_file()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 /// Exclusive ownership of a relocation destination without managed content.
 /// The lease must outlive every writer using the destination.
@@ -30,7 +67,7 @@ impl StorageLease {
             .map_err(|e| io::Error::other(e.to_string()))?;
         for entry in fs::read_dir(&root)? {
             let entry = entry?;
-            if entry.file_name() == TEMP_DIR && entry.file_type()?.is_dir() {
+            if entry.file_name() == TEMP_DIR && is_relocation_temp(&entry.path())? {
                 continue;
             }
             if !matches!(
@@ -144,10 +181,18 @@ fn copy_tree(source: &Path, destination: &Path, temp_root: &Path, top: bool) -> 
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        if top && entry.file_name() == TEMP_DIR {
+            if is_relocation_temp(&entry.path())? {
+                continue;
+            }
+            return Err(io::Error::other(
+                "source temporary directory is not owned by Eagle",
+            ));
+        }
         if top
             && matches!(
                 entry.file_name().to_str(),
-                Some("desktop.lock" | "desktop.port" | "desktop.port.tmp" | TEMP_DIR)
+                Some("desktop.lock" | "desktop.port" | "desktop.port.tmp")
             )
         {
             continue;
@@ -277,7 +322,8 @@ fn relocate_with_lease(
         let owned = lease.is_some_and(|lease| lease.root == destination);
         if fs::read_dir(&destination)?.any(|entry| {
             entry.map_or(true, |entry| {
-                !(entry.file_name() == TEMP_DIR && entry.file_type().is_ok_and(|t| t.is_dir()))
+                !(entry.file_name() == TEMP_DIR
+                    && is_relocation_temp(&entry.path()).unwrap_or(false))
                     && (!owned
                         || !matches!(
                             entry.file_name().to_str(),
@@ -298,13 +344,25 @@ fn relocate_with_lease(
     fault("journal")?;
     {
         let temp_root = destination.join(TEMP_DIR);
-        fs::create_dir_all(&temp_root)?;
-        if !fs::symlink_metadata(&temp_root)?.file_type().is_dir() {
-            return Err(io::Error::other(
-                "relocation temporary path is not a directory",
-            ));
+        match fs::create_dir(&temp_root) {
+            Ok(()) => {
+                let mut marker = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(temp_root.join(TEMP_MARKER))?;
+                marker.write_all(TEMP_MARKER_CONTENTS)?;
+                marker.sync_all()?;
+                sync_dir(&temp_root)?;
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && is_relocation_temp(&temp_root)? => {}
+            Err(error) => return Err(error),
         }
         copy_tree(&source, &destination, &temp_root, true)?;
+        if !is_relocation_temp(&temp_root)? {
+            return Err(io::Error::other("relocation temporary directory changed"));
+        }
         if let Err(error) = fs::remove_dir_all(&temp_root) {
             log::warn!("could not remove relocation temporary directory: {error}");
         }
@@ -399,8 +457,17 @@ mod tests {
         }
         fs::write(src.join("audio"), b"source").unwrap();
         fs::create_dir(src.join(".eagle-relocation")).unwrap();
-        fs::write(src.join(".eagle-relocation/old"), b"skip").unwrap();
+        fs::write(
+            src.join(".eagle-relocation").join(TEMP_MARKER),
+            TEMP_MARKER_CONTENTS,
+        )
+        .unwrap();
         fs::create_dir(dst.join(".eagle-relocation")).unwrap();
+        fs::write(
+            dst.join(".eagle-relocation").join(TEMP_MARKER),
+            TEMP_MARKER_CONTENTS,
+        )
+        .unwrap();
         fs::write(
             dst.join(".eagle-relocation/.eagle-relocation-1-0"),
             b"partial",
@@ -411,6 +478,37 @@ mod tests {
         assert!(!dst.join(".eagle-relocation").exists());
         assert_eq!(fs::read(dst.join("audio")).unwrap(), b"source");
         drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrecognized_temp_directories_are_preserved() {
+        let root =
+            std::env::temp_dir().join(format!("eg-relocate-foreign-temp-{}", std::process::id()));
+        let (boot, src, dst) = (root.join("boot"), root.join("src"), root.join("dst"));
+        for dir in [&boot, &src, &dst] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(src.join("audio"), b"source").unwrap();
+        let foreign = dst.join(TEMP_DIR);
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("personal"), b"keep").unwrap();
+        assert!(StorageLease::claim_empty(&dst).is_err());
+        assert!(relocate_quiesced(&boot, &src, &dst).is_err());
+        assert_eq!(fs::read(foreign.join("personal")).unwrap(), b"keep");
+        fs::write(foreign.join(TEMP_MARKER), TEMP_MARKER_CONTENTS).unwrap();
+        assert!(StorageLease::claim_empty(&dst).is_err());
+        assert!(relocate_quiesced(&boot, &src, &dst).is_err());
+        assert_eq!(fs::read(foreign.join("personal")).unwrap(), b"keep");
+        fs::remove_dir_all(&foreign).unwrap();
+        fs::create_dir(src.join(TEMP_DIR)).unwrap();
+        fs::write(src.join(TEMP_DIR).join("personal"), b"keep").unwrap();
+        assert!(relocate_quiesced(&boot, &src, &dst).is_err());
+        assert_eq!(
+            fs::read(src.join(TEMP_DIR).join("personal")).unwrap(),
+            b"keep"
+        );
+        assert!(active_path(&boot).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
