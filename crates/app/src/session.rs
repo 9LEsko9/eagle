@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop-facing commands and incremental events. No UI types cross this boundary.
-use crate::providers::Providers;
+use crate::providers::{Providers, account_key, liked_albums_key, liked_artists_key};
 use eagle_core::{
     Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
     PlaylistSnapshot, PlaylistTrack, Provider, RadioBatch, RadioError, RadioQueueItem,
@@ -23,9 +23,16 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Above this many inserts/removals a list change is sent as one reset.
 const RESET_THRESHOLD: usize = 32;
-const LIKED_ALBUMS: &str = "liked_albums:yandex";
-const LIKED_ARTISTS: &str = "liked_artists:yandex";
-const ACCOUNT_UID: &str = "account_uid:yandex";
+
+/// The uid of the account owning this installation's rights, or empty when none is stored.
+fn stored_account(store: &Store, providers: &Providers) -> Result<String> {
+    Ok(match providers.account_provider() {
+        Some(provider) => store
+            .setting(&account_key(provider.info().id))?
+            .unwrap_or_default(),
+        None => String::new(),
+    })
+}
 
 fn names(artists: &[Artist]) -> String {
     artists
@@ -569,6 +576,9 @@ struct Worker {
     queue_radio: HashMap<u64, eagle_store::RadioContext>,
     next_queue_id: u64,
     current: usize,
+    /// Owns history, playback position and the queue; survives account changes.
+    profile: String,
+    /// Uid of the account that owns rights, downloads and play reports; empty when signed out.
     account: String,
     last_checkpoint: Instant,
     history_recorded: bool,
@@ -683,8 +693,9 @@ impl Worker {
             providers.clone(),
             emit.clone(),
         )?;
-        let account = store.setting(ACCOUNT_UID)?.unwrap_or_default();
+        let account = stored_account(&store, &providers)?;
         downloads.account(account.clone());
+        let profile = store.profile_id()?;
         let mut worker = Self {
             store,
             cache,
@@ -705,6 +716,7 @@ impl Worker {
             queue_radio: HashMap::new(),
             next_queue_id: 1,
             current: 0,
+            profile,
             account,
             last_checkpoint: Instant::now(),
             history_recorded: false,
@@ -742,7 +754,7 @@ impl Worker {
         Ok(worker)
     }
     fn restore_playback(&mut self) -> Result<()> {
-        let Some(saved) = self.store.playback(&self.account)? else {
+        let Some(saved) = self.store.playback(&self.profile)? else {
             return Ok(());
         };
         // Entries retain the original order; order contains occurrence IDs, not track IDs.
@@ -760,14 +772,8 @@ impl Worker {
             .iter()
             .map(|(id, track)| (Arc::as_ptr(track) as usize, *id))
             .collect();
-        if saved.entries.iter().any(|entry| {
-            entry
-                .radio
-                .as_ref()
-                .is_some_and(|context| context.account != self.account)
-        }) {
-            return Err("радиоочередь принадлежит другому аккаунту".into());
-        }
+        // The queue belongs to the profile; radio contexts of another account are dropped
+        // and their tracks stay in the queue as ordinary entries.
         self.queue_radio = saved
             .entries
             .iter()
@@ -891,7 +897,7 @@ impl Worker {
                 Repeat::One => 2,
             },
         };
-        self.store.save_playback(&self.account, state)?;
+        self.store.save_playback(&self.profile, state)?;
         self.last_checkpoint = Instant::now();
         Ok(())
     }
@@ -1370,10 +1376,23 @@ impl Worker {
         }
         Ok(())
     }
+    /// The account that owns `track`: this worker's account when the track comes from its
+    /// provider, otherwise none.
+    fn account_of(&self, track: &TrackId) -> &str {
+        match self.providers.account_provider() {
+            Some(provider) if provider.info().id == track.provider() => &self.account,
+            _ => "",
+        }
+    }
     fn reset_account_view(&mut self) -> Result<()> {
         self.radio = None;
         self.radio_can_more = false;
         self.radio_notice = None;
+        let account = stored_account(&self.store, &self.providers)?;
+        // Radio sessions belong to an account, so their contexts are dropped before the
+        // checkpoint; the queue and position belong to the profile and are restored as they were.
+        self.queue_radio
+            .retain(|_, context| context.account == account);
         self.checkpoint()?;
         self.stop_engine();
         self.queue.clear();
@@ -1384,7 +1403,7 @@ impl Worker {
         self.current = 0;
         self.restored_position = Duration::ZERO;
         self.last_position = None;
-        self.account = self.store.setting(ACCOUNT_UID)?.unwrap_or_default();
+        self.account = account;
         self.downloads.account(self.account.clone());
         self.player = Arc::default();
         self.restore_playback()?;
@@ -2092,7 +2111,7 @@ impl Worker {
                         let tracks = if view == View::Saved {
                             self.store.saved_tracks(&self.account)?
                         } else {
-                            self.store.history(&self.account)?
+                            self.store.history(&self.profile)?
                         };
                         let rows =
                             tracks
@@ -2722,13 +2741,18 @@ impl Worker {
                     && anchor.state == State::Playing
                     && anchor.position >= Duration::from_secs(1)
                 {
-                    let radio = self
-                        .queue_radio
-                        .get(&occurrence)
-                        .map(|context| (occurrence, context));
+                    let account = self.account_of(&track.id);
+                    // Radio intents belong to the account; without one the play is only in history.
+                    let radio = (!account.is_empty())
+                        .then(|| {
+                            self.queue_radio
+                                .get(&occurrence)
+                                .map(|context| (occurrence, context))
+                        })
+                        .flatten();
                     match self
                         .store
-                        .record_play_with_radio(&self.account, &track, radio)
+                        .record_play_with_radio(&self.profile, account, &track, radio)
                     {
                         Ok(()) => self.history_recorded = true,
                         Err(error) => {
@@ -2969,8 +2993,7 @@ impl Catalog {
                     .map(|p| p.liked_albums())
                 {
                     Some(Ok(albums)) => {
-                        self.store
-                            .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?;
+                        self.put_liked_albums(&albums)?;
                         Some(CatalogReply::AlbumsSynced)
                     }
                     Some(Err(error)) => {
@@ -2989,8 +3012,7 @@ impl Catalog {
                     .map(|p| p.liked_artists())
                 {
                     Some(Ok(artists)) => {
-                        self.store
-                            .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?;
+                        self.put_liked_artists(&artists)?;
                         Some(CatalogReply::ArtistsSynced)
                     }
                     Some(Err(error)) => {
@@ -3149,25 +3171,56 @@ impl Catalog {
             _ => Err("неожиданный ответ каталога".into()),
         }
     }
+    /// The provider whose account owns this installation's rights, if any.
+    fn account_id(&self) -> Option<&'static str> {
+        self.providers.account_provider().map(|p| p.info().id)
+    }
+    fn put_liked_albums(&self, albums: &[Album]) -> Result<()> {
+        if let Some(id) = self.account_id() {
+            self.store
+                .put_setting(&liked_albums_key(id), serde_json::to_string(albums)?)?;
+        }
+        Ok(())
+    }
+    fn put_liked_artists(&self, artists: &[Artist]) -> Result<()> {
+        if let Some(id) = self.account_id() {
+            self.store
+                .put_setting(&liked_artists_key(id), serde_json::to_string(artists)?)?;
+        }
+        Ok(())
+    }
     fn switch_account(&self, uid: &str) -> Result<bool> {
+        let Some(provider) = self.account_id() else {
+            return Ok(false);
+        };
         let uid = uid.to_owned();
+        let account_setting = account_key(provider);
+        let likes_prefix = format!("{provider}:%");
+        let albums_setting = liked_albums_key(provider);
+        let artists_setting = liked_artists_key(provider);
         Ok(self.store.write(move |connection| {
             let tx = connection.transaction()?;
             let same: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1 AND value=?2)",
-                [ACCOUNT_UID, uid.as_str()],
+                [account_setting.as_str(), uid.as_str()],
                 |row| row.get(0),
             )?;
             if !same {
-                tx.execute("DELETE FROM likes WHERE id LIKE 'yandex:%'", [])?;
-                tx.execute("DELETE FROM playlists WHERE id LIKE 'yandex:%'", [])?;
+                tx.execute(
+                    "DELETE FROM likes WHERE id LIKE ?1",
+                    [likes_prefix.as_str()],
+                )?;
+                tx.execute(
+                    "DELETE FROM playlists WHERE id LIKE ?1",
+                    [likes_prefix.as_str()],
+                )?;
                 tx.execute(
                     "DELETE FROM settings WHERE key IN (?1, ?2)",
-                    [LIKED_ALBUMS, LIKED_ARTISTS],
+                    [albums_setting.as_str(), artists_setting.as_str()],
                 )?;
                 tx.execute(
                     "INSERT OR REPLACE INTO settings VALUES (?1, ?2)",
-                    [ACCOUNT_UID, uid.as_str()],
+                    [account_setting.as_str(), uid.as_str()],
                 )?;
             }
             tx.commit()?;
@@ -3195,7 +3248,7 @@ impl Catalog {
         Ok(CatalogReply::Tracks(rows, String::new()))
     }
     fn apply_access(&self, rows: &mut [LibraryItem]) -> Result<()> {
-        let account = self.store.setting(ACCOUNT_UID)?.unwrap_or_default();
+        let account = stored_account(&self.store, &self.providers)?;
         for row in rows {
             let access = self.store.access(&account, &row.track.id.to_string())?;
             row.blocked_reason = if access.allows_playback() {
@@ -3211,13 +3264,19 @@ impl Catalog {
         Ok(())
     }
     fn liked_albums(&self) -> Result<Vec<Album>> {
-        Ok(match self.store.setting(LIKED_ALBUMS)? {
+        let Some(id) = self.account_id() else {
+            return Ok(Vec::new());
+        };
+        Ok(match self.store.setting(&liked_albums_key(id))? {
             Some(json) => serde_json::from_str(&json)?,
             None => Vec::new(),
         })
     }
     fn liked_artists(&self) -> Result<Vec<Artist>> {
-        Ok(match self.store.setting(LIKED_ARTISTS)? {
+        let Some(id) = self.account_id() else {
+            return Ok(Vec::new());
+        };
+        Ok(match self.store.setting(&liked_artists_key(id))? {
             Some(json) => serde_json::from_str(&json)?,
             None => Vec::new(),
         })
@@ -3327,7 +3386,10 @@ impl Catalog {
                             if tracked {
                                 self.providers.set_account(id, Some(account.clone()));
                             }
-                            changed |= self.switch_account(&account.id)?;
+                            // Only the account provider's uid is stored as the account.
+                            if tracked {
+                                changed |= self.switch_account(&account.id)?;
+                            }
                             self.refresh_access(&account.id)?;
                             restored = true;
                         }
@@ -3359,9 +3421,7 @@ impl Catalog {
                     .first_with(|c| c.liked_albums)
                     .map(|p| p.liked_albums())
                 {
-                    Some(Ok(albums)) => self
-                        .store
-                        .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?,
+                    Some(Ok(albums)) => self.put_liked_albums(&albums)?,
                     Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked albums sync failed")
                     }
@@ -3372,9 +3432,7 @@ impl Catalog {
                     .first_with(|c| c.liked_artists)
                     .map(|p| p.liked_artists())
                 {
-                    Some(Ok(artists)) => self
-                        .store
-                        .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?,
+                    Some(Ok(artists)) => self.put_liked_artists(&artists)?,
                     Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked artists sync failed")
                     }
@@ -3489,8 +3547,7 @@ impl Catalog {
                 } else {
                     albums.retain(|a| a.id != id);
                 }
-                self.store
-                    .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?;
+                self.put_liked_albums(&albums)?;
                 Ok(CatalogReply::CollectionLiked(id, liked))
             }
             Command::LikeArtist(id) => {
@@ -3508,8 +3565,7 @@ impl Catalog {
                 } else {
                     artists.retain(|a| a.id != id);
                 }
-                self.store
-                    .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?;
+                self.put_liked_artists(&artists)?;
                 Ok(CatalogReply::CollectionLiked(id, liked))
             }
             Command::Playlist(id) => {
@@ -3701,6 +3757,134 @@ mod delta_tests {
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
+    fn play_audibly(worker: &mut Worker, track: Arc<Track>) {
+        worker.queue = vec![track.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.engine_queue = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        Arc::make_mut(&mut worker.player).track = Some(track);
+        worker.engine_event(eagle_engine::Event::Position(PositionAnchor {
+            track: 0,
+            position: Duration::from_secs(2),
+            audible_at: Instant::now(),
+            state: State::Playing,
+        }));
+    }
+    #[test]
+    fn history_belongs_to_profile_and_play_reports_belong_to_account() {
+        let root = std::env::temp_dir().join(format!("eg-session-profile-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        // Without an account the play is recorded in history only, with no report queued.
+        worker.account = String::new();
+        play_audibly(&mut worker, row(1, false).track);
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 1);
+        assert!(worker.store.play_events("").unwrap().is_empty());
+        worker.account = "a".into();
+        play_audibly(&mut worker, row(2, false).track);
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 2);
+        assert_eq!(worker.store.play_events("a").unwrap().len(), 1);
+        // History is shared by the profile across accounts; reports stay with their account.
+        worker.account = "b".into();
+        play_audibly(&mut worker, row(3, false).track);
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 3);
+        assert_eq!(worker.store.play_events("a").unwrap().len(), 1);
+        assert_eq!(worker.store.play_events("b").unwrap().len(), 1);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn account_switch_keeps_profile_queue_and_position_and_drops_old_radio() {
+        let root = std::env::temp_dir().join(format!("eg-account-queue-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.view = View::Search;
+        worker.account = "a".into();
+        worker
+            .store
+            .put_setting(&account_key("yandex"), "a".into())
+            .unwrap();
+        let track = row(1, false).track;
+        worker.queue = vec![track.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.engine_queue = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        let occurrence = worker.occurrence_id(&track);
+        worker.queue_radio.insert(
+            occurrence,
+            eagle_store::RadioContext {
+                account: "a".into(),
+                session_id: "s".into(),
+                batch_id: Some("b".into()),
+            },
+        );
+        Arc::make_mut(&mut worker.player).track = Some(track.clone());
+        worker.last_position = Some(PositionAnchor {
+            track: 0,
+            position: Duration::from_millis(500),
+            audible_at: Instant::now(),
+            state: State::Paused,
+        });
+        worker
+            .store
+            .put_setting(&account_key("yandex"), "b".into())
+            .unwrap();
+        worker.reset_account_view().unwrap();
+        assert_eq!(worker.account, "b");
+        assert_eq!(worker.queue.len(), 1);
+        assert_eq!(worker.queue[0].id, track.id);
+        assert!(worker.queue_radio.is_empty());
+        assert_eq!(worker.restored_position, Duration::from_millis(500));
+        let saved = worker.store.playback(&worker.profile).unwrap().unwrap();
+        assert_eq!(saved.position_ms, 500);
+        assert!(saved.entries.iter().all(|entry| entry.radio.is_none()));
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn startup_with_another_accounts_radio_queue_keeps_tracks_instead_of_failing() {
+        let root = std::env::temp_dir().join(format!("eg-foreign-radio-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx.clone()).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.view = View::Search;
+        worker.account = "a".into();
+        let track = row(1, false).track;
+        worker.queue = vec![track.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.engine_queue = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        let occurrence = worker.occurrence_id(&track);
+        worker.queue_radio.insert(
+            occurrence,
+            eagle_store::RadioContext {
+                account: "a".into(),
+                session_id: "s".into(),
+                batch_id: None,
+            },
+        );
+        Arc::make_mut(&mut worker.player).track = Some(track.clone());
+        worker.checkpoint().unwrap();
+        let store = worker.store.clone();
+        drop(worker);
+        // The user signed in with another account before the next launch.
+        store
+            .put_setting(&account_key("yandex"), "b".into())
+            .unwrap();
+        drop(store);
+        let (tx, _) = mpsc::channel();
+        let restarted = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        assert_eq!(restarted.queue.len(), 1);
+        assert_eq!(restarted.queue[0].id, track.id);
+        assert!(restarted.queue_radio.is_empty());
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn manual_radio_refill_appends_only_matching_session_and_keeps_occurrences() {
         let root = std::env::temp_dir().join(format!("eg-radio-refill-{}", std::process::id()));
@@ -3758,7 +3942,7 @@ mod delta_tests {
             worker.queue_radio[&ids[2]].batch_id.as_deref(),
             Some("next")
         );
-        assert!(worker.store.history("a").unwrap().is_empty());
+        assert!(worker.store.history(&worker.profile).unwrap().is_empty());
         worker.queue_radio.clear();
         worker.radio_finished(
             "a".into(),
@@ -3788,7 +3972,7 @@ mod delta_tests {
         );
         assert_eq!(worker.queue.len(), 3);
         assert!(worker.radio_notice.is_some());
-        assert!(worker.store.history("a").unwrap().is_empty());
+        assert!(worker.store.history(&worker.profile).unwrap().is_empty());
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4119,14 +4303,14 @@ mod delta_tests {
         };
         worker.engine_event(anchor(0, State::Playing));
         worker.engine_event(anchor(2, State::Paused));
-        assert!(worker.store.history("a").unwrap().is_empty());
+        assert!(worker.store.history(&worker.profile).unwrap().is_empty());
         worker.engine_event(anchor(1, State::Playing));
         worker.engine_event(anchor(2, State::Playing));
-        assert_eq!(worker.store.history("a").unwrap().len(), 1);
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 1);
         worker.engine_event(eagle_engine::Event::TrackChanged(0));
         worker.engine_event(anchor(1, State::Playing));
-        assert_eq!(worker.store.history("a").unwrap().len(), 2);
-        assert!(worker.store.history("b").unwrap().is_empty());
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 2);
+        assert_eq!(worker.store.history(&worker.profile).unwrap().len(), 2);
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4294,7 +4478,9 @@ mod delta_tests {
         let track = provider.likes(None).unwrap().items.remove(0);
         {
             let store = Store::open(&source).unwrap();
-            store.put_setting(ACCOUNT_UID, "fixture".into()).unwrap();
+            store
+                .put_setting(&account_key(provider.info().id), "fixture".into())
+                .unwrap();
             store.put_track(&track).unwrap();
             let cache = Cache::open(&source.join("audio"), 1024, &store).unwrap();
             let mut map = eagle_store::RangeMap::new(4);
@@ -4454,7 +4640,7 @@ mod delta_tests {
         assert_eq!(worker.snapshot().current, Some(2));
         let before = worker
             .store
-            .playback(&worker.account)
+            .playback(&worker.profile)
             .unwrap()
             .unwrap()
             .position_ms;
@@ -4469,7 +4655,7 @@ mod delta_tests {
         assert_eq!(
             worker
                 .store
-                .playback(&worker.account)
+                .playback(&worker.profile)
                 .unwrap()
                 .unwrap()
                 .position_ms,
@@ -4480,7 +4666,7 @@ mod delta_tests {
         assert_eq!(
             worker
                 .store
-                .playback(&worker.account)
+                .playback(&worker.profile)
                 .unwrap()
                 .unwrap()
                 .position_ms,
@@ -4869,7 +5055,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::None,
+                auth: AuthMethod::Token {
+                    hint: "",
+                    help_url: None,
+                },
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -5145,9 +5334,18 @@ mod sync_tests {
             calls: Arc::default(),
         })
     }
-    /// A registry holding just `provider`; it is signed in because its auth is `None`.
+    /// A registry holding just `provider`, signed in as account "1" with the fixture capabilities.
     fn registry(provider: Arc<dyn Provider>) -> Arc<Providers> {
-        Arc::new(Providers::new(vec![provider], &[]))
+        let providers = Providers::new(vec![provider], &[]);
+        providers.set_account(
+            "yandex",
+            Some(Account {
+                id: "1".into(),
+                subscription: true,
+                capabilities: fixture_capabilities(),
+            }),
+        );
+        Arc::new(providers)
     }
     /// What the fixtures below implement, so the capability-driven routing reaches them.
     const fn fixture_capabilities() -> Capabilities {
@@ -5174,7 +5372,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::None,
+                auth: AuthMethod::Token {
+                    hint: "",
+                    help_url: None,
+                },
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -5512,8 +5713,12 @@ mod sync_tests {
         c.store
             .put_json("playlists", "yandex:1_2", "{}".into())
             .unwrap();
-        c.store.put_setting(LIKED_ALBUMS, "[]".into()).unwrap();
-        c.store.put_setting(LIKED_ARTISTS, "[]".into()).unwrap();
+        c.store
+            .put_setting(&liked_albums_key("yandex"), "[]".into())
+            .unwrap();
+        c.store
+            .put_setting(&liked_artists_key("yandex"), "[]".into())
+            .unwrap();
         c.store.put_setting("unrelated", "kept".into()).unwrap();
         assert!(c.switch_account("1").unwrap());
         let db = c.store.read().unwrap();
@@ -5527,8 +5732,18 @@ mod sync_tests {
                 .unwrap(),
             0
         );
-        assert!(c.store.setting(LIKED_ALBUMS).unwrap().is_none());
-        assert!(c.store.setting(LIKED_ARTISTS).unwrap().is_none());
+        assert!(
+            c.store
+                .setting(&liked_albums_key("yandex"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            c.store
+                .setting(&liked_artists_key("yandex"))
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             c.store.setting("unrelated").unwrap().as_deref(),
             Some("kept")

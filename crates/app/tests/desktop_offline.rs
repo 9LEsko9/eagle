@@ -169,7 +169,7 @@ fn downloads_restart_then_survive_offline_reopen() {
     let root_guard = FixtureRoot(root.clone());
     let store = Store::open(&root).unwrap();
     store
-        .put_setting("account_uid:yandex", "fixture".into())
+        .put_setting("account:fixture", "fixture".into())
         .unwrap();
     let base = fixture::provider();
     let tracks = base.likes(None).unwrap().items;

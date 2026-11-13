@@ -49,7 +49,11 @@ pub fn seed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     wav.extend(b"data");
     wav.extend((samples.len() as u32).to_le_bytes());
     wav.extend(samples);
-    store.put_setting("account_uid:yandex", "fixture".into())?;
+    let provider = provider();
+    store.put_setting(
+        &crate::providers::account_key(provider.info().id),
+        "fixture".into(),
+    )?;
     for track in tracks() {
         store.put_track(&track)?;
         let mut map = RangeMap::new(wav.len() as u64);
@@ -76,7 +80,10 @@ impl Provider for Fixture {
         static INFO: ProviderInfo = ProviderInfo {
             id: "fixture",
             name: "fixture",
-            auth: AuthMethod::None,
+            auth: AuthMethod::Token {
+                hint: "",
+                help_url: None,
+            },
             capabilities: capabilities(),
         };
         &INFO
@@ -88,7 +95,7 @@ impl Provider for Fixture {
         Ok(Account {
             id: "fixture".into(),
             subscription: true,
-            capabilities: Capabilities::default(),
+            capabilities: capabilities(),
         })
     }
     fn search(&self, _: &str, page: u32) -> Result<Page<Track>, ProviderError> {

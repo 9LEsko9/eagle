@@ -92,6 +92,28 @@ impl Providers {
             .iter()
             .find(|p| self.is_signed_in(p.as_ref()) && f(&self.effective(p.as_ref())))
     }
+    /// The provider whose account owns this installation's rights (offline, downloads, play
+    /// reports, radio): the first one that signs in with a token.
+    pub fn account_provider(&self) -> Option<&Arc<dyn Provider>> {
+        self.all
+            .iter()
+            .find(|p| matches!(p.info().auth, AuthMethod::Token { .. }))
+    }
+}
+
+/// Settings key holding the provider's account uid.
+pub(crate) fn account_key(provider_id: &str) -> String {
+    format!("account:{provider_id}")
+}
+
+/// Settings key holding the provider's liked albums (JSON).
+pub(crate) fn liked_albums_key(provider_id: &str) -> String {
+    format!("liked_albums:{provider_id}")
+}
+
+/// Settings key holding the provider's liked artists (JSON).
+pub(crate) fn liked_artists_key(provider_id: &str) -> String {
+    format!("liked_artists:{provider_id}")
 }
 
 #[cfg(test)]

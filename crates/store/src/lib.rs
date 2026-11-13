@@ -57,7 +57,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 8 {
+    if version > 9 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -124,13 +124,88 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
             CREATE INDEX radio_play_intents_account ON radio_play_intents(account,event_id);
             PRAGMA user_version=8; COMMIT;")?;
     }
+    if version < 9 {
+        migrate_profile(&c)?;
+    }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
         return Err(Error::Corrupt);
     }
     Ok(c)
 }
+/// 128 random bits as hex, from the std hasher seed (not a secret).
+fn random_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut id = String::with_capacity(32);
+    for salt in 0..2u64 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(salt ^ now() as u64 ^ u64::from(std::process::id()));
+        id.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    id
+}
+/// v9: the profile owns history and playback; provider accounts live under `account:<id>`.
+/// Rows of the previous Yandex account (and signed-out rows) move to the profile; downloads,
+/// access, offline owners and play reports stay with the provider account.
+fn migrate_profile(c: &Connection) -> Result<(), Error> {
+    c.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), Error> {
+        let existing = |key: &str| -> Result<Option<String>, Error> {
+            Ok(
+                c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                    r.get(0)
+                })
+                .optional()?,
+            )
+        };
+        let profile = match existing("profile_id")? {
+            Some(profile) => profile,
+            None => {
+                let profile = random_id();
+                c.execute("INSERT INTO settings VALUES('profile_id',?1)", [&profile])?;
+                profile
+            }
+        };
+        if existing("device_id")?.is_none() {
+            c.execute("INSERT INTO settings VALUES('device_id',?1)", [random_id()])?;
+        }
+        if let Some(uid) = existing("account_uid:yandex")? {
+            c.execute(
+                "INSERT OR REPLACE INTO settings VALUES('account:yandex',?1)",
+                [&uid],
+            )?;
+            c.execute("DELETE FROM settings WHERE key='account_uid:yandex'", [])?;
+            for owner in [uid.as_str(), ""] {
+                c.execute(
+                    "UPDATE OR IGNORE history SET account=?1 WHERE account=?2",
+                    [&profile, owner],
+                )?;
+                c.execute(
+                    "UPDATE OR IGNORE playback SET account=?1 WHERE account=?2",
+                    [&profile, owner],
+                )?;
+            }
+        }
+        c.execute_batch("PRAGMA user_version=9;")?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(c.execute_batch("COMMIT;")?),
+        Err(error) => {
+            let _ = c.execute_batch("ROLLBACK;");
+            Err(error)
+        }
+    }
+}
 impl Store {
+    /// Identity of the local profile; owns history and playback.
+    pub fn profile_id(&self) -> Result<String, Error> {
+        self.setting("profile_id")?.ok_or(Error::Corrupt)
+    }
+    /// Identity of this installation, stable across restarts.
+    pub fn device_id(&self) -> Result<String, Error> {
+        self.setting("device_id")?.ok_or(Error::Corrupt)
+    }
     pub fn open(root: &Path) -> Result<Self, Error> {
         fs::create_dir_all(root)?;
         #[cfg(unix)]
