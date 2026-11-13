@@ -69,7 +69,8 @@ pub fn can_merge(a: &Track, b: &Track) -> Option<MergeMethod> {
     }
 }
 
-fn isrc_key(track: &Track) -> Option<String> {
+/// ISRC в каноническом виде (trim + верхний регистр); None, если пуст.
+pub fn isrc_key(track: &Track) -> Option<String> {
     track
         .isrc
         .as_deref()

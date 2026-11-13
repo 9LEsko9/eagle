@@ -39,6 +39,7 @@ mod history;
 pub use downloads::{DownloadJob, DownloadState};
 mod playback;
 pub use playback::{PlaybackEntry, PlaybackState, RadioContext};
+mod groups;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
@@ -53,11 +54,11 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 fn initialize(path: &Path) -> Result<Connection, Error> {
-    let c = Connection::open(path)?;
+    let mut c = Connection::open(path)?;
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 9 {
+    if version > 10 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -126,6 +127,9 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     }
     if version < 9 {
         migrate_profile(&c)?;
+    }
+    if version < 10 {
+        groups::migrate(&mut c)?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -295,6 +299,7 @@ impl Store {
                 ));
             }
         }
+        let owned = tracks.to_vec();
         self.write(move |c| {
             let tx = c.transaction()?;
             {
@@ -307,6 +312,9 @@ impl Store {
                 for (id, json) in &artists {
                     artist.execute(params![id, json])?;
                 }
+            }
+            for track in &owned {
+                groups::assign(&tx, track)?;
             }
             tx.commit()?;
             Ok(())

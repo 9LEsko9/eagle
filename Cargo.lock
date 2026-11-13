@@ -1490,6 +1490,7 @@ name = "eagle-store"
 version = "0.1.0"
 dependencies = [
  "eagle-core",
+ "log",
  "rusqlite",
  "serde",
  "serde_json",
