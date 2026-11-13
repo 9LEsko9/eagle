@@ -229,51 +229,6 @@ impl Decoder {
     }
 }
 
-#[cfg(test)]
-mod buffer_tests {
-    use super::*;
-    use symphonia::core::audio::{Channels, SignalSpec};
-
-    #[test]
-    fn sample_buffer_grows_and_is_reused() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/continuous.wav");
-        let open = || Decoder::open(Box::new(std::fs::File::open(&path).unwrap())).unwrap();
-        let mut decoder = open();
-        let mut reference = open();
-        let Decoder::Symphonia(ref mut symphonia) = decoder else {
-            panic!("expected Symphonia decoder");
-        };
-        let spec = SignalSpec::new(44100, Channels::FRONT_LEFT | Channels::FRONT_RIGHT);
-        symphonia.samples = Some(SampleBuffer::new(1, spec));
-
-        let first = decoder.next().unwrap().unwrap();
-        assert_eq!(
-            first.frames,
-            reference.next_reference().unwrap().unwrap().frames
-        );
-        let Decoder::Symphonia(ref symphonia) = decoder else {
-            unreachable!()
-        };
-        let buffer = symphonia.samples.as_ref().unwrap();
-        assert!(buffer.capacity() > 2);
-        let capacity = buffer.capacity();
-        let address = buffer.samples().as_ptr();
-
-        let second = decoder.next().unwrap().unwrap();
-        assert_eq!(
-            second.frames,
-            reference.next_reference().unwrap().unwrap().frames
-        );
-        let Decoder::Symphonia(ref symphonia) = decoder else {
-            unreachable!()
-        };
-        let buffer = symphonia.samples.as_ref().unwrap();
-        assert_eq!(buffer.capacity(), capacity);
-        assert_eq!(buffer.samples().as_ptr(), address);
-    }
-}
-
 fn check_channels(channels: usize) -> Result<(), Error> {
     if !(1..=2).contains(&channels) {
         return Err(Error::Unsupported(
@@ -559,5 +514,50 @@ impl Opus {
                 return Ok(Some(Chunk { frames }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use symphonia::core::audio::{Channels, SignalSpec};
+
+    #[test]
+    fn sample_buffer_grows_and_is_reused() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/continuous.wav");
+        let open = || Decoder::open(Box::new(std::fs::File::open(&path).unwrap())).unwrap();
+        let mut decoder = open();
+        let mut reference = open();
+        let Decoder::Symphonia(ref mut symphonia) = decoder else {
+            panic!("expected Symphonia decoder");
+        };
+        let spec = SignalSpec::new(44100, Channels::FRONT_LEFT | Channels::FRONT_RIGHT);
+        symphonia.samples = Some(SampleBuffer::new(1, spec));
+
+        let first = decoder.next().unwrap().unwrap();
+        assert_eq!(
+            first.frames,
+            reference.next_reference().unwrap().unwrap().frames
+        );
+        let Decoder::Symphonia(ref symphonia) = decoder else {
+            unreachable!()
+        };
+        let buffer = symphonia.samples.as_ref().unwrap();
+        assert!(buffer.capacity() > 2);
+        let capacity = buffer.capacity();
+        let address = buffer.samples().as_ptr();
+
+        let second = decoder.next().unwrap().unwrap();
+        assert_eq!(
+            second.frames,
+            reference.next_reference().unwrap().unwrap().frames
+        );
+        let Decoder::Symphonia(ref symphonia) = decoder else {
+            unreachable!()
+        };
+        let buffer = symphonia.samples.as_ref().unwrap();
+        assert_eq!(buffer.capacity(), capacity);
+        assert_eq!(buffer.samples().as_ptr(), address);
     }
 }
