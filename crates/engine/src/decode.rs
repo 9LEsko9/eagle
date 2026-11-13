@@ -25,6 +25,7 @@ pub(crate) enum Decoder {
 pub(crate) struct Symphonia {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn SymphoniaDecoder>,
+    samples: Option<SampleBuffer<f32>>,
     track: u32,
     rate: u32,
     channels: usize,
@@ -33,6 +34,7 @@ pub(crate) struct Symphonia {
     damaged: u64,
     trim: Option<crate::mp4::Trim>,
     limit: Option<u64>,
+    limit_known: bool,
     emitted: u64,
     trust_frame_count: bool,
     time_base: Option<symphonia::core::units::TimeBase>,
@@ -156,6 +158,7 @@ impl Decoder {
         Ok(Self::Symphonia(Symphonia {
             format,
             decoder,
+            samples: None,
             track,
             rate,
             channels,
@@ -164,6 +167,7 @@ impl Decoder {
             damaged: 0,
             trim,
             limit,
+            limit_known: false,
             emitted: 0,
             trust_frame_count,
             time_base,
@@ -215,6 +219,61 @@ impl Decoder {
         }
     }
 }
+#[cfg(test)]
+impl Decoder {
+    pub(crate) fn next_reference(&mut self) -> Result<Option<Chunk>, Error> {
+        match self {
+            Self::Symphonia(decoder) => decoder.next_reference(),
+            Self::Opus(decoder) => decoder.next(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use symphonia::core::audio::{Channels, SignalSpec};
+
+    #[test]
+    fn sample_buffer_grows_and_is_reused() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/continuous.wav");
+        let open = || Decoder::open(Box::new(std::fs::File::open(&path).unwrap())).unwrap();
+        let mut decoder = open();
+        let mut reference = open();
+        let Decoder::Symphonia(ref mut symphonia) = decoder else {
+            panic!("expected Symphonia decoder");
+        };
+        let spec = SignalSpec::new(44100, Channels::FRONT_LEFT | Channels::FRONT_RIGHT);
+        symphonia.samples = Some(SampleBuffer::new(1, spec));
+
+        let first = decoder.next().unwrap().unwrap();
+        assert_eq!(
+            first.frames,
+            reference.next_reference().unwrap().unwrap().frames
+        );
+        let Decoder::Symphonia(ref symphonia) = decoder else {
+            unreachable!()
+        };
+        let buffer = symphonia.samples.as_ref().unwrap();
+        assert!(buffer.capacity() > 2);
+        let capacity = buffer.capacity();
+        let address = buffer.samples().as_ptr();
+
+        let second = decoder.next().unwrap().unwrap();
+        assert_eq!(
+            second.frames,
+            reference.next_reference().unwrap().unwrap().frames
+        );
+        let Decoder::Symphonia(ref symphonia) = decoder else {
+            unreachable!()
+        };
+        let buffer = symphonia.samples.as_ref().unwrap();
+        assert_eq!(buffer.capacity(), capacity);
+        assert_eq!(buffer.samples().as_ptr(), address);
+    }
+}
+
 fn check_channels(channels: usize) -> Result<(), Error> {
     if !(1..=2).contains(&channels) {
         return Err(Error::Unsupported(
@@ -225,6 +284,109 @@ fn check_channels(channels: usize) -> Result<(), Error> {
 }
 impl Symphonia {
     fn next(&mut self) -> Result<Option<Chunk>, Error> {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(DecodeError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if self.damaged == 0 && self.limit.is_some_and(|n| self.emitted < n) {
+                        return Err(Error::Unsupported("трек оборван до объявленного конца"));
+                    }
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if packet.track_id() != self.track {
+                continue;
+            }
+            if !self.limit_known {
+                if self.trust_frame_count && self.trim.is_none() {
+                    self.limit = self
+                        .format
+                        .tracks()
+                        .iter()
+                        .find(|t| t.id == self.track)
+                        .and_then(|t| t.codec_params.n_frames);
+                }
+                self.limit_known = true;
+            }
+            let decoded = match self.decoder.decode(&packet) {
+                Ok(d) => d,
+                Err(DecodeError::DecodeError(_)) => {
+                    self.damaged += 1;
+                    if self.damaged > 100 {
+                        return Err(Error::Unsupported("слишком много повреждённых пакетов"));
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if self.channels == 0 {
+                self.channels = decoded.spec().channels.count();
+                check_channels(self.channels)?;
+            }
+            if decoded.spec().rate != self.rate || decoded.spec().channels.count() != self.channels
+            {
+                return Err(Error::Unsupported(
+                    "параметры аудио изменились внутри трека",
+                ));
+            }
+            if self
+                .samples
+                .as_ref()
+                .is_some_and(|samples| samples.capacity() / self.channels < decoded.capacity())
+            {
+                self.samples = None;
+            }
+            let samples = self.samples.get_or_insert_with(|| {
+                SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec())
+            });
+            samples.copy_interleaved_ref(decoded);
+            // MP3/Vorbis decoders already apply packet trim; never apply it a second time.
+            let packet_start = self.time_base.map_or(packet.ts(), |base| {
+                let time = base.calc_time(packet.ts());
+                ((time.seconds as f64 + time.frac) * self.rate as f64).round() as u64
+            });
+            let skip = self
+                .seek_to
+                .map_or(0, |target| target.saturating_sub(packet_start) as usize)
+                .max(
+                    self.trim
+                        .map_or(0, |t| t.start.saturating_sub(packet_start) as usize),
+                );
+            let take = self.trim.map_or(usize::MAX, |t| {
+                (t.start + t.length).saturating_sub(packet_start) as usize
+            });
+            if take == 0 {
+                return Ok(None);
+            }
+            let remaining = self
+                .limit
+                .map_or(usize::MAX, |n| n.saturating_sub(self.emitted) as usize);
+            if remaining == 0 {
+                return Ok(None);
+            }
+            let data = samples.samples();
+            let n = data.len() / self.channels;
+            let start = skip.min(n).min(take);
+            let end = take.min(n).min(start.saturating_add(remaining));
+            let mut frames = Vec::with_capacity(end - start);
+            for i in start..end {
+                let offset = i * self.channels;
+                frames.push([data[offset], data[offset + self.channels - 1]]);
+            }
+            if frames.is_empty() {
+                continue;
+            }
+            self.seek_to = None;
+            self.emitted += frames.len() as u64;
+            return Ok(Some(Chunk { frames }));
+        }
+    }
+}
+#[cfg(test)]
+impl Symphonia {
+    // Original per-packet path, retained as a same-platform decoding reference.
+    fn next_reference(&mut self) -> Result<Option<Chunk>, Error> {
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
