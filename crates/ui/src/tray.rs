@@ -114,7 +114,7 @@ impl ksni::Tray for LinuxTray {
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let mut pixels = icon();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.rotate_right(1);
         }
         vec![ksni::Icon {
