@@ -16,12 +16,19 @@
 
 ## Провайдеры
 
-- Провайдер — отдельный крейт `crates/providers/<имя>`, реализующий трейт `Provider` из [`eagle-provider-sdk`](crates/provider-sdk/README.md). Заготовка: `crates/providers/_template`. Дизайн: `docs/superpowers/specs/2026-11-13-provider-platform-design.md`.
+- Провайдер — отдельный крейт `crates/providers/<имя>`, реализующий трейт `Provider` из [`eagle-provider-sdk`](crates/provider-sdk/README.md). Заготовка: `crates/providers/_template`.
 - Подключение — одна строка в `providers::builtin` (`crates/app/src/providers.rs`). Больше нигде в `app`, `store` и `ui` имя провайдера не пишется: это проверяет `crates/app/tests/no_provider_names.rs` (исключения вне `#[cfg(test)]` — только `builtin` и миграция v9 в store). В тестах используй фейки из `eagle_provider_sdk::testkit`.
 - Возможности объявляй в `ProviderInfo::capabilities`; приложение выбирает провайдера по возможности и приоритету пользователя, а не по имени. Метод, который провайдер не поддерживает, возвращает ошибку без обращения к сети (см. README SDK).
 - Права на офлайн (`access`, `offline_owners`, `downloads.account`) привязаны к аккаунту провайдера, не к профилю. Лайки, история и позиция принадлежат профилю.
 - Проверка нового провайдера: тесты конформности из SDK (`eagle_provider_sdk::testkit::conformance`) на записанных ответах, `cargo test --workspace`, `cargo xtask bench` против baseline.
 - Миграции схемы — только через `PRAGMA user_version`, без потери данных пользователя; для нового шага добавь тест на настоящей схеме предыдущей версии (пример: `crates/store/tests/migrate_v8.rs`).
+
+## Документация / Documentation
+
+- В репозитории храни только актуальную документацию продукта, его устройства, использования, разработки и подтверждённых решений. Не добавляй планы выполнения задач, инструкции для агентских сессий, отчёты о работе агентов или черновики проектирования; такие рабочие материалы держи вне репозитория.
+- Пиши документацию по возможности на английском и русском языках; поддерживай обе версии согласованными. Если перевод пока невозможен, не задерживай исправление неточной документации.
+- Keep only current product, architecture, usage, development, and confirmed decision documentation in the repository. Do not add task execution plans, agent session instructions, agent work reports, or design drafts; keep working material outside the repository.
+- Prefer documentation in both English and Russian, and keep both versions consistent. Do not postpone correcting inaccurate documentation if a translation is not yet available.
 
 ## CodeGraph
 
