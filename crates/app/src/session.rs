@@ -208,6 +208,8 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub struct LibraryItem {
     pub blocked_reason: Option<String>,
+    /// Other providers' copies of the same track (search results merge by group); empty otherwise.
+    pub sources: Vec<TrackId>,
     pub track: Arc<Track>,
     pub liked: bool,
 }
@@ -1732,6 +1734,7 @@ impl Worker {
                     .iter()
                     .flat_map(|batch| batch.tracks.iter())
                     .map(|track| LibraryItem {
+                        sources: Vec::new(),
                         track: Arc::new(track.clone()),
                         liked: self.queue_likes.contains(&track.id),
                         blocked_reason: None,
@@ -2131,6 +2134,7 @@ impl Worker {
                                     let access =
                                         self.store.access(&self.account, &track.id.to_string())?;
                                     Ok(LibraryItem {
+                                        sources: Vec::new(),
                                         blocked_reason: if access.allows_playback() {
                                             None
                                         } else {
@@ -2875,7 +2879,15 @@ impl Catalog {
                                 Command::CreatePlaylist(_) | Command::DeletePlaylist(_)
                             )
                         );
-                        let reply = self.request(request).map_err(|e| e.to_string());
+                        let reply = match &request {
+                            CatalogRequest::Command(_, Command::Search(query)) => self
+                                .search_merged(query, &|partial| {
+                                    let _ = replies
+                                        .send(Message::Catalog(generation, Box::new(Ok(partial))));
+                                }),
+                            _ => self.request(request),
+                        }
+                        .map_err(|e| e.to_string());
                         let reply = if mutation {
                             Ok(reply.unwrap_or_else(CatalogReply::PlaylistFailed))
                         } else {
@@ -3020,7 +3032,15 @@ impl Catalog {
                 Ok(CatalogReply::RadioResult(account, true, result))
             }
             CatalogRequest::RadioMore(_, account, mut session, queue) => {
-                let result = match self.providers.first_with(|c| c.radio) {
+                // The session belongs to the provider of its tracks, whatever the priority is now.
+                let owner = queue
+                    .first()
+                    .and_then(|item| self.providers.for_track(&item.track))
+                    .filter(|p| {
+                        self.providers.is_signed_in(p.as_ref())
+                            && self.providers.effective(p.as_ref()).radio
+                    });
+                let result = match owner.or_else(|| self.providers.first_with(|c| c.radio)) {
                     Some(provider) => match provider.account() {
                         Ok(current) if current.id == account => {
                             provider.radio_next(&session, &queue).map(|batch| {
@@ -3218,6 +3238,7 @@ impl Catalog {
             stmt.query_map([], |r| r.get::<_, String>(0))?
                 .map(|json| {
                     Ok(LibraryItem {
+                        sources: Vec::new(),
                         blocked_reason: None,
                         track: Arc::new(serde_json::from_str(&json?)?),
                         liked: true,
@@ -3282,6 +3303,64 @@ impl Catalog {
             playlist_snapshot: None,
         })
     }
+    /// Asks every signed-in provider that can search, one after another in priority order.
+    /// After each provider except the last, `emit` gets the merged list so far; the same track
+    /// from several providers is one row (the higher-priority copy) listing the other sources.
+    fn search_merged(&self, query: &str, emit: &dyn Fn(CatalogReply)) -> Result<CatalogReply> {
+        let providers: Vec<_> = self
+            .providers
+            .with_capability(|c| c.search_tracks)
+            .collect();
+        if providers.is_empty() {
+            return Err("войдите в аккаунт".into());
+        }
+        let mut rows: Vec<(Track, Vec<TrackId>)> = Vec::new();
+        let mut answered = false;
+        let mut failure = None;
+        for (at, provider) in providers.iter().enumerate() {
+            match provider.search(query, 0) {
+                Ok(page) => {
+                    answered = true;
+                    // Stored first, so the store groups the copies even when only one is shown.
+                    self.store.put_tracks(&page.items)?;
+                    for track in page.items {
+                        let same = rows.iter_mut().find(|(shown, _)| {
+                            eagle_core::matching::can_merge(shown, &track).is_some()
+                        });
+                        match same {
+                            Some((_, sources)) => sources.push(track.id),
+                            None => rows.push((track, Vec::new())),
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!(provider = provider.info().id; "search failed: {error}");
+                    failure = Some(error);
+                    continue;
+                }
+            }
+            if at + 1 < providers.len() {
+                emit(self.merged_rows(&rows)?);
+            }
+        }
+        match (answered, failure) {
+            (false, Some(error)) => Err(error.into()),
+            _ => self.merged_rows(&rows),
+        }
+    }
+    fn merged_rows(&self, rows: &[(Track, Vec<TrackId>)]) -> Result<CatalogReply> {
+        let CatalogReply::Tracks(mut items, title) = self.tracks(
+            rows.iter().map(|(track, _)| track.clone()).collect(),
+            String::new(),
+        )?
+        else {
+            return Err("не удалось подготовить результаты".into());
+        };
+        for (item, (_, sources)) in items.iter_mut().zip(rows) {
+            item.sources = sources.clone();
+        }
+        Ok(CatalogReply::Tracks(items, title))
+    }
     fn tracks(&self, tracks: Vec<Track>, title: String) -> Result<CatalogReply> {
         self.store.put_tracks(&tracks)?;
         let liked = {
@@ -3293,6 +3372,7 @@ impl Catalog {
         let mut items = tracks
             .into_iter()
             .map(|track| LibraryItem {
+                sources: Vec::new(),
                 blocked_reason: None,
                 liked: liked.contains(&track.id.to_string()),
                 track: Arc::new(track),
@@ -3421,10 +3501,7 @@ impl Catalog {
                 }
                 Ok(CatalogReply::Synced)
             }
-            Command::Search(query) => {
-                let provider = self.provider_with(|c| c.search_tracks)?;
-                self.tracks(provider.search(&query, 0)?.items, String::new())
-            }
+            Command::Search(query) => self.search_merged(&query, &|_| {}),
             Command::SearchArtists(query) => Ok(CatalogReply::Cards(
                 self.provider_with(|c| c.search_artists)?
                     .search_artists(&query, 0)?
@@ -4246,6 +4323,7 @@ mod delta_tests {
     }
     fn row(id: u32, liked: bool) -> LibraryItem {
         LibraryItem {
+            sources: Vec::new(),
             blocked_reason: None,
             track: Arc::new(Track {
                 id: format!("yandex:{id}").parse().unwrap(),
@@ -5592,6 +5670,79 @@ mod sync_tests {
             Command::Album("nope:al1".parse().unwrap()),
         ));
         assert!(unknown.is_err());
+    }
+    fn two_search_providers(
+        slow: Duration,
+        failing: (bool, bool),
+    ) -> (
+        Catalog,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+    ) {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let fakea = FakeProvider::new("fakea").with_tracks(vec![
+            fake_track("fakea", "1", "Song", "Artist", 180_000),
+            fake_track("fakea", "2", "Only A", "Artist", 100_000),
+        ]);
+        let fakeb = FakeProvider::new("fakeb")
+            .with_tracks(vec![
+                fake_track("fakeb", "9", "Song", "Artist", 180_500),
+                fake_track("fakeb", "8", "Only B", "Other", 90_000),
+            ])
+            .with_delay(slow);
+        let fail = || ProviderError::Network;
+        let fakea = Arc::new(if failing.0 {
+            fakea.fail_with(fail)
+        } else {
+            fakea
+        });
+        let fakeb = Arc::new(if failing.1 {
+            fakeb.fail_with(fail)
+        } else {
+            fakeb
+        });
+        let all: Vec<Arc<dyn Provider>> = vec![fakea.clone(), fakeb.clone()];
+        let providers = Arc::new(Providers::new(all, &[]));
+        providers.set_account("fakea", Some(fakea.login(Token::new("a".into())).unwrap()));
+        providers.set_account("fakeb", Some(fakeb.login(Token::new("b".into())).unwrap()));
+        (catalog_with(providers), fakea, fakeb)
+    }
+    #[test]
+    fn search_merges_copies_and_reports_first_results_before_the_slow_provider() {
+        let (c, _, fakeb) = two_search_providers(Duration::from_millis(150), (false, false));
+        let partials = std::cell::RefCell::new(Vec::new());
+        let reply = c
+            .search_merged("", &|partial| {
+                let CatalogReply::Tracks(items, _) = partial else {
+                    panic!("tracks expected");
+                };
+                partials
+                    .borrow_mut()
+                    .push((items.len(), fakeb.search_calls()));
+            })
+            .unwrap();
+        // The only partial arrives while the slow provider has not been asked yet.
+        assert_eq!(*partials.borrow(), vec![(2, 0)]);
+        let CatalogReply::Tracks(items, _) = reply else {
+            panic!("tracks expected");
+        };
+        let ids: Vec<_> = items.iter().map(|i| i.track.id.to_string()).collect();
+        assert_eq!(ids, ["fakea:1", "fakea:2", "fakeb:8"]);
+        assert_eq!(items[0].sources, ["fakeb:9".parse::<TrackId>().unwrap()]);
+        assert!(items[1].sources.is_empty());
+        // Both copies were stored, so playback can fall back to the hidden one.
+        let grp = c.store.group_of(&items[0].track.id).unwrap().unwrap();
+        assert_eq!(c.store.group_members(grp).unwrap().len(), 2);
+    }
+    #[test]
+    fn search_survives_one_failing_provider_and_fails_when_all_fail() {
+        let (c, _, _) = two_search_providers(Duration::ZERO, (false, true));
+        let CatalogReply::Tracks(items, _) = c.search_merged("", &|_| {}).unwrap() else {
+            panic!("tracks expected");
+        };
+        assert_eq!(items.len(), 2);
+        let (c, _, _) = two_search_providers(Duration::ZERO, (true, true));
+        assert!(c.search_merged("", &|_| {}).is_err());
     }
     #[test]
     fn search_categories_route_cards_and_empty_results() {

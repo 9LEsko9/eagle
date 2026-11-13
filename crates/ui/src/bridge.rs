@@ -410,6 +410,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .into_iter()
                 .map(|track| {
                     track_item(LibraryItem {
+                        sources: Vec::new(),
                         blocked_reason: None,
                         track,
                         liked: false,
@@ -1119,6 +1120,7 @@ pub(super) mod tests {
             card_window: Cell::new((0, 0)),
         };
         let item = |id: &str| LibraryItem {
+            sources: Vec::new(),
             blocked_reason: None,
             track: Arc::new(
                 serde_json::from_value(serde_json::json!({
