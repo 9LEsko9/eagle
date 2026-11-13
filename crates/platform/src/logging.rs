@@ -786,6 +786,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_rename_reopens_log_and_continues_writing() {
+        let dir = directory();
+        let mut files = Files::open(&dir).unwrap();
+        files.write("old line\n").unwrap();
+        files.file.take();
+        fs::remove_file(dir.join("eagle.log")).unwrap();
+        files.size = FILE_BYTES;
+        files.write("last line\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("eagle.log")).unwrap(),
+            "last line\n"
+        );
+        assert_eq!(files.size, "last line\n".len() as u64);
+        drop(files);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_rotation_failures_report_once() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging::tests::failed_rotation_keeps_logging_within_bounds",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.matches("log rotation failed:").count(),
+            1,
+            "{stderr}"
+        );
+    }
+
+    #[test]
     fn rotation_keeps_exactly_two_bounded_files() {
         let dir = directory();
         let mut files = Files::open(&dir).unwrap();
