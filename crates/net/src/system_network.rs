@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Event-driven system network information; unknown when unavailable.
 use crate::policy::NetworkPolicy;
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 use crate::policy::NetworkStatus;
 
 /// Missing platform support and command failures are reported as unknown.
@@ -44,8 +43,8 @@ pub fn query(allow_metered: bool) -> NetworkPolicy {
 fn parse_nmcli(output: &str, allow_metered: bool) -> NetworkPolicy {
     let mut fields = output.trim().split(':');
     let online = match fields.next() {
-        Some("none") => NetworkStatus::No,
-        Some("full" | "limited" | "portal") => NetworkStatus::Yes,
+        Some("none" | "limited" | "portal") => NetworkStatus::No,
+        Some("full") => NetworkStatus::Yes,
         _ => NetworkStatus::Unknown,
     };
     let metered = match fields.next() {
@@ -58,6 +57,20 @@ fn parse_nmcli(output: &str, allow_metered: bool) -> NetworkPolicy {
         metered,
         allow_metered,
     }
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn windows_status(level: i32) -> NetworkStatus {
+    match level {
+        0 | 1 => NetworkStatus::No,
+        3 => NetworkStatus::Yes,
+        _ => NetworkStatus::Unknown,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn relevant_monitor_line(line: &str) -> bool {
+    line.starts_with("Connectivity is now") || line.contains("is now the primary connection")
 }
 
 /// An event subscription. Dropping it unregisters callbacks and stops its worker.
@@ -101,7 +114,8 @@ mod monitor {
     impl Monitor {
         pub fn start(callback: Callback) -> Self {
             let stopped = Arc::new(AtomicBool::new(false));
-            callback(query(false));
+            let initial = query(false);
+            callback(initial);
             let process = Command::new("nmcli")
                 .env("LC_ALL", "C")
                 .arg("monitor")
@@ -109,7 +123,9 @@ mod monitor {
                 .stderr(Stdio::null())
                 .spawn();
             let Ok(mut process) = process else {
-                callback(NetworkPolicy::default());
+                if initial != NetworkPolicy::default() {
+                    callback(NetworkPolicy::default());
+                }
                 return Self {
                     child: None,
                     worker: None,
@@ -119,7 +135,9 @@ mod monitor {
             let Some(stdout) = process.stdout.take() else {
                 let _ = process.kill();
                 let _ = process.wait();
-                callback(NetworkPolicy::default());
+                if initial != NetworkPolicy::default() {
+                    callback(NetworkPolicy::default());
+                }
                 return Self {
                     child: None,
                     worker: None,
@@ -131,16 +149,21 @@ mod monitor {
             let worker = thread::Builder::new()
                 .name("eg-net-monitor".into())
                 .spawn(move || {
+                    let mut previous = initial;
                     for line in BufReader::new(stdout).lines() {
                         if stop.load(Ordering::Acquire) {
                             break;
                         }
-                        if line.is_err() {
-                            break;
+                        let Ok(line) = line else { break };
+                        if relevant_monitor_line(&line) {
+                            let policy = query(false);
+                            if policy != previous {
+                                callback(policy);
+                                previous = policy;
+                            }
                         }
-                        callback(query(false));
                     }
-                    if !stop.load(Ordering::Acquire) {
+                    if !stop.load(Ordering::Acquire) && previous != NetworkPolicy::default() {
                         callback(NetworkPolicy::default());
                     }
                 })
@@ -174,9 +197,7 @@ mod monitor {
 #[cfg(target_os = "windows")]
 mod windows_monitor {
     use super::*;
-    use windows::Networking::Connectivity::{
-        NetworkConnectivityLevel as Level, NetworkCostType as Cost, NetworkInformation,
-    };
+    use windows::Networking::Connectivity::{NetworkCostType as Cost, NetworkInformation};
     pub fn query(allow_metered: bool) -> NetworkPolicy {
         let Ok(profile) = NetworkInformation::GetInternetConnectionProfile() else {
             return NetworkPolicy {
@@ -185,10 +206,7 @@ mod windows_monitor {
             };
         };
         let online = match profile.GetNetworkConnectivityLevel() {
-            Ok(Level::None) => NetworkStatus::No,
-            Ok(Level::LocalAccess | Level::ConstrainedInternetAccess | Level::InternetAccess) => {
-                NetworkStatus::Yes
-            }
+            Ok(level) => windows_status(level.0),
             _ => NetworkStatus::Unknown,
         };
         let metered = match profile
@@ -368,7 +386,7 @@ mod tests {
         assert_eq!(parse_nmcli("full:yes\n", false).metered, NetworkStatus::Yes);
         assert_eq!(
             parse_nmcli("limited:guess-yes\n", false).online,
-            NetworkStatus::Yes
+            NetworkStatus::No
         );
         assert_eq!(
             parse_nmcli("none:guess-no\n", false).metered,
@@ -378,5 +396,28 @@ mod tests {
             parse_nmcli("unavailable:unknown\n", false),
             NetworkPolicy::default()
         );
+    }
+
+    #[test]
+    fn local_or_captive_networks_are_not_online() {
+        assert_eq!(windows_status(0), NetworkStatus::No);
+        assert_eq!(windows_status(1), NetworkStatus::No);
+        assert_eq!(windows_status(2), NetworkStatus::Unknown);
+        assert_eq!(windows_status(3), NetworkStatus::Yes);
+        assert_eq!(windows_status(4), NetworkStatus::Unknown);
+        assert_eq!(parse_nmcli("limited:no\n", false).online, NetworkStatus::No);
+        assert_eq!(parse_nmcli("portal:no\n", false).online, NetworkStatus::No);
+    }
+
+    #[test]
+    fn monitor_lines_trigger_only_relevant_changes() {
+        assert!(relevant_monitor_line("Connectivity is now 'full'"));
+        assert!(relevant_monitor_line(
+            "'Home' is now the primary connection"
+        ));
+        assert!(!relevant_monitor_line("wlp2s0: using connection 'Home'"));
+        assert!(!relevant_monitor_line(
+            "Networkmanager is now in the 'connected' state"
+        ));
     }
 }
