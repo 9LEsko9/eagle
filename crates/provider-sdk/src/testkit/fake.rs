@@ -38,6 +38,7 @@ struct State {
     /// Newest first.
     liked: Vec<TrackId>,
     resolve_calls: Vec<TrackId>,
+    track_calls: Vec<TrackId>,
     set_liked_calls: Vec<(TrackId, bool)>,
     search_calls: usize,
 }
@@ -78,6 +79,7 @@ impl FakeProvider {
                 failing: false,
                 liked: Vec::new(),
                 resolve_calls: Vec::new(),
+                track_calls: Vec::new(),
                 set_liked_calls: Vec::new(),
                 search_calls: 0,
             }),
@@ -132,6 +134,11 @@ impl FakeProvider {
     /// Track ids passed to `resolve_stream`, in call order.
     pub fn resolve_calls(&self) -> Vec<TrackId> {
         self.lock().resolve_calls.clone()
+    }
+
+    /// Track ids passed to `track`, in call order, including failed lookups.
+    pub fn track_calls(&self) -> Vec<TrackId> {
+        self.lock().track_calls.clone()
     }
 
     /// Currently liked tracks, newest first.
@@ -420,6 +427,7 @@ impl Provider for FakeProvider {
     }
 
     fn track(&self, id: &TrackId) -> Result<Track, ProviderError> {
+        self.lock().track_calls.push(id.clone());
         self.guard()?;
         self.track_by_id(id).cloned().ok_or(ProviderError::NotFound)
     }
@@ -495,5 +503,21 @@ impl Provider for FakeProvider {
             expires_at: SystemTime::now() + Duration::from_secs(3600),
             encryption: Encryption::None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_records_every_call_and_reports_unknown_ids_as_not_found() {
+        let fake = FakeProvider::new("fakea")
+            .with_tracks(vec![fake_track("fakea", "1", "Song", "Artist", 1000)]);
+        let known: TrackId = "fakea:1".parse().unwrap();
+        let unknown: TrackId = "fakea:2".parse().unwrap();
+        assert!(fake.track(&known).is_ok());
+        assert!(matches!(fake.track(&unknown), Err(ProviderError::NotFound)));
+        assert_eq!(fake.track_calls(), vec![known, unknown]);
     }
 }

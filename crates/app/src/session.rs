@@ -5,8 +5,8 @@ use crate::providers::{
 };
 use eagle_core::{
     Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
-    PlaylistSnapshot, PlaylistTrack, Provider, RadioBatch, RadioError, RadioQueueItem,
-    RadioSession, Track, TrackId,
+    PlaylistSnapshot, PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError,
+    RadioQueueItem, RadioSession, Track, TrackId,
 };
 pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
@@ -2864,6 +2864,9 @@ impl Worker {
     }
 }
 
+/// Likes without metadata that one sync pass asks the provider for.
+const UNRESOLVED_BATCH: usize = 50;
+
 #[derive(Default)]
 struct SyncState {
     step: u8,
@@ -3033,6 +3036,34 @@ impl Catalog {
         }
     }
 
+    /// Fetches the metadata of the provider's likes that are stored without a track. Each id is
+    /// asked at most once per call. A missing or unavailable track keeps its like for a later
+    /// call; a network, rate or sign-in failure stops the pass.
+    fn resolve_unresolved_likes(&self, provider: &dyn Provider) {
+        let provider_id = provider.info().id;
+        let pending = match self.store.unresolved_likes(provider_id, UNRESOLVED_BATCH) {
+            Ok(pending) => pending,
+            Err(error) => {
+                log::warn!(provider = provider_id, error = error.to_string().as_str(); "unresolved likes read failed");
+                return;
+            }
+        };
+        for id in pending {
+            match provider.track(&id) {
+                Ok(track) => {
+                    if let Err(error) = self.store.put_tracks(&[track]) {
+                        log::warn!(provider = provider_id, error = error.to_string().as_str(); "unresolved like store failed");
+                        return;
+                    }
+                }
+                Err(ProviderError::NotFound | ProviderError::Unavailable) => {}
+                Err(error) => {
+                    log::warn!(provider = provider_id, error = error.to_string().as_str(); "unresolved likes lookup stopped");
+                    return;
+                }
+            }
+        }
+    }
     /// Next signed-in provider with likes that this sync run has not handled yet.
     fn next_likes_provider(&self, state: &SyncState) -> Option<Arc<dyn Provider>> {
         self.providers
@@ -3125,7 +3156,10 @@ impl Catalog {
                     .filter_map(|id| id.parse().ok())
                     .collect();
                 match self.store.sync_provider_likes(provider_id, &ids) {
-                    Ok(_) => Ok((Some(self.backfill_after_sync(provider_id)), false)),
+                    Ok(_) => {
+                        self.resolve_unresolved_likes(provider.as_ref());
+                        Ok((Some(self.backfill_after_sync(provider_id)), false))
+                    }
                     Err(error) => {
                         log::warn!(provider = provider_id, error = error.to_string().as_str(); "liked tracks sync failed");
                         Ok((None, false))
@@ -3675,6 +3709,7 @@ impl Catalog {
                         changed |= self.switch_account(&account.id)?;
                         self.refresh_access(&account.id)?;
                     }
+                    self.resolve_unresolved_likes(provider.as_ref());
                     restored = true;
                 }
                 Ok(if restored {
@@ -3899,6 +3934,7 @@ impl Catalog {
                     return Err("этот провайдер не требует входа токеном".into());
                 }
                 let account = self.providers.sign_in(provider.as_ref(), token)?;
+                self.resolve_unresolved_likes(provider.as_ref());
                 Ok(if self.account_id() == Some(provider.info().id) {
                     CatalogReply::Account(self.switch_account(&account.id)?)
                 } else {
@@ -6773,6 +6809,63 @@ mod sync_tests {
         let (c2, _, _) = like_catalog(None);
         assert!(matches!(sync_likes_of(&c2, "fakeb"), CatalogReply::Synced));
         drop(c);
+    }
+    /// A catalog where `fakea` knows tracks 1..=4, with `unresolved` seeded the way the v13
+    /// migration leaves likes whose track metadata is missing.
+    fn unresolved_catalog(
+        unresolved: &[&str],
+    ) -> (Catalog, Arc<eagle_provider_sdk::testkit::FakeProvider>) {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let fakea = Arc::new(
+            FakeProvider::new("fakea").with_tracks(
+                (1..=4)
+                    .map(|n| fake_track("fakea", &n.to_string(), "Song", "Artist", 1000))
+                    .collect(),
+            ),
+        );
+        let providers = Arc::new(Providers::new(
+            vec![fakea.clone() as Arc<dyn Provider>],
+            &[],
+        ));
+        providers.set_account(
+            fakea.info().id,
+            Some(fakea.login(Token::new("t".into())).unwrap()),
+        );
+        let c = catalog_with(providers);
+        let ids: Vec<String> = unresolved.iter().map(|id| id.to_string()).collect();
+        c.store
+            .write(move |conn| {
+                for id in &ids {
+                    conn.execute("INSERT INTO likes_unresolved VALUES(?1, 0)", [id])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        (c, fakea)
+    }
+    #[test]
+    fn sync_fetches_metadata_for_unresolved_likes() {
+        let (c, _) = unresolved_catalog(&["fakea:3"]);
+        sync_likes_of(&c, "fakea");
+        assert!(c.store.is_liked(&"fakea:3".parse().unwrap()).unwrap());
+        assert_eq!(c.store.unresolved_likes_count().unwrap(), 0);
+    }
+    #[test]
+    fn unresolved_likes_that_stay_missing_are_asked_once_per_sync() {
+        let (c, fakea) = unresolved_catalog(&["fakea:404", "gone:7"]);
+        sync_likes_of(&c, "fakea");
+        assert_eq!(
+            fakea.track_calls(),
+            vec!["fakea:404".parse::<TrackId>().unwrap()]
+        );
+        assert_eq!(c.store.unresolved_likes_count().unwrap(), 2);
+        // Kept for the next sync, which asks again, once.
+        sync_likes_of(&c, "fakea");
+        assert_eq!(fakea.track_calls().len(), 2);
+        assert_eq!(
+            c.store.unresolved_likes("gone", 10).unwrap(),
+            vec!["gone:7".parse::<TrackId>().unwrap()]
+        );
     }
     #[test]
     fn like_goes_to_every_provider_that_has_the_song() {
