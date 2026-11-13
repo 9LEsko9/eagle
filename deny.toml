@@ -6,8 +6,8 @@ allow = ["GPL-3.0-only", "GPL-3.0-or-later", "MIT", "Apache-2.0", "Apache-2.0 WI
 
 [bans]
 multiple-versions = "warn"
-# Slint/winit and AccessKit use tracing internally; eagle code continues to use log.
-deny = [{ name = "tracing", wrappers = ["winit", "softbuffer", "calloop", "tiny-xlib", "zbus"] }]
+# UI, accessibility and tray dependencies use tracing internally; eagle uses log.
+deny = [{ name = "tracing", wrappers = ["winit", "softbuffer", "calloop", "tiny-xlib", "zbus", "tokio"] }]
 
 [sources]
 unknown-registry = "deny"
@@ -23,6 +23,9 @@ allow = ["BSL-1.0"]
 [[licenses.exceptions]]
 name = "libfuzzer-sys"
 allow = ["NCSA"]
+[[licenses.exceptions]]
+name = "ksni"
+allow = ["Unlicense"]
 
 [advisories]
 # No patched versions exist. Keep these explicit while Slint 1.17 is pinned;

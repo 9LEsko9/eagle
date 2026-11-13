@@ -77,13 +77,22 @@ export component NavItem inherits Rectangle {
 // Row inside a popup menu.
 export component MenuItem inherits Rectangle {
     in property <string> text;
+    in property <bool> enabled: true;
     callback clicked();
     height: 34px;
     border-radius: 6px;
     accessible-role: button;
     accessible-label: text;
-    accessible-action-default => { root.clicked(); }
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    public function focus-item() { focus.focus(); }
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.t.tx;
     background: touch.has-hover ? Theme.hover : transparent;
-    Text { x: 10px; width: parent.width - 20px; text: root.text; color: Theme.t.tx; font-size: Type.meta; font-weight: 500; vertical-alignment: center; overflow: elide; }
-    touch := TouchArea { clicked => { root.clicked(); } }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
+    Text { x: 10px; width: parent.width - 20px; text: root.text; color: root.enabled ? Theme.t.tx : Theme.t.tx2; font-size: Type.meta; font-weight: 500; vertical-alignment: center; overflow: elide; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }

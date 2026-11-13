@@ -1,0 +1,81 @@
+{
+  "scope": "CLI idle only; no Session, window, GPU, audio, tray or desktop memory acceptance",
+  "baseline_revision": "4824682",
+  "baseline_worktree_clean": true,
+  "host": "macOS arm64",
+  "rust": "1.99.1",
+  "profile": "release",
+  "command": "cargo xtask bench --seconds 5",
+  "baseline_sha256": "9426b0f99bc2f3e957d41af9efcb2f3e75c9c88ca556e905be9dd892b4dc8dee",
+  "after_sha256": "fed43b80762fd0acd4c56d7b6c184669c5a4a7750d485677ac5118d6c8364093",
+  "measurements": [
+    {
+      "source": "bench/results/20261112T154707465735Z.csv",
+      "values": {
+        "scenario": "idle",
+        "os": "Darwin",
+        "arch": "arm64",
+        "duration_seconds": "5.005079249996925",
+        "cpu_percent_one_core": "0.0",
+        "phys_footprint_bytes": "1868184",
+        "voluntary_switches_observed": "",
+        "binary_bytes": "6446272",
+        "info_records_per_second": "0",
+        "package_idle_wakeups": "0",
+        "interrupt_wakeups": "0"
+      }
+    },
+    {
+      "source": "bench/results/20261112T155720427488Z.csv",
+      "values": {
+        "scenario": "idle",
+        "os": "Darwin",
+        "arch": "arm64",
+        "duration_seconds": "5.0600637499883305",
+        "cpu_percent_one_core": "0.0",
+        "phys_footprint_bytes": "1884568",
+        "voluntary_switches_observed": "",
+        "binary_bytes": "6446272",
+        "info_records_per_second": "0",
+        "package_idle_wakeups": "0",
+        "interrupt_wakeups": "0"
+      }
+    },
+    {
+      "source": "bench/results/20261112T160102186475Z.csv",
+      "values": {
+        "scenario": "idle",
+        "os": "Darwin",
+        "arch": "arm64",
+        "duration_seconds": "5.006631374999415",
+        "cpu_percent_one_core": "0.0",
+        "phys_footprint_bytes": "1851800",
+        "voluntary_switches_observed": "",
+        "binary_bytes": "6446272",
+        "info_records_per_second": "0",
+        "package_idle_wakeups": "0",
+        "interrupt_wakeups": "0"
+      }
+    }
+  ],
+  "checks": {
+    "fmt": "passed",
+    "workspace_tests": "passed",
+    "clippy_workspace_all_targets_deny_warnings": "passed",
+    "msrv_1_92_workspace_all_targets": "passed"
+  },
+  "acceptance_open": [
+    "persistent downloads",
+    "access policy",
+    "storage relocation",
+    "Yandex wave/radio/history contracts and screens",
+    "playlist revisions and editing",
+    "queue UI controls",
+    "preferences and animations",
+    "window destruction and recreation",
+    "tray and background shell",
+    "Windows/Linux/Wayland/X11 hardware checks",
+    "100-track interrupted download and offline playback",
+    "desktop background <=30 MiB and UI wakeups"
+  ]
+}

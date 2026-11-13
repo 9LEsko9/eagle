@@ -1,0 +1,328 @@
+{
+  "date": "2026-11-13",
+  "machine": "MacBook Air M2 / 8 GiB",
+  "os": "macOS 27.2 arm64",
+  "build_profile": "release (workspace fat LTO)",
+  "method": "actual desktop windows shown; isolated injected provider and generated WAV; settle 2s, sample 2s; process physical footprint from proc_pid_rusage; CPU percent of one core",
+  "limitations": [
+    "Baseline reconstructed from preserved incoming source, not captured before implementation. Fixture-only startup and staging instrumentation applied.",
+    "Baseline minimized stages and current destroyed-window stages are different conditions; compare open idle/playback directly.",
+    "No artwork in the GUI fixture; 100-track HTTP test pre-seeds artwork separately.",
+    "Process wakeups cannot establish zero UI wakeups or attribute audio wakeups.",
+    "GPU resource release remains unverified; vmmap retained IOAccelerator allocations.",
+    "Other development workloads were not controlled; short CPU samples are diagnostic, not a stable performance benchmark.",
+    "Foreground/occlusion state was not controlled; open-window CPU comparisons may include occlusion differences.",
+    "Stage markers label commands, not independent audible-output verification.",
+    "Final run physical footprint varied from earlier runs; values are individual observations, not statistical estimates."
+  ],
+  "gates": {
+    "background_memory_limit_bytes": 31457280,
+    "background_memory_status": "failed in both measured backends",
+    "zero_ui_wakeups": "unverified",
+    "renderer_gpu_release": "unverified",
+    "full_desktop_beta": "not accepted"
+  },
+  "runs": [
+    {
+      "name": "baseline-gpu",
+      "source": "9735e02 + fixture-only instrumentation",
+      "binary_sha256": "94be9c710605196a8f7056cb270c3b2b7e239d603841402d5fb855bf8e4e4ca4",
+      "renderer_requested": "skia",
+      "actual_graphics_api": "unverified (Slint public notifier does not identify Metal)",
+      "exit_code": 0,
+      "samples": [
+        {
+          "stage": "idle",
+          "elapsed": 2.000930374953896,
+          "cpu_percent_one_core": 0.007498595080806504,
+          "phys_footprint_bytes": 93094920,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 2
+        },
+        {
+          "stage": "playing",
+          "elapsed": 2.005931833991781,
+          "cpu_percent_one_core": 11.096272709513146,
+          "phys_footprint_bytes": 103384072,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 353
+        },
+        {
+          "stage": "minimized",
+          "elapsed": 2.0049004580359906,
+          "cpu_percent_one_core": 0.4957976821321675,
+          "phys_footprint_bytes": 98632712,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 8
+        },
+        {
+          "stage": "paused-minimized",
+          "elapsed": 2.0045208749943413,
+          "cpu_percent_one_core": 0.33529625044948935,
+          "phys_footprint_bytes": 98665480,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 181
+        }
+      ]
+    },
+    {
+      "name": "baseline-software",
+      "source": "9735e02 + fixture-only instrumentation",
+      "binary_sha256": "94be9c710605196a8f7056cb270c3b2b7e239d603841402d5fb855bf8e4e4ca4",
+      "renderer_requested": "software",
+      "actual_graphics_api": "software",
+      "exit_code": 0,
+      "samples": [
+        {
+          "stage": "idle",
+          "elapsed": 2.0063997919787653,
+          "cpu_percent_one_core": 0.06206597865715581,
+          "phys_footprint_bytes": 37913608,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 1
+        },
+        {
+          "stage": "playing",
+          "elapsed": 2.0074360000435263,
+          "cpu_percent_one_core": 47.38638616520648,
+          "phys_footprint_bytes": 48268296,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 352
+        },
+        {
+          "stage": "minimized",
+          "elapsed": 2.0061168340034783,
+          "cpu_percent_one_core": 0.39112461117275005,
+          "phys_footprint_bytes": 47924232,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 6
+        },
+        {
+          "stage": "paused-minimized",
+          "elapsed": 2.0013106249971315,
+          "cpu_percent_one_core": 0.27136383855156876,
+          "phys_footprint_bytes": 38683656,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 172
+        }
+      ]
+    },
+    {
+      "binary_sha256": "c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97",
+      "os": "macOS-27.2-arm64-arm-64bit-Mach-O",
+      "machine": "Mac14,15",
+      "physical_memory_bytes": 8589934592,
+      "renderer_requested": "skia",
+      "actual_graphics_api": "unverified",
+      "measurement": "physical footprint; process wakeups do not separate UI and audio",
+      "settle_seconds": 2,
+      "sample_seconds": 2,
+      "samples": [
+        {
+          "stage": "idle",
+          "elapsed": 2.0004975000047125,
+          "cpu_percent_one_core": 0.015002518123586182,
+          "phys_footprint_bytes": 70829040,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 2
+        },
+        {
+          "stage": "playing",
+          "elapsed": 2.0054365409887396,
+          "cpu_percent_one_core": 3.621780022228472,
+          "phys_footprint_bytes": 78693360,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 60
+        },
+        {
+          "stage": "closed-playing",
+          "elapsed": 2.003714249993209,
+          "cpu_percent_one_core": 0.458596246114658,
+          "phys_footprint_bytes": 40731632,
+          "process_package_idle_wakeups": 1,
+          "process_interrupt_wakeups": 8
+        },
+        {
+          "stage": "reopened-playing",
+          "elapsed": 2.001805207983125,
+          "cpu_percent_one_core": 9.961977029769074,
+          "phys_footprint_bytes": 66782192,
+          "process_package_idle_wakeups": 4,
+          "process_interrupt_wakeups": 348
+        },
+        {
+          "stage": "paused",
+          "elapsed": 2.003963707946241,
+          "cpu_percent_one_core": 0.37455768137102374,
+          "phys_footprint_bytes": 59818992,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 181
+        },
+        {
+          "stage": "closed",
+          "elapsed": 2.0087544589769095,
+          "cpu_percent_one_core": 0.3520900709588152,
+          "phys_footprint_bytes": 41190384,
+          "process_package_idle_wakeups": 7,
+          "process_interrupt_wakeups": 176
+        },
+        {
+          "stage": "reopened",
+          "elapsed": 2.0029047499992885,
+          "cpu_percent_one_core": 0.3575473737997724,
+          "phys_footprint_bytes": 54887408,
+          "process_package_idle_wakeups": 11,
+          "process_interrupt_wakeups": 174
+        },
+        {
+          "stage": "closed-again",
+          "elapsed": 2.005044874968007,
+          "cpu_percent_one_core": 0.366398698854576,
+          "phys_footprint_bytes": 40895472,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 173
+        },
+        {
+          "stage": "reopened-again",
+          "elapsed": 2.0041097920038737,
+          "cpu_percent_one_core": 0.3361093302809735,
+          "phys_footprint_bytes": 54985712,
+          "process_package_idle_wakeups": 3,
+          "process_interrupt_wakeups": 175
+        }
+      ],
+      "exit_code": 0,
+      "name": "final-gpu",
+      "source": "b7037d2 (UiAttached, decoded-cover suspension and header rehydration)"
+    },
+    {
+      "binary_sha256": "c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97",
+      "os": "macOS-27.2-arm64-arm-64bit-Mach-O",
+      "machine": "Mac14,15",
+      "physical_memory_bytes": 8589934592,
+      "renderer_requested": "software",
+      "actual_graphics_api": "software",
+      "measurement": "physical footprint; process wakeups do not separate UI and audio",
+      "settle_seconds": 2,
+      "sample_seconds": 2,
+      "samples": [
+        {
+          "stage": "idle",
+          "elapsed": 2.0036528339842334,
+          "cpu_percent_one_core": 0.012574949565107152,
+          "phys_footprint_bytes": 46646256,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 1
+        },
+        {
+          "stage": "playing",
+          "elapsed": 2.0053666249732487,
+          "cpu_percent_one_core": 0.44944192354121826,
+          "phys_footprint_bytes": 51872776,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 8
+        },
+        {
+          "stage": "closed-playing",
+          "elapsed": 2.0035754999844357,
+          "cpu_percent_one_core": 0.43483928274233297,
+          "phys_footprint_bytes": 37995504,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 8
+        },
+        {
+          "stage": "reopened-playing",
+          "elapsed": 2.0056583330151625,
+          "cpu_percent_one_core": 33.16962012168253,
+          "phys_footprint_bytes": 50971656,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 363
+        },
+        {
+          "stage": "paused",
+          "elapsed": 2.0041071249870583,
+          "cpu_percent_one_core": 0.29943509132720014,
+          "phys_footprint_bytes": 46367752,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 174
+        },
+        {
+          "stage": "closed",
+          "elapsed": 2.006361541978549,
+          "cpu_percent_one_core": 0.35775373396836074,
+          "phys_footprint_bytes": 32474096,
+          "process_package_idle_wakeups": 3,
+          "process_interrupt_wakeups": 175
+        },
+        {
+          "stage": "reopened",
+          "elapsed": 2.0016943339724094,
+          "cpu_percent_one_core": 0.4818730230833063,
+          "phys_footprint_bytes": 50545648,
+          "process_package_idle_wakeups": 1,
+          "process_interrupt_wakeups": 173
+        },
+        {
+          "stage": "closed-again",
+          "elapsed": 2.0038785829674453,
+          "cpu_percent_one_core": 0.5506841462582748,
+          "phys_footprint_bytes": 36537328,
+          "process_package_idle_wakeups": 1,
+          "process_interrupt_wakeups": 170
+        },
+        {
+          "stage": "reopened-again",
+          "elapsed": 2.003206958004739,
+          "cpu_percent_one_core": 0.37675005586297017,
+          "phys_footprint_bytes": 41272304,
+          "process_package_idle_wakeups": 0,
+          "process_interrupt_wakeups": 170
+        }
+      ],
+      "exit_code": 0,
+      "name": "final-software",
+      "source": "b7037d2 (UiAttached, decoded-cover suspension and header rehydration)"
+    }
+  ],
+  "checks": {
+    "workspace_tests_passed": 163,
+    "workspace_tests_failed": 0,
+    "formatting": "passed",
+    "clippy_workspace_all_targets_D_warnings": "passed",
+    "python_tests_passed": 7,
+    "msrv": "rustc 1.92.0 (ded5c06cf 2025-12-08); workspace all-targets check passed",
+    "release_build": "passed",
+    "platform_ci": "not run; no remote push",
+    "windows_linux_hardware": "not run"
+  },
+  "latest_native_attempt": {
+    "binary_sha256": "105f0d79c1adc32533e5c3cb1794440fbd8c460451e58cdbd825cbc72cf35639",
+    "os": "macOS-27.2-arm64-arm-64bit-Mach-O",
+    "machine": "Mac14,15",
+    "physical_memory_bytes": 8589934592,
+    "renderer_requested": "skia",
+    "actual_graphics_api": "unverified",
+    "foreground_and_occlusion": "unverified",
+    "audible_output": "not independently verified by sampler",
+    "measurement": "physical footprint; process wakeups do not separate UI and audio",
+    "settle_seconds": 2,
+    "sample_seconds": 2,
+    "samples": [],
+    "error": "Desktop smoke did not exit within 120 seconds",
+    "source": "97b3089",
+    "status": "failed before first native stage; no performance samples",
+    "comparison": "Earlier b7037d2 binary also failed to reach its first stage in a separate 12-second control.",
+    "independent_probe": "Minimal AppKit process did not receive applicationDidFinishLaunching; main queue and prelaunch timer worked. CGSession was NULL; Computer Use service startup failed."
+  },
+  "user_session_recovery": {
+    "ordinary_window_opened": "confirmed by user after stopping the orphaned previous instance which retained both locks after WindowServer restart",
+    "data_protection": "private SQLite backup retained locally; no saved audio removed",
+    "native_titlebar": "user confirmed corrected appearance after full quit and restart",
+    "binary_sha256": "cce4ea9a4355c6c1bd7fa65babb64f9843355401b0bb081c0cf947269f35bb66",
+    "limitations": [
+      "Tool-initiated native startup remains blocked in its graphical-session context.",
+      "Automatic recovery of an orphaned GUI process is not implemented.",
+      "Full native theme-switch, fullscreen and reopen matrix not performed."
+    ]
+  }
+}

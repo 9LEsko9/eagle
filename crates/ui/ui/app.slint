@@ -2,7 +2,7 @@
 import "fonts/Inter-subset.ttf";
 import { ListView } from "std-widgets.slint";
 import { Theme, ThemeMode, Type, Motion, Layout } from "globals/theme.slint";
-import { Player, Library, Ui, Actions, Route } from "globals/bridge.slint";
+import { Player, Library, Ui, Actions, Route, Storage, DownloadItem, QueueItem } from "globals/bridge.slint";
 import { NavItem, TextButton } from "components/button.slint";
 import { Field } from "components/controls.slint";
 import { IconButton } from "components/icon-button.slint";
@@ -12,7 +12,7 @@ import { LoginScreen } from "screens/login.slint";
 import { ArtistScreen } from "screens/artist.slint";
 import { PlayerBar } from "player/player-bar.slint";
 import { NowPlayingPanel, NowPlayingCard } from "player/now-playing-panel.slint";
-export { Theme, ThemeMode, Motion, Type, Player, Library, Ui, Actions, Route }
+export { Theme, ThemeMode, Motion, Type, Player, Library, Ui, Actions, Route, Storage, DownloadItem, QueueItem }
 
 component Sidebar inherits VerticalLayout {
     // Every navigation also closes the drawer on narrow windows.
@@ -33,6 +33,9 @@ component Sidebar inherits VerticalLayout {
         Text { text: "eagle"; color: Theme.t.tx; font-size: 19px; font-weight: 600; letter-spacing: -0.6px; vertical-alignment: top; }
     }
     NavItem { text: @tr("Медиатека"); active: !Ui.create-playlist && (Ui.route == Route.library || Ui.route == Route.albums || Ui.route == Route.artists); clicked => { root.go(Route.library); } }
+    NavItem { text: @tr("Сохранённое"); active: Ui.route == Route.saved; clicked => { root.go(Route.saved); } }
+    NavItem { text: @tr("История"); active: Ui.route == Route.history; clicked => { root.go(Route.history); } }
+    if Ui.signed-in : NavItem { text: @tr("Моя волна"); active: Ui.route == Route.radio; clicked => { root.go(Route.radio); } }
     NavItem { text: @tr("Поиск"); active: !Ui.create-playlist && Ui.route == Route.search; clicked => { root.go(Route.search); } }
     if Ui.signed-in : NavItem { text: @tr("Создать плейлист"); active: Ui.create-playlist; clicked => { if !Ui.playlist-busy { Ui.drawer-open = false; Ui.create-playlist = true; Ui.playlist-name = ""; Ui.error = ""; } } }
     if Library.playlists.length > 0 : HorizontalLayout {
@@ -106,7 +109,7 @@ export component DesktopWindow inherits Window {
                                 TextButton { text: @tr("Создать"); primary: true; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
                             }
                         }
-                        if !Ui.create-playlist && (Ui.route == Route.library || Ui.route == Route.search || Ui.route == Route.album || Ui.route == Route.playlist || Ui.route == Route.albums || Ui.route == Route.artists) : CollectionScreen { }
+                        if !Ui.create-playlist && (Ui.route == Route.saved || Ui.route == Route.history || Ui.route == Route.library || Ui.route == Route.search || Ui.route == Route.album || Ui.route == Route.playlist || Ui.route == Route.albums || Ui.route == Route.artists || Ui.route == Route.radio) : CollectionScreen { }
                         if !Ui.create-playlist && Ui.route == Route.artist : ArtistScreen { }
                         if !Ui.create-playlist && Ui.route == Route.login : LoginScreen { }
                         if !Ui.create-playlist && Ui.route == Route.settings : SettingsScreen { }

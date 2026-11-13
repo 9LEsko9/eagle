@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { ListView } from "std-widgets.slint";
 import { Theme, Type, Layout, Motion } from "../globals/theme.slint";
-import { Library, Ui, Actions, Route, TrackItem } from "../globals/bridge.slint";
+import { Library, Ui, Actions, Route, TrackItem, Player } from "../globals/bridge.slint";
 import { TrackRowView, TrackColumns } from "../components/track-row.slint";
 import { TextButton, MenuItem } from "../components/button.slint";
 import { Artwork } from "../components/cover.slint";
@@ -19,10 +19,17 @@ export component LibraryTabs inherits Chips {
 // the list and the scroll offset, and it opens upwards near the bottom edge.
 export component TrackMenu inherits Rectangle {
     in-out property <TrackItem> item;
+    in property <bool> editable;
+    private property <int> row-index;
+    private property <string> playlist-id;
+    private property <string> revision;
     private property <length> anchor-y;
-    private property <length> menu-height: (root.item.album-id != "" ? 2 : 1) * 34px + 10px;
-    public function open(item: TrackItem, row-top: length) {
+    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0) - (Ui.route == Route.radio ? 1 : 0)) * 34px + 10px;
+    public function open(item: TrackItem, row-top: length, index: int) {
         root.item = item;
+        root.row-index = index;
+        root.playlist-id = Library.header-id;
+        root.revision = Library.playlist-revision;
         // Below the «…» button, or above it when that would leave the list.
         root.anchor-y = row-top + 43px + root.menu-height > root.height
             ? max(0px, row-top + 11px - root.menu-height)
@@ -44,11 +51,17 @@ export component TrackMenu inherits Rectangle {
             drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 5px;
+                if Ui.route != Route.radio : MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
+                MenuItem { init => { self.focus-item(); } text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Переместить выше"); enabled: root.item.album-id != "" && root.row-index > 0 && !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 1); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Переместить ниже"); enabled: root.item.album-id != "" && root.row-index + 1 < Library.tracks.length && !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 2); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Удалить из плейлиста"); enabled: !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 0); popup.close(); } }
             }
         }
     }
+
 }
 
 export component TrackTableHeader inherits Rectangle {
@@ -83,6 +96,7 @@ export component CollectionScreen inherits VerticalLayout {
     private property <bool> show-album: root.list-width >= 700px && Ui.route != Route.album;
     spacing: Layout.compact ? 20px : 28px;
     HorizontalLayout {
+        vertical-stretch: 0;
         spacing: 24px;
         if root.has-cover : VerticalLayout {
             alignment: end;
@@ -121,7 +135,7 @@ export component CollectionScreen inherits VerticalLayout {
                 }
             }
             Text {
-                text: Library.title != "" ? Library.title : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
+                text: Library.title != "" ? Library.title : Ui.route == Route.radio ? @tr("Моя волна") : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
                 color: Theme.t.tx;
                 font-size: Layout.compact ? Type.title : Type.display;
                 font-weight: 700;
@@ -139,12 +153,13 @@ export component CollectionScreen inherits VerticalLayout {
                 color: Theme.t.tx2;
                 font-size: Type.meta;
             }
-            if root.collection : HorizontalLayout {
+            if root.collection || Ui.route == Route.saved || Ui.route == Route.history || (Ui.route == Route.radio && Library.tracks.length > 0) : HorizontalLayout {
                 spacing: 10px;
                 padding-top: 16px;
                 alignment: start;
                 TextButton { text: @tr("Слушать"); icon: @image-url("../icons/play.svg"); primary: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(false); } }
                 TextButton { text: @tr("Перемешать"); outline: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(true); } }
+                if Ui.signed-in : TextButton { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); } }
                 if Library.deletable && !Ui.confirm-delete : TextButton { text: @tr("Удалить плейлист"); outline: true; enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; } }
                 if Library.likeable : TextButton {
                     text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию");
@@ -168,6 +183,26 @@ export component CollectionScreen inherits VerticalLayout {
                 LibraryTabs { }
             }
         }
+    }
+    if Library.editable : VerticalLayout {
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            TextButton { text: @tr("Добавить текущий трек"); outline: true; enabled: !Ui.playlist-busy && Player.track-id != "" && Player.album-id != ""; clicked => { Actions.add-track-to-playlist(Library.header-id, Library.playlist-revision, Player.track-id, Player.album-id); } }
+            TextButton { text: @tr("Обновить"); enabled: !Ui.playlist-busy; clicked => { Actions.refresh-playlist(Library.header-id); } }
+        }
+        Text { text: Ui.playlist-busy ? @tr("Сохраняем изменения…") : Player.track-id == "" ? @tr("Запустите трек, чтобы добавить его в плейлист.") : Player.album-id == "" ? @tr("Для добавления нужна информация об альбоме трека.") : @tr("Порядок и удаление — в меню трека."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+    }
+    if Ui.route == Route.radio : VerticalLayout {
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            TextButton { text: Ui.radio-ready ? @tr("Новая волна") : @tr("Получить рекомендации"); primary: Library.tracks.length == 0; outline: Library.tracks.length > 0; enabled: !Ui.radio-busy; clicked => { Actions.radio-start(); } }
+            if Ui.radio-ready : TextButton { text: @tr("Ещё треки"); enabled: !Ui.radio-busy; clicked => { Actions.radio-more(); } }
+        }
+        Text { text: Ui.radio-busy ? @tr("Подбираем музыку…") : Ui.radio-notice != "" ? Ui.radio-notice : @tr("Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
     }
     if Ui.route == Route.search : VerticalLayout {
         spacing: 12px;
@@ -218,21 +253,26 @@ export component CollectionScreen inherits VerticalLayout {
         spacing: 6px;
         TrackTableHeader { show-album: root.show-album; }
         menu := TrackMenu {
+            editable: Library.editable;
             vertical-stretch: 1;
             list := ListView {
+                private property <length> row-pitch: TrackColumns.row-height;
+                changed row-pitch => { Actions.visible-rows(floor(-self.viewport-y / self.row-pitch), ceil(self.visible-height / self.row-pitch) + 1); }
                 width: parent.width;
                 height: parent.height;
                 // Rows report the on-screen range so artwork loads and unloads with scrolling.
-                init => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
-                changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
-                changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
+                init => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
                 for item[index] in Library.tracks : TrackRowView {
                     item: item;
                     number: index + 1;
                     show-album: root.show-album;
-                    menu(item) => { menu.open(item, self.y + list.viewport-y); }
+                    menu(item) => { menu.open(item, self.y + list.viewport-y, index); }
                 }
             }
         }
     }
+    if !root.grid && Library.tracks.length == 0 : Rectangle { vertical-stretch: 1; }
+
 }

@@ -10,8 +10,12 @@ use eagle_net::{Client, Priority, Request};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
+    time::Duration,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -22,6 +26,7 @@ const PENDING: usize = 64;
 const DECODED: usize = 160;
 const DECODED_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone)]
 pub(crate) struct Job {
     /// Routing key for the UI, e.g. `t:yandex:1` for a track row.
     pub key: String,
@@ -33,10 +38,25 @@ pub(crate) struct Job {
     pub size: u32,
 }
 
-#[derive(Default)]
 struct Queue {
     pending: VecDeque<Job>,
     closed: bool,
+    active: bool,
+    generation: u64,
+    decoded: Decoded,
+    cancel: Arc<AtomicBool>,
+}
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            closed: false,
+            active: true,
+            generation: 0,
+            decoded: Decoded::default(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -47,6 +67,7 @@ struct Shared {
 
 pub(crate) struct Covers {
     shared: Arc<Shared>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Covers {
@@ -57,16 +78,36 @@ impl Covers {
     ) -> std::io::Result<Self> {
         let shared = Arc::new(Shared::default());
         let worker = shared.clone();
-        // Detached on purpose: a download in flight must not delay shutdown.
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("eg-covers".into())
             .spawn(move || run(&root.join("covers"), &net, emit.as_ref(), &worker))?;
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            worker: Some(handle),
+        })
     }
     pub(crate) fn request(&self, jobs: Vec<Job>) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if !queue.active {
+            return;
+        }
         enqueue(&mut queue.pending, jobs);
         self.shared.ready.notify_one();
+    }
+    pub(crate) fn set_active(&self, active: bool) {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.active != active {
+            queue.active = active;
+            queue.generation = queue.generation.wrapping_add(1);
+            if !active {
+                queue.cancel.store(true, Ordering::Release);
+                queue.pending.clear();
+                queue.decoded = Decoded::default();
+            } else {
+                queue.cancel = Arc::new(AtomicBool::new(false));
+            }
+            self.shared.ready.notify_one();
+        }
     }
 }
 
@@ -74,8 +115,13 @@ impl Drop for Covers {
     fn drop(&mut self) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.closed = true;
+        queue.cancel.store(true, Ordering::Release);
         queue.pending.clear();
         self.shared.ready.notify_one();
+        drop(queue);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -146,17 +192,16 @@ impl Decoded {
 }
 
 fn run(dir: &Path, net: &Client, emit: &(dyn Fn(Event) + Send + Sync), shared: &Shared) {
-    run_with(shared, emit, |job| load(dir, net, job));
+    run_with(shared, emit, |job, cancel| load(dir, net, job, cancel));
 }
 
 fn run_with(
     shared: &Shared,
     emit: &(dyn Fn(Event) + Send + Sync),
-    mut loader: impl FnMut(&Job) -> Result<Option<eagle_palette::Cover>>,
+    mut loader: impl FnMut(&Job, Arc<AtomicBool>) -> Result<Option<eagle_palette::Cover>>,
 ) {
-    let mut decoded = Decoded::default();
     loop {
-        let job = {
+        let (job, generation, cancel) = {
             let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
             while queue.pending.is_empty() && !queue.closed {
                 queue = shared.ready.wait(queue).unwrap_or_else(|e| e.into_inner());
@@ -167,16 +212,22 @@ fn run_with(
             let Some(job) = next_job(&mut queue.pending) else {
                 continue;
             };
-            job
+            if let Some(cover) = queue.decoded.get(&job.key, job.size) {
+                emit(Event::Thumbnail(job.key, cover));
+                continue;
+            }
+            (job, queue.generation, queue.cancel.clone())
         };
-        if let Some(cover) = decoded.get(&job.key, job.size) {
-            emit(Event::Thumbnail(job.key, cover));
-            continue;
-        }
-        match loader(&job) {
+        match loader(&job, cancel) {
             Ok(Some(cover)) => {
+                let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+                if queue.closed || !queue.active || queue.generation != generation {
+                    continue;
+                }
                 let cover = Arc::new(cover);
-                decoded.insert(job.key.clone(), job.size, cover.clone());
+                queue
+                    .decoded
+                    .insert(job.key.clone(), job.size, cover.clone());
                 emit(Event::Thumbnail(job.key, cover));
             }
             Ok(None) => {}
@@ -185,7 +236,12 @@ fn run_with(
     }
 }
 
-fn load(dir: &Path, net: &Client, job: &Job) -> Result<Option<eagle_palette::Cover>> {
+fn load(
+    dir: &Path,
+    net: &Client,
+    job: &Job,
+    cancel: Arc<AtomicBool>,
+) -> Result<Option<eagle_palette::Cover>> {
     let small = dir.join(format!("{}-64.png", job.stem));
     let large = dir.join(format!("{}-600.png", job.stem));
     let path = if job.size <= 64 { &small } else { &large };
@@ -193,7 +249,7 @@ fn load(dir: &Path, net: &Client, job: &Job) -> Result<Option<eagle_palette::Cov
         let Some(uri) = &job.uri else {
             return Ok(None);
         };
-        download(net, uri, &small, &large)?;
+        download(net, uri, &small, &large, cancel.clone())?;
     }
     Ok(Some(eagle_palette::decode_cover(
         &std::fs::read(path)?,
@@ -202,16 +258,30 @@ fn load(dir: &Path, net: &Client, job: &Job) -> Result<Option<eagle_palette::Cov
 }
 
 /// Fetches the 600 px artwork once and writes both cached sizes.
-pub(crate) fn download(net: &Client, uri: &str, small: &Path, large: &Path) -> Result<()> {
+fn download(
+    net: &Client,
+    uri: &str,
+    small: &Path,
+    large: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     let sized = uri.replace("%%", "600x600");
-    let url = if sized.starts_with("https://") {
+    let url = if sized.starts_with("https://") || (cfg!(test) && sized.starts_with("http://")) {
         sized
     } else {
         format!("https://{sized}")
     };
     let mut request = Request::get(SignedUrl::new(url));
     request.limit = 8 * 1024 * 1024;
-    let response = net.request(Priority::Background, request, None)?;
+    let response = net.request_cancellable(
+        Priority::Background,
+        request,
+        cancel.clone(),
+        Duration::from_secs(5),
+    )?;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
     if let Some(dir) = small.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -300,8 +370,131 @@ mod tests {
                 queue = worker.ready.wait(queue).unwrap();
             }
         });
-        drop(Covers { shared });
-        waiter.join().unwrap();
+        drop(Covers {
+            shared,
+            worker: Some(waiter),
+        });
+    }
+    #[test]
+    fn dropping_service_cancels_stalled_http_before_any_cache_write() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::mpsc,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/cover", listener.local_addr().unwrap());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 1024];
+            let mut used = 0;
+            while !buffer[..used].ends_with(b"\r\n\r\n") {
+                assert!(used < buffer.len(), "request headers exceed fixture limit");
+                let count = stream.read(&mut buffer[used..]).unwrap();
+                assert!(count > 0, "connection closed before request headers");
+                used += count;
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                .unwrap();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let net = Arc::new(Client::new().unwrap());
+        let shared = Arc::new(Shared::default());
+        let worker_shared = shared.clone();
+        let worker_net = net.clone();
+        let root = std::env::temp_dir().join(format!("eagle-cover-cancel-{}", std::process::id()));
+        let worker_root = root.clone();
+        let worker = thread::spawn(move || {
+            run_with(&worker_shared, &|_| {}, |job, cancel| {
+                load(&worker_root, &worker_net, job, cancel)
+            });
+        });
+        let service = Covers {
+            shared,
+            worker: Some(worker),
+        };
+        let mut fixture = job("fixture");
+        fixture.uri = Some(url);
+        service.request(vec![fixture]);
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = std::time::Instant::now();
+        drop(service);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!root.exists());
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+        drop(net);
+    }
+    #[test]
+    fn suspension_releases_cache_discards_inflight_and_resumes_same_worker() {
+        use std::{sync::mpsc, time::Duration};
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let shared = Arc::new(Shared::default());
+        let worker_shared = shared.clone();
+        let worker = thread::spawn(move || {
+            run_with(
+                &worker_shared,
+                &|event| {
+                    let _ = event_tx.send(event);
+                },
+                |job, _| {
+                    if job.key == "blocked" {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(Some(eagle_palette::Cover {
+                        rgba: vec![0; 4],
+                        width: 1,
+                        height: 1,
+                        dominant: [0; 3],
+                    }))
+                },
+            );
+        });
+        let service = Covers {
+            shared,
+            worker: Some(worker),
+        };
+        service.request(vec![job("cached")]);
+        let Event::Thumbnail(_, cached) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected thumbnail")
+        };
+        let weak = Arc::downgrade(&cached);
+        drop(cached);
+        service.request(vec![job("blocked")]);
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        service.set_active(false);
+        assert!(weak.upgrade().is_none());
+        service.request(vec![job("ignored")]);
+        service.set_active(true);
+        service.request(vec![job("resumed")]);
+        release_tx.send(()).unwrap();
+        let Event::Thumbnail(key, _) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected thumbnail")
+        };
+        assert_eq!(key, "resumed");
+        assert!(event_rx.try_recv().is_err());
+        let queue = service.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .decoded
+                .entries
+                .iter()
+                .all(|(key, _, _)| key == "resumed")
+        );
+        drop(queue);
+        drop(service);
     }
     #[test]
     fn pending_is_bounded_while_worker_is_blocked() {
@@ -311,13 +504,16 @@ mod tests {
         let shared = Arc::new(Shared::default());
         let worker_shared = shared.clone();
         let worker = thread::spawn(move || {
-            run_with(&worker_shared, &|_| {}, |_| {
+            run_with(&worker_shared, &|_| {}, |_, _| {
                 let _ = entered_tx.send(());
                 let _ = release_rx.recv();
                 Ok(None)
             });
         });
-        let service = Covers { shared };
+        let service = Covers {
+            shared,
+            worker: Some(worker),
+        };
         service.request(vec![job("first")]);
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -332,8 +528,20 @@ mod tests {
             assert!(queue.pending.iter().any(|job| job.key == "h:current"));
             assert!(queue.pending.iter().any(|job| job.key == "19-0"));
         }
-        drop(service);
+        let (done_tx, done_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            drop(service);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
         release_tx.send(()).unwrap();
-        worker.join().unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        closer.join().unwrap();
     }
 }

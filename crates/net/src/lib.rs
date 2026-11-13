@@ -2,7 +2,9 @@
 //! Two blocking workers, priority/FIFO scheduling and bounded HTTP responses.
 use eagle_core::{SignedUrl, Token};
 pub mod growing;
-use std::sync::atomic::{AtomicU64, Ordering};
+pub mod policy;
+pub mod system_network;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
     io::Read,
@@ -40,6 +42,7 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     pub token: Option<Token>,
     pub form: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
     pub range: Option<(u64, u64)>,
     pub limit: usize,
 }
@@ -51,6 +54,7 @@ impl Request {
             headers: vec![],
             token: None,
             form: vec![],
+            body: None,
             range: None,
             limit: 16 * 1024 * 1024,
         }
@@ -162,7 +166,21 @@ impl Client {
         request: Request,
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
     ) -> Result<Response, Error> {
-        self.perform(priority, request, refresh, None)
+        self.perform(priority, request, refresh, None, None)
+    }
+    /// Cancellation releases the caller; an in-flight socket or DNS lookup may finish later.
+    /// This operation does not accept a sink and never retries.
+    pub fn request_cancellable(
+        &self,
+        priority: Priority,
+        request: Request,
+        cancelled: Arc<AtomicBool>,
+        timeout: Duration,
+    ) -> Result<Response, Error> {
+        if request.method != "GET" {
+            return Err(Error::Source("отменяемый запрос допускает только GET"));
+        }
+        self.perform(priority, request, None, None, Some((cancelled, timeout)))
     }
     pub fn request_into(
         &self,
@@ -170,7 +188,7 @@ impl Client {
         request: Request,
         sink: Arc<dyn BodySink>,
     ) -> Result<Response, Error> {
-        self.perform(priority, request, None, Some(sink))
+        self.perform(priority, request, None, Some(sink), None)
     }
     fn perform(
         &self,
@@ -178,19 +196,31 @@ impl Client {
         mut request: Request,
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
         sink: Option<Arc<dyn BodySink>>,
+        cancellation: Option<(Arc<AtomicBool>, Duration)>,
     ) -> Result<Response, Error> {
+        if request.body.is_some() && (request.method != "POST" || !request.form.is_empty()) {
+            return Err(Error::Source("тело запроса требует POST без form"));
+        }
         for attempt in 0..4 {
+            if cancellation
+                .as_ref()
+                .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+            {
+                return Err(Error::Stopped);
+            }
             // Refresh happens outside workers to avoid deadlock if the hook uses this client.
             let (tx, rx) = mpsc::sync_channel(1);
             let url = request.url.clone();
             let token = request.token.clone();
             let headers = request.headers.clone();
             let form = request.form.clone();
+            let body = request.body.clone();
             let method = request.method;
             let range = request.range;
             let limit = request.limit;
             let counters = self.counters.clone();
             let sink = sink.clone();
+            let cancel_job = cancellation.clone();
             {
                 let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
                 if s.stopping {
@@ -201,6 +231,12 @@ impl Client {
                 }
                 s.queues[priority as usize].push_back(Box::new(move |agent| {
                     let result = (|| {
+                        if cancel_job
+                            .as_ref()
+                            .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+                        {
+                            return Err(Error::Stopped);
+                        }
                         let mut current =
                             url::Url::parse(url.expose()).map_err(|_| Error::Network)?;
                         if !matches!(current.scheme(), "http" | "https")
@@ -212,10 +248,19 @@ impl Client {
                             ));
                         }
                         for redirect in 0..=5 {
+                            if cancel_job
+                                .as_ref()
+                                .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+                            {
+                                return Err(Error::Stopped);
+                            }
                             counters.requests.fetch_add(1, Ordering::Relaxed);
                             let mut req = agent
                                 .request(method, current.as_str())
                                 .set("Accept-Encoding", "identity");
+                            if let Some((_, timeout)) = &cancel_job {
+                                req = req.timeout(*timeout);
+                            }
                             for (k, v) in &headers {
                                 req = req.set(k, v);
                             }
@@ -227,12 +272,16 @@ impl Client {
                                 req = req.set("Range", &format!("bytes={start}-{end}"));
                             }
                             let response = if method == "POST" {
-                                req.send_form(
-                                    &form
-                                        .iter()
-                                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                                        .collect::<Vec<_>>(),
-                                )
+                                if let Some(body) = &body {
+                                    req.send_bytes(body)
+                                } else {
+                                    req.send_form(
+                                        &form
+                                            .iter()
+                                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                                            .collect::<Vec<_>>(),
+                                    )
+                                }
                             } else {
                                 req.call()
                             };
@@ -308,10 +357,22 @@ impl Client {
                                 });
                             }
                             let mut bytes = Vec::new();
-                            let read_result = response
-                                .into_reader()
-                                .take(limit as u64 + 1)
-                                .read_to_end(&mut bytes);
+                            let mut reader = response.into_reader().take(limit as u64 + 1);
+                            let read_result = if let Some((flag, _)) = &cancel_job {
+                                let mut buffer = [0; 8192];
+                                loop {
+                                    if flag.load(Ordering::Acquire) {
+                                        break Err(std::io::Error::other("cancelled"));
+                                    }
+                                    match reader.read(&mut buffer) {
+                                        Ok(0) => break Ok(()),
+                                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                                        Err(error) => break Err(error),
+                                    }
+                                }
+                            } else {
+                                reader.read_to_end(&mut bytes).map(|_| ())
+                            };
                             counters
                                 .response_bytes
                                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -332,7 +393,23 @@ impl Client {
                 }));
                 self.shared.ready.notify_one();
             }
-            let result = rx.recv().map_err(|_| Error::Stopped)?;
+            let result = if let Some((flag, _)) = &cancellation {
+                loop {
+                    if flag.load(Ordering::Acquire) {
+                        return Err(Error::Stopped);
+                    }
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(result) => break result,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Stopped),
+                    }
+                }
+            } else {
+                rx.recv().map_err(|_| Error::Stopped)?
+            };
+            if cancellation.is_some() {
+                return result;
+            }
             if attempt < 3 {
                 if matches!(result, Err(Error::Status(401)))
                     && let Some(refresh) = refresh
@@ -395,6 +472,60 @@ mod tests {
             job(&agent);
         }
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    }
+    #[test]
+    fn post_body_is_sent_once_even_when_server_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = br#"{"seeds":["user:onyourwave"]}"#;
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let n = socket.read(&mut chunk).unwrap();
+                assert_ne!(n, 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                assert!(bytes.len() < 8192);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n")
+                    && bytes.len() >= end + 4 + body.len()
+                {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    assert!(headers.starts_with("post /radio "));
+                    assert!(headers.contains("content-type: application/json"));
+                    assert_eq!(&bytes[end + 4..], body);
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let client = Client::new().unwrap();
+        let mut request = Request::get(SignedUrl::new(format!("http://{addr}/radio")));
+        request.method = "POST";
+        request
+            .headers
+            .push(("Content-Type".into(), "application/json".into()));
+        request.body = Some(body.to_vec());
+        assert!(matches!(
+            client.request(Priority::Metadata, request, None),
+            Err(Error::Status(503))
+        ));
+        assert_eq!(client.stats().requests, 1);
+        server.join().unwrap();
+        let mut invalid = Request::get(SignedUrl::new(format!("http://{addr}/radio")));
+        invalid.body = Some(Vec::new());
+        assert!(matches!(
+            client.request(Priority::Metadata, invalid, None),
+            Err(Error::Source(_))
+        ));
+        assert_eq!(client.stats().requests, 1);
     }
     #[test]
     fn authenticated_request_does_not_follow_redirect() {

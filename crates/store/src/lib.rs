@@ -24,9 +24,22 @@ pub enum Error {
     FutureSchema,
     #[error("поток SQLite остановлен")]
     Stopped,
-    #[error("лимит кэша занят закреплёнными файлами")]
+    #[error("недостаточно места в незакреплённом кэше")]
     CacheFull,
 }
+mod access;
+mod usage;
+pub use usage::StorageUsage;
+pub mod relocation;
+pub use access::{AccessRecord, AccessState};
+mod outbox;
+pub use outbox::{OutboxState, PlayEvent};
+mod downloads;
+mod history;
+pub use downloads::{DownloadJob, DownloadState};
+mod playback;
+pub use playback::{PlaybackEntry, PlaybackState, RadioContext};
+
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
     path: PathBuf,
@@ -44,7 +57,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 1 {
+    if version > 8 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -58,6 +71,58 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
         CREATE TABLE colors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
         CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         PRAGMA user_version=1; COMMIT;")?;
+    }
+    if version < 2 {
+        c.execute_batch(
+            "BEGIN IMMEDIATE;
+        CREATE TABLE playback(account TEXT PRIMARY KEY,json TEXT NOT NULL);
+        PRAGMA user_version=2; COMMIT;",
+        )?;
+    }
+    if version < 3 {
+        c.execute_batch(
+            "BEGIN IMMEDIATE;
+        CREATE TABLE downloads(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account TEXT NOT NULL,
+            track TEXT NOT NULL,
+            quality TEXT NOT NULL CHECK(quality IN ('standard','high')),
+            state TEXT NOT NULL CHECK(state IN ('queued','running','paused','cancelled','failed','audio_ready','saved')),
+            revision INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            UNIQUE(account,track,quality)
+        );
+        CREATE INDEX downloads_pending ON downloads(account,state,id);
+        PRAGMA user_version=3; COMMIT;",
+        )?;
+    }
+    if version < 4 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT NOT NULL,played_at INTEGER NOT NULL,json TEXT NOT NULL);
+            CREATE INDEX history_account ON history(account,id DESC);
+            PRAGMA user_version=4; COMMIT;")?;
+    }
+    if version < 5 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE access(account TEXT NOT NULL,track TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('unknown','confirmed','revoked')),reason TEXT,last_checked INTEGER NOT NULL,PRIMARY KEY(account,track));
+            PRAGMA user_version=5; COMMIT;")?;
+    }
+    if version < 6 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE play_outbox(id TEXT PRIMARY KEY,account TEXT NOT NULL,track TEXT NOT NULL,played_at INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','confirmed')));
+            PRAGMA user_version=6; COMMIT;")?;
+    }
+    if version < 7 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE offline_owners(account TEXT NOT NULL,track TEXT NOT NULL,PRIMARY KEY(account,track));
+            INSERT INTO offline_owners SELECT DISTINCT account,track FROM downloads WHERE state IN ('saved','audio_ready') AND account != '';
+            PRAGMA user_version=7; COMMIT;")?;
+    }
+    if version < 8 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE radio_play_intents(event_id TEXT PRIMARY KEY REFERENCES play_outbox(id), account TEXT NOT NULL, session_id TEXT NOT NULL, batch_id TEXT, occurrence_id INTEGER NOT NULL CHECK(occurrence_id > 0));
+            CREATE INDEX radio_play_intents_account ON radio_play_intents(account,event_id);
+            PRAGMA user_version=8; COMMIT;")?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -262,6 +327,8 @@ impl Drop for Store {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangeMap {
+    #[serde(default)]
+    pub bitrate_kbps: Option<u32>,
     pub total: u64,
     pub ranges: Vec<(u64, u64)>,
     pub etag: Option<String>,
@@ -270,6 +337,7 @@ pub struct RangeMap {
 impl RangeMap {
     pub fn new(total: u64) -> Self {
         Self {
+            bitrate_kbps: None,
             total,
             ranges: vec![],
             etag: None,
@@ -277,7 +345,8 @@ impl RangeMap {
         }
     }
     pub fn valid(&self, len: u64) -> bool {
-        self.total > 0
+        self.bitrate_kbps.is_none_or(|b| b > 0)
+            && self.total > 0
             && len <= self.total
             && self.ranges.iter().all(|&(a, b)| a < b && b <= len)
             && self.ranges.windows(2).all(|w| w[0].1 < w[1].0)
@@ -317,7 +386,7 @@ impl RangeMap {
 }
 pub struct Cache {
     root: PathBuf,
-    pub limit: u64,
+    limit: std::sync::atomic::AtomicU64,
     leases: Arc<Mutex<HashMap<PathBuf, usize>>>,
 }
 
@@ -338,11 +407,22 @@ impl Drop for CacheLease {
     }
 }
 impl Cache {
+    pub fn limit(&self) -> u64 {
+        self.limit.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Active readers are still protected; eviction uses the new budget on the next write.
+    pub fn set_limit(&self, limit: u64) {
+        self.limit
+            .store(limit, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
     pub fn open(root: &Path, limit: u64, store: &Store) -> Result<Self, Error> {
         fs::create_dir_all(root)?;
         let cache = Self {
             root: root.to_owned(),
-            limit,
+            limit: std::sync::atomic::AtomicU64::new(limit),
             leases: Arc::default(),
         };
         // The disk is authoritative after DB loss. Invalid maps never become cache hits.
@@ -480,7 +560,7 @@ impl Cache {
         let size = i64::try_from(map.ranges.iter().map(|(a, b)| b - a).sum::<u64>())
             .map_err(|_| Error::Corrupt)?;
         let pinned = map.pinned;
-        store.write(move|c|{c.execute("INSERT INTO cache VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id,quality) DO UPDATE SET size=excluded.size,pinned=excluded.pinned",params![id,q,path,size,now(),pinned])?;Ok(())})
+        store.write(move|c|{c.execute("INSERT INTO cache VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id,quality) DO UPDATE SET path=excluded.path,size=excluded.size,pinned=excluded.pinned",params![id,q,path,size,now(),pinned])?;Ok(())})
     }
     /// Publish ranges already written and synced by the streaming downloader.
     pub fn publish(
@@ -524,6 +604,19 @@ impl Cache {
         }
         Ok(None)
     }
+    /// Audio bytes only; pinned files do not consume the transient cache budget.
+    pub fn usage(&self, store: &Store) -> Result<(u64, u64), Error> {
+        let (cache, saved): (i64, i64) = store.read()?.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN pinned=0 THEN size ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN pinned=1 THEN size ELSE 0 END),0) FROM cache",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((
+            u64::try_from(cache).map_err(|_| Error::Corrupt)?,
+            u64::try_from(saved).map_err(|_| Error::Corrupt)?,
+        ))
+    }
     pub fn pin(&self, store: &Store, id: &TrackId, q: Quality, pinned: bool) -> Result<(), Error> {
         let mut map = self.map(id, q)?.ok_or(Error::Corrupt)?;
         if !map.complete() {
@@ -532,6 +625,78 @@ impl Cache {
         map.pinned = pinned;
         self.save_map(id, q, &map)?;
         self.index(store, id, q, &map)
+    }
+    /// Atomically installs a completed staging file on the same filesystem.
+    /// Active playback keeps its current file; the caller may retry after it releases it.
+    pub fn install_pinned(
+        &self,
+        store: &Store,
+        id: &TrackId,
+        quality: Quality,
+        source: &Path,
+        mut map: RangeMap,
+    ) -> Result<(), Error> {
+        let len = fs::metadata(source)?.len();
+        if !map.complete() || !map.valid(len) || len != map.total {
+            return Err(Error::Corrupt);
+        }
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(source)?
+            .sync_all()?;
+        let leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
+        if leases.contains_key(&self.path(id, quality)) {
+            return Err(
+                io::Error::new(io::ErrorKind::WouldBlock, "файл используется плеером").into(),
+            );
+        }
+        // Invalidate the old map before replacing audio: a crash cannot pair new bytes
+        // with ranges from a different resource version.
+        let previous = self.map(id, quality)?;
+        match fs::remove_file(self.sidecar(id, quality)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        #[cfg(unix)]
+        File::open(&self.root)?.sync_all()?;
+        if let Err(error) = fs::rename(source, self.path(id, quality)) {
+            if let Some(previous) = previous {
+                self.save_map(id, quality, &previous)?;
+            }
+            return Err(error.into());
+        }
+        map.pinned = true;
+        self.save_map(id, quality, &map)?;
+        self.index(store, id, quality, &map)
+    }
+    /// Forget a completed save while holding the playback-lease guard through deletion.
+    pub fn remove_saved(&self, store: &Store, account: &str, id: i64) -> Result<(), Error> {
+        let Some(job) = store
+            .downloads(account)?
+            .into_iter()
+            .find(|job| job.id == id && job.state == DownloadState::Saved)
+        else {
+            return Ok(());
+        };
+        let leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if leases.contains_key(&self.path(&job.track, job.quality)) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "файл сейчас воспроизводится; повторите после остановки",
+            )
+            .into());
+        }
+        if let Some((job, retained)) = store.forget_saved(account, id)?
+            && !retained
+        {
+            self.discard(store, &job.track, job.quality)?;
+        }
+        Ok(())
     }
     pub fn discard(&self, store: &Store, id: &TrackId, q: Quality) -> Result<(), Error> {
         for path in [self.path(id, q), self.sidecar(id, q)] {
@@ -561,7 +726,7 @@ impl Cache {
         let leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
         let c = store.read()?;
         let mut total = u64::try_from(c.query_row(
-            "SELECT COALESCE(SUM(size),0) FROM cache",
+            "SELECT COALESCE(SUM(size),0) FROM cache WHERE pinned=0",
             [],
             |r| r.get::<_, i64>(0),
         )?)
@@ -578,7 +743,7 @@ impl Cache {
             .collect::<Result<Vec<_>, _>>()?;
         for (id, quality, size) in rows {
             let size = u64::try_from(size).map_err(|_| Error::Corrupt)?;
-            if total.saturating_add(incoming) <= self.limit {
+            if total.saturating_add(incoming) <= self.limit() {
                 return Ok(());
             }
             let tid = id.parse::<TrackId>().map_err(|_| Error::Corrupt)?;
@@ -609,7 +774,7 @@ impl Cache {
             })?;
             total = total.saturating_sub(size);
         }
-        if total.saturating_add(incoming) > self.limit {
+        if total.saturating_add(incoming) > self.limit() {
             Err(Error::CacheFull)
         } else {
             Ok(())
@@ -725,28 +890,88 @@ mod tests {
         fs::remove_dir_all(d).unwrap();
     }
     #[test]
-    fn lru_evicts_unpinned_and_full_cache_preserves_pins() {
+    fn saved_removal_protects_readers_and_other_accounts() {
+        let root = dir();
+        let store = Store::open(&root).unwrap();
+        let cache = Cache::open(&root.join("audio"), 4, &store).unwrap();
+        let id = "yandex:91".parse().unwrap();
+        cache
+            .write_chunk(
+                &store,
+                &id,
+                Quality::High,
+                &mut RangeMap::new(4),
+                0,
+                b"test",
+            )
+            .unwrap();
+        cache.pin(&store, &id, Quality::High, true).unwrap();
+        for account in ["a", "b"] {
+            store.enqueue_download(account, &id, Quality::High).unwrap();
+            let job = store.claim_download(account).unwrap().unwrap();
+            store.finish_saved_download(&job).unwrap();
+        }
+        let a = store.downloads("a").unwrap()[0].id;
+        let b = store.downloads("b").unwrap()[0].id;
+        let lease = cache.lease(&id, Quality::High);
+        assert!(cache.remove_saved(&store, "a", a).is_err());
+        assert_eq!(store.downloads("a").unwrap()[0].state, DownloadState::Saved);
+        drop(lease);
+        cache.remove_saved(&store, "a", b).unwrap();
+        assert_eq!(store.downloads("b").unwrap()[0].state, DownloadState::Saved);
+        cache.remove_saved(&store, "a", a).unwrap();
+        assert!(cache.lookup(&store, &id, Quality::High).unwrap().is_some());
+        cache.remove_saved(&store, "b", b).unwrap();
+        assert!(cache.lookup(&store, &id, Quality::High).unwrap().is_none());
+        assert_eq!(cache.usage(&store).unwrap(), (0, 0));
+        cache.set_limit(1);
+        assert_eq!(cache.limit(), 1);
+        assert!(
+            cache
+                .write_chunk(
+                    &store,
+                    &id,
+                    Quality::High,
+                    &mut RangeMap::new(4),
+                    0,
+                    b"test"
+                )
+                .is_err()
+        );
+        drop(cache);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn pinned_audio_is_in_place_and_outside_lru_budget() {
         let d = dir();
         let s = Store::open(&d).unwrap();
-        let c = Cache::open(&d.join("audio"), 8, &s).unwrap();
+        let c = Cache::open(&d.join("audio"), 4, &s).unwrap();
         let a = "yandex:1".parse().unwrap();
         let b = "vk:2".parse().unwrap();
         let other = "yandex:3".parse().unwrap();
-        for id in [&a, &b] {
-            c.write_chunk(&s, id, Quality::High, &mut RangeMap::new(4), 0, b"test")
-                .unwrap();
-        }
+        c.write_chunk(&s, &a, Quality::High, &mut RangeMap::new(4), 0, b"test")
+            .unwrap();
+        let before = fs::metadata(c.path(&a, Quality::High))
+            .unwrap()
+            .modified()
+            .unwrap();
         c.pin(&s, &a, Quality::High, true).unwrap();
-        c.write_chunk(&s, &other, Quality::High, &mut RangeMap::new(4), 0, b"next")
+        assert_eq!(
+            fs::metadata(c.path(&a, Quality::High))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        assert_eq!(c.usage(&s).unwrap(), (0, 4));
+        c.write_chunk(&s, &b, Quality::High, &mut RangeMap::new(4), 0, b"next")
+            .unwrap();
+        c.write_chunk(&s, &other, Quality::High, &mut RangeMap::new(4), 0, b"last")
             .unwrap();
         assert!(c.lookup(&s, &a, Quality::High).unwrap().is_some());
         assert!(c.lookup(&s, &b, Quality::High).unwrap().is_none());
-        c.pin(&s, &other, Quality::High, true).unwrap();
-        assert!(matches!(
-            c.write_chunk(&s, &b, Quality::High, &mut RangeMap::new(4), 0, b"full"),
-            Err(Error::CacheFull)
-        ));
-        assert!(c.lookup(&s, &a, Quality::High).unwrap().is_some());
+        assert_eq!(c.usage(&s).unwrap(), (4, 4));
         drop(s);
         fs::remove_dir_all(d).unwrap();
     }
@@ -813,5 +1038,24 @@ mod tests {
         assert!(!c.path(&id, Quality::High).exists());
         drop(s);
         fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bitrate_tests {
+    use super::*;
+    #[test]
+    fn old_maps_remain_unknown_and_declared_bitrate_round_trips() {
+        let mut map: RangeMap =
+            serde_json::from_str(r#"{"total":1,"ranges":[[0,1]],"etag":null,"pinned":true}"#)
+                .unwrap();
+        assert_eq!(map.bitrate_kbps, None);
+        assert!(map.valid(1));
+        map.bitrate_kbps = Some(128);
+        let restored: RangeMap =
+            serde_json::from_slice(&serde_json::to_vec(&map).unwrap()).unwrap();
+        assert_eq!(restored.bitrate_kbps, Some(128));
+        map.bitrate_kbps = Some(0);
+        assert!(!map.valid(1));
     }
 }

@@ -167,7 +167,7 @@ fn changed_etag_fails_without_mixing_versions() {
         let end = (b + 1).min(3 * 1024 * 1024);
         let etag = if a == 0 { "one" } else { "two" };
         let header = format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nETag: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             a,
             end - 1,
             3 * 1024 * 1024,
@@ -218,7 +218,7 @@ fn expired_audio_link_is_resolved_again() {
                 format!("HTTP/1.1 {status} Expired\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
             );
             } else {
-                let _ = socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nETag: same\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest");
+                let _ = socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nETag: \"same\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest");
             }
         });
         let calls = Arc::new(AtomicUsize::new(0));
@@ -264,7 +264,7 @@ fn deadline_refreshes_location_before_the_next_range() {
         let (start, _) = request_range(request);
         let end = (start + CHUNK as usize).min(CHUNK as usize + 4);
         let header = format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nETag: same\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nETag: \"same\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             start,
             end - 1,
             CHUNK + 4,
@@ -282,6 +282,7 @@ fn deadline_refreshes_location_before_the_next_range() {
         Arc::new(move || {
             counter.fetch_add(1, Ordering::Relaxed);
             Ok(Location {
+                bitrate_kbps: Some(320),
                 url: SignedUrl::new(url.clone()),
                 expires_at: Some(SystemTime::UNIX_EPOCH),
             })
@@ -295,6 +296,7 @@ fn deadline_refreshes_location_before_the_next_range() {
     reader(&download).read_to_end(&mut output).unwrap();
     assert_eq!(output.len(), CHUNK as usize + 4);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(download.snapshot().bitrate_kbps, Some(320));
 }
 
 #[test]
@@ -311,4 +313,33 @@ fn opening_a_preload_reader_does_not_demote_playback() {
         download.shared.state.lock().unwrap().priority,
         Priority::Playback
     ));
+}
+
+#[test]
+fn weak_or_missing_validator_never_joins_ranges() {
+    assert!(strong_etag("\"version\""));
+    assert!(strong_etag("\"\""));
+    for invalid in ["W/\"version\"", "version", "\"a\"b\"", "\"a\nb\""] {
+        assert!(!strong_etag(invalid));
+    }
+    for tag in ["", "ETag: W/\"weak\"\r\n"] {
+        let fixture = Fixture::new(move |socket, request| {
+            let (start, _) = request_range(request);
+            assert_eq!(start, 0, "unverified second request must not be sent");
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                CHUNK - 1,
+                CHUNK + 1,
+                tag,
+                CHUNK
+            );
+            let _ = socket.write_all(head.as_bytes());
+            let _ = socket.write_all(&vec![1; CHUNK as usize]);
+        });
+        let download = fixture.download();
+        let mut r = reader(&download);
+        let mut first = vec![0; CHUNK as usize];
+        r.read_exact(&mut first).unwrap();
+        assert!(r.read(&mut [0; 1]).is_err());
+    }
 }

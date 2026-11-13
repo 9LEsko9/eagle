@@ -6,6 +6,7 @@ import { IconButton } from "icon-button.slint";
 // Column widths shared with the table header.
 export global TrackColumns {
     out property <length> number: 40px;
+    out property <length> row-height: Ui.compact ? 42px : 54px;
     out property <length> actions: 66px;
     out property <length> time: 44px;
     out property <length> gap: 12px;
@@ -22,10 +23,10 @@ export component TrackRowView inherits Rectangle {
     callback menu(TrackItem);
     private property <bool> lit: touch.has-hover || heart.hovered || more.hovered || play-control.hovered || focus.has-focus;
     private property <bool> current: item.id != "" && item.id == Player.track-id;
-    height: 54px;
+    height: TrackColumns.row-height;
     border-radius: 8px;
     accessible-role: list-item;
-    accessible-label: item.title + ", " + item.artist;
+    accessible-label: item.title + ", " + item.artist + (item.blocked-reason != "" ? ", " + item.blocked-reason : "");
     accessible-action-default => { if item.available { Actions.play-row(root.number - 1); } }
     background: root.lit ? Theme.t.surf : transparent;
     border-width: focus.has-focus ? 2px : 0px;
@@ -65,8 +66,8 @@ export component TrackRowView inherits Rectangle {
         if Ui.list-covers : Rectangle {
             width: 40px;
             Rectangle {
-                width: 40px;
-                height: 40px;
+                width: Ui.compact ? 32px : 40px;
+                height: Ui.compact ? 32px : 40px;
                 border-radius: 4px;
                 clip: true;
                 background: Theme.t.surf;
@@ -87,7 +88,7 @@ export component TrackRowView inherits Rectangle {
                 font-weight: root.current ? 600 : 500;
                 overflow: elide;
             }
-            Text { text: item.artist; color: Theme.t.tx2; font-size: Type.meta; overflow: elide; }
+            Text { text: item.blocked-reason != "" ? item.blocked-reason : item.artist; color: Theme.t.tx2; font-size: Type.meta; overflow: elide; }
         }
         if root.show-album : Rectangle {
             horizontal-stretch: 1.2;

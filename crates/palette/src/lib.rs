@@ -63,6 +63,13 @@ pub fn process(
     image.resize(600, 600, FilterType::Lanczos3).save(large)?;
     Ok(median_cut(&pixels, 5))
 }
+/// Stable local artwork when the provider has no cover.
+pub fn placeholder(small: &Path, large: &Path) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
+    let color = [96, 104, 112];
+    image::RgbImage::from_pixel(64, 64, image::Rgb(color)).save(small)?;
+    image::RgbImage::from_pixel(600, 600, image::Rgb(color)).save(large)?;
+    Ok(vec![color])
+}
 #[cfg(test)]
 mod tests {
     use super::*;

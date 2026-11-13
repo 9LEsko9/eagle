@@ -103,6 +103,7 @@ pub fn audio(
             continue;
         }
         m.etag = response.etag;
+        m.bitrate_kbps = stream.bitrate_kbps;
         cache.write_chunk(store, id, q, m, start, &response.bytes)?;
         if m.complete() {
             return Ok(cache.path(id, q));
@@ -134,33 +135,69 @@ pub(crate) fn metadata(
     track: &eagle_core::Track,
 ) -> Result<()> {
     store.put_track(track)?;
-    let Some(cover) = &track.cover else {
-        return Ok(());
-    };
-    let exists: bool = store.read()?.query_row(
-        "SELECT EXISTS(SELECT 1 FROM colors WHERE id=?1)",
-        [track.id.to_string()],
-        |r| r.get(0),
-    )?;
-    if exists {
-        return Ok(());
-    }
-    let url = if cover.starts_with("https://") {
-        cover.replace("%%", "600x600")
-    } else {
-        format!("https://{}", cover.replace("%%", "600x600"))
-    };
-    let mut request = Request::get(SignedUrl::new(url));
-    request.limit = 8 * 1024 * 1024;
-    let response = net.request(Priority::Metadata, request, None)?;
     let dir = root.join("covers");
     fs::create_dir_all(&dir)?;
     let name = track.id.to_string().replace(':', "_");
-    let colors = eagle_palette::process(
-        &response.bytes,
-        &dir.join(format!("{name}-64.png")),
-        &dir.join(format!("{name}-600.png")),
+    let small = dir.join(format!("{name}-64.png"));
+    let large = dir.join(format!("{name}-600.png"));
+    let colors: Option<String> = store.read()?.query_row(
+        "SELECT (SELECT json FROM colors WHERE id=?1)",
+        [track.id.to_string()],
+        |r| r.get(0),
     )?;
+    let valid_cover = |path: &Path, size| {
+        fs::metadata(path)
+            .ok()
+            .filter(|m| m.len() <= 8 * 1024 * 1024)
+            .and_then(|_| fs::read(path).ok())
+            .and_then(|bytes| eagle_palette::decode_cover(&bytes, size).ok())
+            .is_some()
+    };
+    if colors
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<[u8; 3]>>(json).ok())
+        .is_some_and(|colors| !colors.is_empty())
+        && valid_cover(&small, 64)
+        && valid_cover(&large, 600)
+    {
+        return Ok(());
+    }
+    // Unique staging paths allow playback and two qualities to prepare the same cover.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_small = dir.join(format!("{name}-{}-{next}-64.png", std::process::id()));
+    let temp_large = dir.join(format!("{name}-{}-{next}-600.png", std::process::id()));
+    let prepared = (|| -> Result<Vec<[u8; 3]>> {
+        let colors = if let Some(cover) = &track.cover {
+            let url = if cover.starts_with("https://") {
+                cover.replace("%%", "600x600")
+            } else {
+                format!("https://{}", cover.replace("%%", "600x600"))
+            };
+            let mut request = Request::get(SignedUrl::new(url));
+            request.limit = 8 * 1024 * 1024;
+            let response = net.request(Priority::Metadata, request, None)?;
+            eagle_palette::process(&response.bytes, &temp_small, &temp_large)?
+        } else {
+            eagle_palette::placeholder(&temp_small, &temp_large)?
+        };
+        for path in [&temp_small, &temp_large] {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?
+                .sync_all()?;
+        }
+        fs::rename(&temp_small, &small)?;
+        fs::rename(&temp_large, &large)?;
+        #[cfg(unix)]
+        fs::File::open(&dir)?.sync_all()?;
+        Ok(colors)
+    })();
+    for path in [&temp_small, &temp_large] {
+        let _ = fs::remove_file(path);
+    }
+    let colors = prepared?;
     store.put_json(
         "colors",
         &track.id.to_string(),
@@ -380,6 +417,7 @@ mod tests {
         let path = audio(&store, &cache, &net, &id, Quality::High, || {
             calls += 1;
             Ok(Stream {
+                bitrate_kbps: None,
                 url: SignedUrl::new(format!("http://{addr}/audio")),
                 codec: "mp3".into(),
                 expires_at: SystemTime::now() + Duration::from_secs(60),
@@ -412,5 +450,40 @@ mod tests {
         ] {
             assert!(parse_range(s).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn missing_artwork_is_durable_and_corrupt_artwork_is_repaired_offline() {
+        let root = std::env::temp_dir().join(format!("eg-metadata-{}", std::process::id()));
+        let store = Store::open(&root).unwrap();
+        let net = Client::new().unwrap();
+        let track = eagle_core::Track {
+            id: "yandex:coverless".parse().unwrap(),
+            title: "fixture".into(),
+            artists: vec![],
+            album: None,
+            album_title: None,
+            duration_ms: 1000,
+            cover: None,
+            availability: eagle_core::Availability::Available,
+        };
+        metadata(&store, &net, &root, &track).unwrap();
+        let cover = root.join("covers/yandex_coverless-600.png");
+        let original = fs::read(&cover).unwrap();
+        let decoded = eagle_palette::decode_cover(&original, 600).unwrap();
+        assert_eq!((decoded.width, decoded.height), (600, 600));
+        let modified = fs::metadata(&cover).unwrap().modified().unwrap();
+        metadata(&store, &net, &root, &track).unwrap();
+        assert_eq!(fs::metadata(&cover).unwrap().modified().unwrap(), modified);
+        fs::write(&cover, b"broken").unwrap();
+        metadata(&store, &net, &root, &track).unwrap();
+        assert_eq!(fs::read(&cover).unwrap(), original);
+        assert_eq!(store.track(&track.id).unwrap().unwrap(), track);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }
