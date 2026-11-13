@@ -153,6 +153,73 @@ fn encode(s: &str) -> String {
         })
         .collect()
 }
+/// Stands in for the account's user id, in paths and bodies alike.
+pub const STUB_UID: &str = "1";
+/// Likes and playlists keep this many items in a recording.
+const STUB_LIST_LIMIT: usize = 3;
+/// Account fields and the stand-ins that replace them in recordings.
+const ACCOUNT_FIELDS: &[(&str, &str)] = &[
+    ("uid", STUB_UID),
+    ("login", "stub-login"),
+    ("email", "stub@example.invalid"),
+    ("displayName", "Stub User"),
+    ("fullName", "Stub User"),
+    ("firstName", "Stub"),
+    ("lastName", "User"),
+    ("phone", "+70000000000"),
+    ("phones", "+70000000000"),
+    ("phoneNumber", "+70000000000"),
+];
+
+/// Removes account data from one recorded answer before it is written: the user id in the path
+/// and the body, login, e-mail, names and phones. Likes and playlists keep a few items only.
+/// Applying it twice changes nothing.
+pub fn scrub_recording(path: &mut String, body: &mut Value) {
+    let mut previous = "";
+    let segments: Vec<String> = path
+        .split('/')
+        .map(|segment| {
+            let is_uid = previous == "users" && is_digits(segment);
+            previous = segment;
+            if is_uid {
+                STUB_UID.to_owned()
+            } else {
+                segment.to_owned()
+            }
+        })
+        .collect();
+    *path = segments.join("/");
+    let trim = path.contains("/likes") || path.contains("/playlists");
+    scrub_value(body, trim);
+}
+
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn scrub_value(value: &mut Value, trim: bool) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match ACCOUNT_FIELDS
+                    .iter()
+                    .find(|(field, _)| *field == key.as_str())
+                {
+                    Some((_, stub)) => *item = Value::String((*stub).to_owned()),
+                    None => scrub_value(item, trim),
+                }
+            }
+        }
+        Value::Array(items) => {
+            if trim {
+                items.truncate(STUB_LIST_LIMIT);
+            }
+            items.iter_mut().for_each(|item| scrub_value(item, trim));
+        }
+        _ => {}
+    }
+}
+
 impl Yandex {
     pub fn new(net: Arc<dyn Http>) -> Self {
         let mut capabilities = Capabilities::none();
@@ -792,9 +859,69 @@ fn direct_link(xml: &[u8]) -> Result<String, ProviderError> {
 #[cfg(test)]
 mod tests {
     use eagle_net::Client;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn scrub_recording_replaces_account_data_and_trims_likes() {
+        let mut path = "/users/12345/likes/tracks".to_owned();
+        let mut body = json!({"result": {
+            "uid": 12345,
+            "login": "real.login",
+            "email": "me@example.com",
+            "displayName": "Real Name",
+            "phones": ["+7 999 000-00-00"],
+            "library": {
+                "uid": 12345,
+                "tracks": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}]
+            },
+            "title": "Keep me"
+        }});
+        super::scrub_recording(&mut path, &mut body);
+        assert_eq!(path, "/users/1/likes/tracks");
+        assert_eq!(body["result"]["uid"], "1");
+        assert_eq!(body["result"]["login"], "stub-login");
+        assert_eq!(body["result"]["email"], "stub@example.invalid");
+        assert_eq!(body["result"]["displayName"], "Stub User");
+        assert_eq!(body["result"]["phones"], "+70000000000");
+        assert_eq!(body["result"]["library"]["uid"], "1");
+        assert_eq!(
+            body["result"]["library"]["tracks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(body["result"]["title"], "Keep me");
+    }
+
+    #[test]
+    fn scrub_recording_keeps_lists_outside_likes_and_playlists() {
+        let mut path = "/search".to_owned();
+        let mut body = json!({"result": {"tracks": {"results": [1, 2, 3, 4, 5]}}});
+        super::scrub_recording(&mut path, &mut body);
+        assert_eq!(path, "/search");
+        assert_eq!(
+            body["result"]["tracks"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn scrub_recording_is_idempotent() {
+        let mut path = "/users/42/playlists/list".to_owned();
+        let mut body: Value = json!({"result": {"owner": {"uid": 42, "login": "x"},
+            "playlists": [1, 2, 3, 4]}});
+        super::scrub_recording(&mut path, &mut body);
+        let (scrubbed_path, scrubbed_body) = (path.clone(), body.clone());
+        super::scrub_recording(&mut path, &mut body);
+        assert_eq!((path, body), (scrubbed_path, scrubbed_body));
+    }
+
     #[test]
     fn info_passes_conformance_checks() {
-        // Full `conformance::run` needs recorded responses; only the self-description is checked here.
         let provider = Yandex::new(Arc::new(Client::new().unwrap()));
         let violations = eagle_provider_sdk::testkit::conformance::check_info(provider.info());
         assert!(violations.is_empty(), "{violations:?}");

@@ -6,3 +6,4 @@
 mod fake;
 pub use fake::{FakeProvider, fake_track};
 pub mod conformance;
+pub mod replay;
