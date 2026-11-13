@@ -16,6 +16,10 @@ export global Source {
 export component NowPlayingCard inherits Rectangle {
     in property <bool> floating;
     private property <bool> edit-queue;
+    private property <string> focused-occurrence;
+    private property <length> drag-origin;
+    private property <int> drag-index;
+    private property <string> drag-id;
     private property <length> art: self.width - 40px;
     private property <length> offset: Ui.panel-open ? 0px : 24px;
     animate offset { duration: Motion.base; easing: cubic-bezier(0.2, 0.9, 0.25, 1.05); }
@@ -107,36 +111,58 @@ export component NowPlayingCard inherits Rectangle {
                 height: 40px;
                 vertical-alignment: center;
             }
-            if root.edit-queue : ListView {
+            if root.edit-queue : Rectangle {
+                vertical-stretch: 1;
+                queue-focus := FocusScope {
+                    key-pressed(event) => {
+                        if event.text == Key.UpArrow { Actions.shift-queue(root.focused-occurrence, -1); return accept; }
+                        if event.text == Key.DownArrow { Actions.shift-queue(root.focused-occurrence, 1); return accept; }
+                        if event.text == "\n" { Actions.play-next(root.focused-occurrence); return accept; }
+                        return reject;
+                    }
+                }
+                ListView {
                 vertical-stretch: 1;
                 for entry[index] in Library.queue-order : Rectangle {
                     height: 84px;
                     accessible-role: list-item;
                     accessible-label: entry.title + ", " + entry.artist;
-                    forward-focus: queue-focus;
-                    border-width: queue-focus.has-focus ? 2px : 0px;
+                    border-width: queue-focus.has-focus && root.focused-occurrence == entry.id ? 2px : 0px;
                     border-color: Player.colors.tx2;
-                    queue-focus := FocusScope {
-                        key-pressed(event) => {
-                            if event.text == Key.UpArrow && index > 0 { Actions.move-queue(entry.id, index - 1); return accept; }
-                            if event.text == Key.DownArrow && index + 1 < Library.queue-order.length { Actions.move-queue(entry.id, index + 1); return accept; }
-                            if event.text == "\n" { Actions.play-next(entry.id); return accept; }
-                            return reject;
+                    TouchArea { clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); } }
+                    TouchArea {
+                        width: 22px;
+                        mouse-cursor: move;
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                root.drag-origin = self.mouse-y;
+                                root.drag-index = index;
+                                root.drag-id = entry.id;
+                                root.focused-occurrence = entry.id;
+                                queue-focus.focus();
+                            }
+                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.drag-id == entry.id {
+                                Actions.move-queue(root.drag-id, max(0, min(Library.queue-order.length - 1, root.drag-index + round((self.mouse-y - root.drag-origin) / 84px))));
+                                root.drag-id = "";
+                            }
                         }
+                        Text { text: "↕"; color: Player.colors.tx2; vertical-alignment: center; }
                     }
                     VerticalLayout {
+                        padding-left: 24px;
                         spacing: 0px;
                         Text { text: (entry.current ? "▶ " : "") + entry.title; color: Player.colors.tx; font-size: Type.meta; overflow: elide; }
                         Text { text: entry.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
                         HorizontalLayout {
                             spacing: 0px; alignment: start;
-                            TextButton { text: "↑"; enabled: index > 0; clicked => { Actions.move-queue(entry.id, index - 1); } }
-                            TextButton { text: "↓"; enabled: index + 1 < Library.queue-order.length; clicked => { Actions.move-queue(entry.id, index + 1); } }
+                            TextButton { text: "↑"; enabled: index > 0; clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); Actions.shift-queue(entry.id, -1); } }
+                            TextButton { text: "↓"; enabled: index + 1 < Library.queue-order.length; clicked => { root.focused-occurrence = entry.id; queue-focus.focus(); Actions.shift-queue(entry.id, 1); } }
                             TextButton { text: @tr("Следующим"); clicked => { Actions.play-next(entry.id); } }
                         }
                     }
                 }
             }
+                }
             if !root.edit-queue && Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
             if !root.edit-queue : ListView {
                 vertical-stretch: 1;

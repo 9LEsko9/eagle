@@ -4,7 +4,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use eagle_ui::{
         Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route,
-        Status, Theme, ThemeMode, TrackItem, Ui,
+        Status, Storage, Theme, ThemeMode, TrackItem, Ui,
     };
     // Geometric placeholder artwork in the mockup's palette: background, disc, stripe.
     fn art(size: u32, back: [u8; 3], disc: [u8; 3], cx: f32, cy: f32) -> slint::Image {
@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .map(|(i, (title, artist, album, duration))| TrackItem {
+            blocked_reason: Default::default(),
             id: format!("fixture:{i}").into(),
             album_id: format!("fixture:album:{i}").into(),
             album: (*album).into(),
@@ -100,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Library>()
         .set_queue(Rc::new(VecModel::from(tracks[1..5].to_vec())).into());
     ui.global::<Library>()
-        .set_tracks(Rc::new(VecModel::from(tracks)).into());
+        .set_tracks(Rc::new(VecModel::from(tracks.clone())).into());
     let albums = [
         ("Магистраль", "2024 · Шум волн"),
         ("Полярная ночь", "2023 · Мира Вольская"),
@@ -182,6 +183,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_liked(false);
     ui.global::<Player>().on_position(|| 84.);
     ui.global::<Ui>().set_signed_in(true);
+    let storage = ui.global::<Storage>();
+    storage.set_cache_usage("4.0 МиБ".into());
+    storage.set_saved_usage("8.0 МиБ".into());
+    storage.set_staging_usage("1.0 МиБ".into());
+    storage.set_other_usage("2.0 МиБ".into());
+    storage.set_total_usage("15.0 МиБ".into());
+    storage.set_folder("/data/eagle-preview".into());
+    storage.set_network_hint("Лимит сети неизвестен; фоновые загрузки разрешены".into());
     ui.global::<Actions>()
         .on_valid_playlist_name(|name| !name.trim().is_empty());
     let folder = std::env::args()
@@ -190,6 +199,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&folder)?;
     // (file name, theme, route, panel open, drawer open, window width)
     let shots = [
+        (
+            "saved-empty-wide",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "saved-empty-narrow",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "saved-blocked-wide",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "saved-blocked-narrow",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "saved-error-wide",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "saved-error-narrow",
+            ThemeMode::Graphite,
+            Route::Saved,
+            false,
+            false,
+            760.,
+        ),
         (
             "search-narrow",
             ThemeMode::Graphite,
@@ -389,6 +446,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let (name, mode, route, panel, drawer, width) = shots[n];
+            let mut shown = tracks.clone();
+            if name.starts_with("saved-empty") {
+                shown.clear();
+            }
+            ui.global::<Player>()
+                .set_status(if name.starts_with("saved-blocked") {
+                    Status::Paused
+                } else {
+                    Status::Playing
+                });
+            if name.starts_with("saved-blocked") {
+                shown[0].available = false;
+                shown[0].blocked_reason = "Провайдер подтвердил потерю доступа".into();
+            }
+            ui.global::<Library>()
+                .set_tracks(Rc::new(VecModel::from(shown)).into());
+            ui.global::<Ui>().set_compact(name.starts_with("compact"));
+            ui.global::<Ui>()
+                .set_error(if name.starts_with("saved-error") {
+                    "Сеть недоступна. Сохранённая музыка остаётся на устройстве.".into()
+                } else {
+                    "".into()
+                });
+
             ui.global::<Ui>()
                 .set_create_playlist(name.starts_with("create-playlist"));
             ui.global::<Ui>()
@@ -407,6 +488,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>().set_route(route);
             let library = ui.global::<Library>();
             match route {
+                Route::Saved => {
+                    library.set_title("Сохранённое".into());
+                    library.set_cards(Rc::new(VecModel::<CardItem>::default()).into());
+                }
                 Route::Search => {
                     library.set_title("".into());
                     library.set_cards(Rc::new(VecModel::from(album_cards.clone())).into());

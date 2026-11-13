@@ -22,6 +22,7 @@ const PENDING: usize = 64;
 const DECODED: usize = 160;
 const DECODED_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone)]
 pub(crate) struct Job {
     /// Routing key for the UI, e.g. `t:yandex:1` for a track row.
     pub key: String,
@@ -33,10 +34,23 @@ pub(crate) struct Job {
     pub size: u32,
 }
 
-#[derive(Default)]
 struct Queue {
     pending: VecDeque<Job>,
     closed: bool,
+    active: bool,
+    generation: u64,
+    decoded: Decoded,
+}
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            closed: false,
+            active: true,
+            generation: 0,
+            decoded: Decoded::default(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -47,6 +61,7 @@ struct Shared {
 
 pub(crate) struct Covers {
     shared: Arc<Shared>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Covers {
@@ -57,16 +72,33 @@ impl Covers {
     ) -> std::io::Result<Self> {
         let shared = Arc::new(Shared::default());
         let worker = shared.clone();
-        // Detached on purpose: a download in flight must not delay shutdown.
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("eg-covers".into())
             .spawn(move || run(&root.join("covers"), &net, emit.as_ref(), &worker))?;
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            worker: Some(handle),
+        })
     }
     pub(crate) fn request(&self, jobs: Vec<Job>) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if !queue.active {
+            return;
+        }
         enqueue(&mut queue.pending, jobs);
         self.shared.ready.notify_one();
+    }
+    pub(crate) fn set_active(&self, active: bool) {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.active != active {
+            queue.active = active;
+            queue.generation = queue.generation.wrapping_add(1);
+            if !active {
+                queue.pending.clear();
+                queue.decoded = Decoded::default();
+            }
+            self.shared.ready.notify_one();
+        }
     }
 }
 
@@ -76,6 +108,10 @@ impl Drop for Covers {
         queue.closed = true;
         queue.pending.clear();
         self.shared.ready.notify_one();
+        drop(queue);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -154,9 +190,8 @@ fn run_with(
     emit: &(dyn Fn(Event) + Send + Sync),
     mut loader: impl FnMut(&Job) -> Result<Option<eagle_palette::Cover>>,
 ) {
-    let mut decoded = Decoded::default();
     loop {
-        let job = {
+        let (job, generation) = {
             let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
             while queue.pending.is_empty() && !queue.closed {
                 queue = shared.ready.wait(queue).unwrap_or_else(|e| e.into_inner());
@@ -167,16 +202,22 @@ fn run_with(
             let Some(job) = next_job(&mut queue.pending) else {
                 continue;
             };
-            job
+            if let Some(cover) = queue.decoded.get(&job.key, job.size) {
+                emit(Event::Thumbnail(job.key, cover));
+                continue;
+            }
+            (job, queue.generation)
         };
-        if let Some(cover) = decoded.get(&job.key, job.size) {
-            emit(Event::Thumbnail(job.key, cover));
-            continue;
-        }
         match loader(&job) {
             Ok(Some(cover)) => {
+                let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+                if queue.closed || !queue.active || queue.generation != generation {
+                    continue;
+                }
                 let cover = Arc::new(cover);
-                decoded.insert(job.key.clone(), job.size, cover.clone());
+                queue
+                    .decoded
+                    .insert(job.key.clone(), job.size, cover.clone());
                 emit(Event::Thumbnail(job.key, cover));
             }
             Ok(None) => {}
@@ -300,8 +341,74 @@ mod tests {
                 queue = worker.ready.wait(queue).unwrap();
             }
         });
-        drop(Covers { shared });
-        waiter.join().unwrap();
+        drop(Covers {
+            shared,
+            worker: Some(waiter),
+        });
+    }
+    #[test]
+    fn suspension_releases_cache_discards_inflight_and_resumes_same_worker() {
+        use std::{sync::mpsc, time::Duration};
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let shared = Arc::new(Shared::default());
+        let worker_shared = shared.clone();
+        let worker = thread::spawn(move || {
+            run_with(
+                &worker_shared,
+                &|event| {
+                    let _ = event_tx.send(event);
+                },
+                |job| {
+                    if job.key == "blocked" {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(Some(eagle_palette::Cover {
+                        rgba: vec![0; 4],
+                        width: 1,
+                        height: 1,
+                        dominant: [0; 3],
+                    }))
+                },
+            );
+        });
+        let service = Covers {
+            shared,
+            worker: Some(worker),
+        };
+        service.request(vec![job("cached")]);
+        let Event::Thumbnail(_, cached) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected thumbnail")
+        };
+        let weak = Arc::downgrade(&cached);
+        drop(cached);
+        service.request(vec![job("blocked")]);
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        service.set_active(false);
+        assert!(weak.upgrade().is_none());
+        service.request(vec![job("ignored")]);
+        service.set_active(true);
+        service.request(vec![job("resumed")]);
+        release_tx.send(()).unwrap();
+        let Event::Thumbnail(key, _) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected thumbnail")
+        };
+        assert_eq!(key, "resumed");
+        assert!(event_rx.try_recv().is_err());
+        let queue = service.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .decoded
+                .entries
+                .iter()
+                .all(|(key, _, _)| key == "resumed")
+        );
+        drop(queue);
+        drop(service);
     }
     #[test]
     fn pending_is_bounded_while_worker_is_blocked() {
@@ -317,7 +424,10 @@ mod tests {
                 Ok(None)
             });
         });
-        let service = Covers { shared };
+        let service = Covers {
+            shared,
+            worker: Some(worker),
+        };
         service.request(vec![job("first")]);
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -332,8 +442,20 @@ mod tests {
             assert!(queue.pending.iter().any(|job| job.key == "h:current"));
             assert!(queue.pending.iter().any(|job| job.key == "19-0"));
         }
-        drop(service);
+        let (done_tx, done_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            drop(service);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
         release_tx.send(()).unwrap();
-        worker.join().unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        closer.join().unwrap();
     }
 }

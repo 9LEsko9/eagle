@@ -143,6 +143,39 @@ pub(crate) fn streamed_with_bitrate(
     resolve: Arc<eagle_net::growing::Resolve>,
     on_bitrate: Arc<dyn Fn(Option<u32>) + Send + Sync>,
 ) -> Result<Source> {
+    streamed_with_hooks(
+        store,
+        cache,
+        net,
+        id,
+        quality,
+        resolve,
+        PlaybackHooks {
+            on_bitrate,
+            authorize_local: Arc::new(|| Ok(true)),
+        },
+    )
+}
+
+pub(crate) struct PlaybackHooks {
+    pub on_bitrate: Arc<dyn Fn(Option<u32>) + Send + Sync>,
+    pub authorize_local:
+        Arc<dyn Fn() -> std::result::Result<bool, eagle_engine::SourceError> + Send + Sync>,
+}
+
+pub(crate) fn streamed_with_hooks(
+    store: Arc<Store>,
+    cache: Arc<Cache>,
+    net: Arc<Client>,
+    id: TrackId,
+    quality: Quality,
+    resolve: Arc<eagle_net::growing::Resolve>,
+    hooks: PlaybackHooks,
+) -> Result<Source> {
+    let PlaybackHooks {
+        on_bitrate,
+        authorize_local,
+    } = hooks;
     let notify = on_bitrate.clone();
     let resolve = Arc::new(move || {
         let location = resolve()?;
@@ -158,6 +191,9 @@ pub(crate) fn streamed_with_bitrate(
         if let Some((path, actual)) =
             cache_hit(&store, &cache, &id, quality).map_err(|e| e.to_string())?
         {
+            if !authorize_local()? {
+                return Err("Доступ к локальному аудио не подтверждён".into());
+            }
             on_bitrate(cache.map(&id, actual)?.and_then(|m| m.bitrate_kbps));
             let lease = if actual == Quality::High {
                 high
@@ -186,6 +222,9 @@ pub(crate) fn streamed_with_bitrate(
         }
         if download.is_none() {
             let mut initial = cache.map(&id, quality)?;
+            if initial.as_ref().is_some_and(|map| !map.ranges.is_empty()) && !authorize_local()? {
+                return Err("Доступ к локальному аудио не подтверждён".into());
+            }
             if initial.as_ref().is_some_and(|m| {
                 !m.etag
                     .as_deref()
@@ -528,6 +567,104 @@ mod http_tests {
         net::TcpListener,
         sync::atomic::{AtomicBool, Ordering},
     };
+    #[test]
+    fn local_cache_requires_authorization_before_reading() {
+        let root =
+            std::env::temp_dir().join(format!("eagle-cache-authority-{}", std::process::id()));
+        let store = Arc::new(Store::open(&root).unwrap());
+        let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT, &store).unwrap());
+        let id: TrackId = "yandex:1".parse().unwrap();
+        let mut map = RangeMap::new(1);
+        cache
+            .write_chunk(&store, &id, Quality::High, &mut map, 0, b"x")
+            .unwrap();
+        cache.pin(&store, &id, Quality::High, true).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let make = |allowed| {
+            streamed_with_hooks(
+                store.clone(),
+                cache.clone(),
+                Arc::new(Client::new().unwrap()),
+                id.clone(),
+                Quality::High,
+                Arc::new(|| panic!("cached audio must not resolve")),
+                PlaybackHooks {
+                    on_bitrate: Arc::new(|_| {}),
+                    authorize_local: {
+                        let calls = calls.clone();
+                        Arc::new(move || {
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            Ok(allowed)
+                        })
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let interrupt = || eagle_engine::Interrupt {
+            generation: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            expected: 0,
+            preload: false,
+            seeking: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(make(false).open_reader(interrupt()).is_err());
+        let source = make(true);
+        let mut reader = source.open_reader(interrupt()).unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"x");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        drop(reader);
+        drop(source);
+        drop(cache);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn incomplete_cached_ranges_require_authorization_before_resume() {
+        let root =
+            std::env::temp_dir().join(format!("eagle-partial-authority-{}", std::process::id()));
+        let store = Arc::new(Store::open(&root).unwrap());
+        let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT, &store).unwrap());
+        let id: TrackId = "yandex:1".parse().unwrap();
+        let mut map = RangeMap::new(2);
+        cache
+            .write_chunk(&store, &id, Quality::High, &mut map, 0, b"x")
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = streamed_with_hooks(
+            store.clone(),
+            cache.clone(),
+            Arc::new(Client::new().unwrap()),
+            id.clone(),
+            Quality::High,
+            Arc::new(|| panic!("unauthorized partial file must not resolve")),
+            PlaybackHooks {
+                on_bitrate: Arc::new(|_| {}),
+                authorize_local: {
+                    let calls = calls.clone();
+                    Arc::new(move || {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        Ok(false)
+                    })
+                },
+            },
+        )
+        .unwrap();
+        let result = source.open_reader(eagle_engine::Interrupt {
+            generation: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            expected: 0,
+            preload: false,
+            seeking: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(std::fs::read(cache.path(&id, Quality::High)).unwrap(), b"x");
+        drop(source);
+        drop(cache);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn offline_source_reports_selected_file_bitrate_without_resolving() {
         let root =

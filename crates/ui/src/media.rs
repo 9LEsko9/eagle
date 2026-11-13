@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use eagle_app::session::{Command, CommandSender, PlayerState, position_now};
+use eagle_app::session::{Command, CommandSender, Event, PlayerState, position_now};
 use eagle_engine::{PositionAnchor, State};
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
@@ -7,15 +7,121 @@ use souvlaki::{
 };
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+enum Update {
+    Init(Option<usize>),
+    State(Arc<PlayerState>),
+    Position(PositionAnchor),
+    Shutdown,
+}
+
+#[derive(Clone)]
+pub struct Handle(mpsc::Sender<Update>);
+
+impl Handle {
+    pub fn init(&self, hwnd: Option<usize>) {
+        let _ = self.0.send(Update::Init(hwnd));
+    }
+
+    pub fn event(&self, event: &Event) {
+        match event {
+            Event::Player(player) => {
+                let _ = self.0.send(Update::State(player.clone()));
+            }
+            Event::Position(position) => {
+                let _ = self.0.send(Update::Position(position.clone()));
+            }
+            Event::Snapshot(snapshot) => {
+                let _ = self.0.send(Update::State(snapshot.player.clone()));
+                if let Some(position) = &snapshot.position {
+                    let _ = self.0.send(Update::Position(position.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub struct Owner {
+    handle: Handle,
+    thread: JoinHandle<()>,
+}
+
+impl Owner {
+    pub fn start(
+        sender: CommandSender,
+        anchor: Arc<Mutex<Option<PositionAnchor>>>,
+        raise: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let (tx, rx) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("eg-media".into())
+            .spawn(move || {
+                let mut latest_state: Option<Arc<PlayerState>> = None;
+                let mut latest_position = None;
+                let mut initialization = Some((sender, anchor, raise));
+                while let Ok(update) = rx.recv() {
+                    match update {
+                        Update::Init(hwnd) => {
+                            #[cfg(target_os = "windows")]
+                            if hwnd.is_none() {
+                                log::warn!(
+                                    "system media controls unavailable: missing native window"
+                                );
+                                continue;
+                            }
+                            if let Some((sender, anchor, raise)) = initialization.take() {
+                                if let Err(error) =
+                                    init(sender, anchor, hwnd.map(|h| h as *mut _), raise)
+                                {
+                                    log::warn!("system media controls unavailable: {error:?}");
+                                }
+                                if let Some(player) = &latest_state {
+                                    state(player);
+                                }
+                                if let Some(position) = &latest_position {
+                                    position_update(position);
+                                }
+                            }
+                        }
+                        Update::State(player) => {
+                            state(&player);
+                            latest_state = Some(player);
+                        }
+                        Update::Position(position) => {
+                            position_update(&position);
+                            latest_position = Some(position);
+                        }
+                        Update::Shutdown => break,
+                    }
+                }
+                clear();
+            })?;
+        Ok(Self {
+            handle: Handle(tx),
+            thread,
+        })
+    }
+
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    pub fn shutdown(self) {
+        let _ = self.handle.0.send(Update::Shutdown);
+        let _ = self.thread.join();
+    }
+}
+
 thread_local! { static CONTROLS: RefCell<Option<MediaControls>> = const { RefCell::new(None) }; }
 pub fn init(
     sender: CommandSender,
     anchor: Arc<Mutex<Option<PositionAnchor>>>,
     hwnd: Option<*mut std::ffi::c_void>,
-    window: slint::Weak<crate::DesktopWindow>,
+    raise: impl Fn() + Send + 'static,
 ) -> Result<(), souvlaki::Error> {
     let mut controls = MediaControls::new(PlatformConfig {
         display_name: "eagle",
@@ -44,18 +150,7 @@ pub fn init(
                 return;
             }
             MediaControlEvent::Raise => {
-                use slint::ComponentHandle;
-                let window = window.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = window.upgrade() {
-                        use slint::winit_030::WinitWindowAccessor;
-                        let _ = ui.show();
-                        ui.window().with_winit_window(|w| {
-                            w.set_minimized(false);
-                            w.focus_window();
-                        });
-                    }
-                });
+                raise();
                 return;
             }
             MediaControlEvent::SetVolume(v) => Command::Volume(v as f32),
@@ -74,7 +169,7 @@ pub fn init(
     CONTROLS.with(|c| *c.borrow_mut() = Some(controls));
     Ok(())
 }
-pub fn state(state: &PlayerState) {
+fn state(state: &PlayerState) {
     CONTROLS.with(|c| {
         let mut c = c.borrow_mut();
         let Some(c) = c.as_mut() else {
@@ -110,7 +205,7 @@ pub fn state(state: &PlayerState) {
         let _ = c.set_volume(f64::from(state.volume));
     });
 }
-pub fn position(anchor: &PositionAnchor) {
+fn position_update(anchor: &PositionAnchor) {
     CONTROLS.with(|c| {
         if let Some(c) = c.borrow_mut().as_mut() {
             let progress = Some(MediaPosition(position_now(anchor, Instant::now())));

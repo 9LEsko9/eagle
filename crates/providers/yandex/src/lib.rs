@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Blocking Yandex Music adapter. Secrets never enter SQLite or error text.
+pub mod contracts;
+
 use eagle_core::*;
 use eagle_net::{Client, Priority, Request};
 use serde_json::Value;
@@ -31,6 +33,12 @@ fn net_error(e: eagle_net::Error) -> ProviderError {
         eagle_net::Error::Status(429) => ProviderError::RateLimited,
         eagle_net::Error::TooLarge => ProviderError::ApiChanged,
         _ => ProviderError::Network,
+    }
+}
+fn uncertain_write(error: ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Network | ProviderError::ApiChanged => ProviderError::Uncertain,
+        other => other,
     }
 }
 fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
@@ -355,14 +363,18 @@ impl Provider for Yandex {
         if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(ProviderError::ApiChanged);
         }
-        let value = self.api(
-            &format!("/users/{uid}/playlists/create"),
-            Some(vec![
-                ("title".into(), title.into()),
-                ("visibility".into(), "private".into()),
-            ]),
-        )?;
-        let playlist = self.parse_playlist(&value)?;
+        let value = self
+            .api(
+                &format!("/users/{uid}/playlists/create"),
+                Some(vec![
+                    ("title".into(), title.into()),
+                    ("visibility".into(), "private".into()),
+                ]),
+            )
+            .map_err(uncertain_write)?;
+        let playlist = self
+            .parse_playlist(&value)
+            .map_err(|_| ProviderError::Uncertain)?;
         if playlist
             .id
             .local()
@@ -371,7 +383,7 @@ impl Provider for Yandex {
                 owner != uid || kind.is_empty() || !kind.bytes().all(|byte| byte.is_ascii_digit())
             })
         {
-            return Err(ProviderError::ApiChanged);
+            return Err(ProviderError::Uncertain);
         }
         Ok(playlist)
     }
@@ -389,12 +401,14 @@ impl Provider for Yandex {
         if owner != uid {
             return Err(ProviderError::InvalidId);
         }
-        let result = self.api(
-            &format!("/users/{uid}/playlists/{kind}/delete"),
-            Some(Vec::new()),
-        )?;
+        let result = self
+            .api(
+                &format!("/users/{uid}/playlists/{kind}/delete"),
+                Some(Vec::new()),
+            )
+            .map_err(uncertain_write)?;
         if result.as_str() != Some("ok") {
-            return Err(ProviderError::ApiChanged);
+            return Err(ProviderError::Uncertain);
         }
         Ok(())
     }
@@ -735,11 +749,11 @@ mod tests {
         provider.delete_playlist(&playlist.id).unwrap();
         assert!(matches!(
             provider.delete_playlist(&playlist.id),
-            Err(ProviderError::ApiChanged)
+            Err(ProviderError::Uncertain)
         ));
         assert!(matches!(
             provider.create_playlist("Bad"),
-            Err(ProviderError::ApiChanged)
+            Err(ProviderError::Uncertain)
         ));
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("POST /users/42/playlists/create "));
@@ -751,6 +765,116 @@ mod tests {
                 .iter()
                 .all(|request| request.contains("OAuth fixture-token"))
         );
+    }
+    #[test]
+    fn experimental_playlist_edit_checks_revision_and_sends_positional_diff() {
+        use crate::contracts::{PlaylistEdit, PlaylistEditError, PlaylistTrack};
+        let (provider, server) = mock_api(vec![
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[]}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[]}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[]}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[]}}"#,
+        ]);
+        let snapshot = provider
+            .playlist_snapshot_unverified(&"yandex:42_3".parse().unwrap())
+            .unwrap();
+        let insert = || PlaylistEdit::Insert {
+            at: 0,
+            tracks: vec![PlaylistTrack {
+                track_id: "yandex:7".parse().unwrap(),
+                album_id: "yandex:8".parse().unwrap(),
+            }],
+        };
+        assert!(matches!(
+            provider.edit_playlist_unverified(&snapshot, insert()),
+            Err(PlaylistEditError::Conflict)
+        ));
+        let updated = provider
+            .edit_playlist_unverified(&snapshot, insert())
+            .unwrap();
+        assert_eq!(updated.revision, 2);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].starts_with("POST /users/42/playlists/3/change "));
+        assert!(requests[3].contains("revision=1"));
+        assert!(requests[3].contains("albumId"));
+    }
+    #[test]
+    fn experimental_playlist_edit_treats_bad_post_response_as_uncertain() {
+        use crate::contracts::{PlaylistEdit, PlaylistEditError, PlaylistTrack};
+        let snapshot_json = r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[]}}"#;
+        let (provider, server) =
+            mock_api(vec![snapshot_json, snapshot_json, r#"{"result":false}"#]);
+        let snapshot = provider
+            .playlist_snapshot_unverified(&"yandex:42_3".parse().unwrap())
+            .unwrap();
+        let edit = PlaylistEdit::Insert {
+            at: 0,
+            tracks: vec![PlaylistTrack {
+                track_id: "yandex:7".parse().unwrap(),
+                album_id: "yandex:8".parse().unwrap(),
+            }],
+        };
+        assert!(matches!(
+            provider.edit_playlist_unverified(&snapshot, edit),
+            Err(PlaylistEditError::Uncertain)
+        ));
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+    #[test]
+    fn playlist_lost_post_response_is_uncertain_without_retry() {
+        use std::{io::Read, net::TcpListener, time::Instant};
+        for delete in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut requests = 0;
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
+                            let mut buf = [0; 4096];
+                            let _ = stream.read(&mut buf);
+                            requests += 1;
+                            // Drop the connection without a response after receiving the POST.
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) => panic!("listener: {e}"),
+                    }
+                }
+                requests
+            });
+            let mut provider = Yandex::new(Arc::new(Client::new().unwrap()));
+            provider.api_base = Some(format!("http://{address}"));
+            *provider.token.write().unwrap() = Some(Token::new("fixture-token".into()));
+            *provider.uid.lock().unwrap() = Some("42".into());
+            let result = if delete {
+                provider.delete_playlist(&"yandex:42_3".parse().unwrap())
+            } else {
+                provider.create_playlist("fixture").map(|_| ())
+            };
+            assert!(matches!(result, Err(ProviderError::Uncertain)));
+            assert_eq!(server.join().unwrap(), 1);
+        }
+    }
+    #[test]
+    fn playlist_auth_failure_before_post_is_not_uncertain() {
+        let provider = Yandex::new(Arc::new(Client::new().unwrap()));
+        *provider.uid.lock().unwrap() = Some("42".into());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = provider.token.write().unwrap();
+            panic!("poison token lock");
+        }));
+        assert!(matches!(
+            provider.create_playlist("fixture"),
+            Err(ProviderError::Auth)
+        ));
     }
     #[test]
     fn playlist_cached_before_cover_field_still_loads() {

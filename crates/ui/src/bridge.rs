@@ -2,7 +2,7 @@
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
     Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    QueueItem, Route, Status, Storage, Theme, TrackItem, Ui, media,
+    QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
 };
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
@@ -33,6 +33,7 @@ fn image(cover: &eagle_palette::Cover) -> slint::Image {
 fn track_item(item: LibraryItem) -> TrackItem {
     let seconds = item.track.duration_ms / 1000;
     TrackItem {
+        blocked_reason: item.blocked_reason.clone().unwrap_or_default().into(),
         id: item.track.id.to_string().into(),
         album_id: item
             .track
@@ -53,7 +54,8 @@ fn track_item(item: LibraryItem) -> TrackItem {
             .into(),
         duration: format!("{}:{:02}", seconds / 60, seconds % 60).into(),
         liked: item.liked,
-        available: item.track.availability == eagle_app::session::Availability::Available,
+        available: item.blocked_reason.is_none()
+            && item.track.availability == eagle_app::session::Availability::Available,
     }
 }
 fn card_item(card: Card) -> CardItem {
@@ -385,6 +387,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .into_iter()
                 .map(|track| {
                     track_item(LibraryItem {
+                        blocked_reason: None,
                         track,
                         liked: false,
                     })
@@ -419,7 +422,6 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
         Event::PlaylistMutationFailed(message) => ui.global::<Ui>().set_error(message.into()),
         Event::Busy(busy) => ui.global::<Ui>().set_busy(busy),
         Event::Player(state) => {
-            media::state(&state);
             let player = ui.global::<Player>();
             player.set_status(match state.status {
                 State::Idle => Status::Idle,
@@ -496,7 +498,6 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             }
         }
         Event::Position(position) => {
-            media::position(&position);
             ui.global::<Player>().set_shown(
                 eagle_app::session::position_now(&position, Instant::now()).as_secs_f32(),
             );
@@ -544,12 +545,18 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             bridge.refresh_rows(ui);
         }
         Event::Storage {
+            staging_bytes,
+            other_bytes,
+            total_bytes,
             cache_bytes,
             saved_bytes,
             limit,
             folder,
         } => {
             let storage = ui.global::<Storage>();
+            storage.set_staging_usage(format!("{:.1} МиБ", staging_bytes as f64 / 1048576.).into());
+            storage.set_other_usage(format!("{:.1} МиБ", other_bytes as f64 / 1048576.).into());
+            storage.set_total_usage(format!("{:.1} МиБ", total_bytes as f64 / 1048576.).into());
             storage.set_cache_usage(format!("{:.1} МиБ", cache_bytes as f64 / 1048576.).into());
             storage.set_saved_usage(format!("{:.1} МиБ", saved_bytes as f64 / 1048576.).into());
             storage.set_folder(folder.to_string_lossy().as_ref().into());
@@ -561,12 +568,28 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 2
             });
         }
+        Event::StorageMoving(moving) => ui.global::<Storage>().set_moving(moving),
+        Event::NetworkPolicy(policy) => {
+            use eagle_app::session::NetworkStatus;
+            let storage = ui.global::<Storage>();
+            storage.set_allow_metered(policy.allow_metered);
+            storage.set_network_hint(
+                match policy.metered {
+                    NetworkStatus::Yes => {
+                        "Сеть лимитная; настройка влияет только на фоновые загрузки"
+                    }
+                    NetworkStatus::No => "Сеть без лимита",
+                    NetworkStatus::Unknown => "Лимит сети неизвестен; фоновые загрузки разрешены",
+                }
+                .into(),
+            );
+        }
         Event::Downloads(jobs) => {
             let items = jobs
                 .into_iter()
                 .map(|job| DownloadItem {
                     id: job.id.to_string().into(),
-                    track: job.track.to_string().into(),
+                    track: job.title.unwrap_or_else(|| job.track.to_string()).into(),
                     quality: match job.quality {
                         Quality::High => "320 кбит/с",
                         Quality::Standard => "До 192 кбит/с",
@@ -583,7 +606,10 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                     }
                     .into(),
                     error: job.error.unwrap_or_default().into(),
-                    pausable: matches!(job.state, DownloadState::Queued | DownloadState::Running),
+                    pausable: matches!(
+                        job.state,
+                        DownloadState::Queued | DownloadState::Running | DownloadState::AudioReady
+                    ),
                     retryable: matches!(
                         job.state,
                         DownloadState::Paused | DownloadState::Failed | DownloadState::Cancelled
@@ -712,6 +738,10 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         }
     });
     let tx = sender.clone();
+    actions.on_allow_metered(move |allow| {
+        let _ = tx.send(Command::AllowMetered(allow));
+    });
+    let tx = sender.clone();
     actions.on_cache_limit(move |choice| {
         let limit = match choice {
             0 => 512 * 1024 * 1024,
@@ -720,6 +750,12 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             _ => return,
         };
         let _ = tx.send(Command::CacheLimit(limit));
+    });
+    let tx = sender.clone();
+    actions.on_shift_queue(move |id, delta| {
+        if let Ok(id) = id.parse() {
+            let _ = tx.send(Command::ShiftQueue { id, delta });
+        }
     });
     let tx = sender.clone();
     actions.on_move_queue(move |id, to| {
@@ -1001,6 +1037,7 @@ pub(super) mod tests {
             card_window: Cell::new((0, 0)),
         };
         let item = |id: &str| LibraryItem {
+            blocked_reason: None,
             track: Arc::new(
                 serde_json::from_value(serde_json::json!({
                     "id": format!("yandex:{id}"), "title": id, "artists": [],
@@ -1091,6 +1128,9 @@ pub(super) mod tests {
         apply(
             &ui,
             Event::Storage {
+                staging_bytes: 0,
+                other_bytes: 0,
+                total_bytes: 3145728,
                 cache_bytes: 1048576,
                 saved_bytes: 2097152,
                 limit: 536870912,

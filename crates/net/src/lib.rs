@@ -2,6 +2,8 @@
 //! Two blocking workers, priority/FIFO scheduling and bounded HTTP responses.
 use eagle_core::{SignedUrl, Token};
 pub mod growing;
+pub mod policy;
+pub mod system_network;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::VecDeque,

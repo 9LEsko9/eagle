@@ -143,6 +143,8 @@ pub struct Account {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("результат операции неизвестен; обновите список перед повтором")]
+    Uncertain,
     #[error("войдите в аккаунт заново")]
     Auth,
     #[error("ошибка сети; проверьте подключение")]
@@ -167,7 +169,18 @@ pub struct Page<T> {
     pub items: Vec<T>,
     pub next: Option<String>,
 }
+/// Only explicit provider evidence changes offline rights.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccessCheck {
+    Unknown,
+    Confirmed,
+    Revoked,
+}
 pub trait Provider: Send + Sync {
+    fn check_access(&self, _id: &TrackId) -> Result<AccessCheck, ProviderError> {
+        Ok(AccessCheck::Unknown)
+    }
+
     fn name(&self) -> &str;
     fn login(&self, token: Token) -> Result<Account, ProviderError>;
     fn account(&self) -> Result<Account, ProviderError>;

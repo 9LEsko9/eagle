@@ -85,6 +85,7 @@ export component CollectionScreen inherits VerticalLayout {
     private property <bool> show-album: root.list-width >= 700px && Ui.route != Route.album;
     spacing: Layout.compact ? 20px : 28px;
     HorizontalLayout {
+        vertical-stretch: 0;
         spacing: 24px;
         if root.has-cover : VerticalLayout {
             alignment: end;
@@ -223,12 +224,14 @@ export component CollectionScreen inherits VerticalLayout {
         menu := TrackMenu {
             vertical-stretch: 1;
             list := ListView {
+                private property <length> row-pitch: TrackColumns.row-height;
+                changed row-pitch => { Actions.visible-rows(floor(-self.viewport-y / self.row-pitch), ceil(self.visible-height / self.row-pitch) + 1); }
                 width: parent.width;
                 height: parent.height;
                 // Rows report the on-screen range so artwork loads and unloads with scrolling.
-                init => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
-                changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
-                changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / 54px), ceil(self.visible-height / 54px) + 1); }
+                init => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
                 for item[index] in Library.tracks : TrackRowView {
                     item: item;
                     number: index + 1;
@@ -238,4 +241,6 @@ export component CollectionScreen inherits VerticalLayout {
             }
         }
     }
+    if !root.grid && Library.tracks.length == 0 : Rectangle { vertical-stretch: 1; }
+
 }

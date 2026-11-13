@@ -16,6 +16,8 @@ pub struct Preferences {
     pub text_scale: f32,
     pub tint: u8,
     pub list_covers: bool,
+    pub compact: bool,
+    pub close_exits: bool,
     pub download_quality: u8,
 }
 impl Default for Preferences {
@@ -31,6 +33,8 @@ impl Default for Preferences {
             text_scale: 1.,
             tint: 1,
             list_covers: true,
+            compact: false,
+            close_exits: false,
             download_quality: 1,
         }
     }
@@ -58,6 +62,8 @@ impl Preferences {
         ui.global::<Theme>().set_tint(i32::from(self.tint.min(2)));
         ui.global::<Ui>().set_panel_open(self.panel_open);
         ui.global::<Ui>().set_list_covers(self.list_covers);
+        ui.global::<Ui>().set_compact(self.compact);
+        ui.global::<Ui>().set_close_exits(self.close_exits);
         ui.global::<Storage>()
             .set_quality(i32::from(self.download_quality.min(1)));
         ui.global::<Motion>().set_reduced(self.reduced);
@@ -87,6 +93,8 @@ impl Preferences {
             text_scale: ui.global::<Type>().get_scale(),
             tint: ui.global::<Theme>().get_tint() as u8,
             list_covers: ui.global::<Ui>().get_list_covers(),
+            compact: ui.global::<Ui>().get_compact(),
+            close_exits: ui.global::<Ui>().get_close_exits(),
             download_quality: ui.global::<Storage>().get_quality() as u8,
         }
     }

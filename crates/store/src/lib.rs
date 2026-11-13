@@ -27,6 +27,13 @@ pub enum Error {
     #[error("недостаточно места в незакреплённом кэше")]
     CacheFull,
 }
+mod access;
+mod usage;
+pub use usage::StorageUsage;
+pub mod relocation;
+pub use access::{AccessRecord, AccessState};
+mod outbox;
+pub use outbox::{OutboxState, PlayEvent};
 mod downloads;
 mod history;
 pub use downloads::{DownloadJob, DownloadState};
@@ -50,7 +57,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 4 {
+    if version > 7 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -94,6 +101,22 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
             CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT NOT NULL,played_at INTEGER NOT NULL,json TEXT NOT NULL);
             CREATE INDEX history_account ON history(account,id DESC);
             PRAGMA user_version=4; COMMIT;")?;
+    }
+    if version < 5 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE access(account TEXT NOT NULL,track TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('unknown','confirmed','revoked')),reason TEXT,last_checked INTEGER NOT NULL,PRIMARY KEY(account,track));
+            PRAGMA user_version=5; COMMIT;")?;
+    }
+    if version < 6 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE play_outbox(id TEXT PRIMARY KEY,account TEXT NOT NULL,track TEXT NOT NULL,played_at INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','confirmed')));
+            PRAGMA user_version=6; COMMIT;")?;
+    }
+    if version < 7 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE offline_owners(account TEXT NOT NULL,track TEXT NOT NULL,PRIMARY KEY(account,track));
+            INSERT INTO offline_owners SELECT DISTINCT account,track FROM downloads WHERE state IN ('saved','audio_ready') AND account != '';
+            PRAGMA user_version=7; COMMIT;")?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -531,7 +554,7 @@ impl Cache {
         let size = i64::try_from(map.ranges.iter().map(|(a, b)| b - a).sum::<u64>())
             .map_err(|_| Error::Corrupt)?;
         let pinned = map.pinned;
-        store.write(move|c|{c.execute("INSERT INTO cache VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id,quality) DO UPDATE SET size=excluded.size,pinned=excluded.pinned",params![id,q,path,size,now(),pinned])?;Ok(())})
+        store.write(move|c|{c.execute("INSERT INTO cache VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id,quality) DO UPDATE SET path=excluded.path,size=excluded.size,pinned=excluded.pinned",params![id,q,path,size,now(),pinned])?;Ok(())})
     }
     /// Publish ranges already written and synced by the streaming downloader.
     pub fn publish(

@@ -2,7 +2,7 @@
 import { Theme, ThemeMode, Type, Motion, Layout } from "../globals/theme.slint";
 import { Ui, Actions, Route, Player, Status, Storage } from "../globals/bridge.slint";
 import { TextButton } from "../components/button.slint";
-import { Segmented, Switch } from "../components/controls.slint";
+import { Segmented, Switch, Field } from "../components/controls.slint";
 import { Artwork } from "../components/cover.slint";
 import { PlayPause } from "../components/play-pause.slint";
 
@@ -114,6 +114,8 @@ component AppearancePreview inherits Rectangle {
 
 export component SettingsScreen inherits Flickable {
     private property <string> remove-id;
+    private property <string> move-destination;
+    private property <bool> confirm-move;
     // Derived from the window (not this element) so the decision cannot feed back into layout.
     private property <length> content-width: Layout.width
         - (Layout.compact ? 0px : 208px)
@@ -183,18 +185,39 @@ export component SettingsScreen inherits Flickable {
                         hint: @tr("Отключает анимации и перетекание цветов");
                         Switch { label: @tr("Уменьшить движение"); checked: Motion.reduced; toggled => { Motion.reduced = !Motion.reduced; Actions.preferences-changed(); } }
                     }
+                    SettingRow {
+                        title: @tr("Компактные строки");
+                        hint: @tr("Больше треков на экране");
+                        Switch { label: @tr("Компактные строки"); checked: Ui.compact; toggled => { Ui.compact = !Ui.compact; Actions.preferences-changed(); } }
+                    }
                     SectionTitle { text: @tr("Хранилище"); }
+                    SettingRow {
+                        title: @tr("Загрузки в лимитной сети");
+                        hint: Storage.network-hint;
+                        Switch { label: @tr("Разрешать загрузки в лимитной сети"); checked: Storage.allow-metered; toggled => { Actions.allow-metered(!Storage.allow-metered); } }
+                    }
                     SettingRow {
                         title: @tr("Аудиофайлы");
                         hint: @tr("Кэш: ") + Storage.cache-usage + @tr(" · Сохранённое: ") + Storage.saved-usage;
                     }
+                    SettingRow { title: @tr("Временные загрузки"); hint: Storage.staging-usage; }
+                    SettingRow { title: @tr("Обложки, метаданные и прочие файлы"); hint: Storage.other-usage; }
+                    SettingRow { title: @tr("Всего в управляемой папке"); hint: Storage.total-usage; }
                     SettingRow {
                         title: @tr("Лимит кэша");
                         hint: @tr("Сохранённое не входит в лимит. Новый лимит применяется при записи в кэш.");
                         Segmented { options: [@tr("512 МиБ"), @tr("2 ГиБ"), @tr("8 ГиБ")]; selected: Storage.cache-limit; picked(i) => { Actions.cache-limit(i); } }
                     }
-                    SettingRow { title: @tr("Папка аудио"); hint: Storage.folder; }
-                    SettingRow { title: @tr("Лимитное подключение: неизвестно"); hint: @tr("Системный статус пока недоступен. Загрузки разрешены; используйте паузу, чтобы ограничить трафик."); }
+                    SettingRow { title: @tr("Управляемая папка"); hint: Storage.folder; }
+                    SettingRow {
+                        title: @tr("Перенести хранилище");
+                        hint: Storage.moving ? @tr("Перенос: новые записи приостановлены. Исходные файлы сохраняются.") : @tr("Выберите существующую пустую папку. Музыка остановится; файлы проверяются перед переключением.");
+                        VerticalLayout {
+                            spacing: 8px;
+                            Field { placeholder: @tr("Полный путь к пустой папке"); text <=> root.move-destination; }
+                            TextButton { text: root.confirm-move ? @tr("Подтвердить перенос") : @tr("Перенести"); enabled: !Storage.moving && root.move-destination != ""; clicked => { if root.confirm-move { Actions.move-storage(root.move-destination); root.confirm-move = false; } else { root.confirm-move = true; } } }
+                        }
+                    }
                     SectionTitle { text: @tr("Сохранение офлайн"); }
                     SettingRow {
                         title: @tr("Качество новых загрузок");
@@ -224,6 +247,17 @@ export component SettingsScreen inherits Flickable {
                             if job.retryable : TextButton { text: @tr("Продолжить"); clicked => { Actions.download-control(job.id, 1); } }
                             if job.cancellable : TextButton { text: @tr("Отменить"); clicked => { Actions.download-control(job.id, 2); } }
                         }
+                    }
+                    SectionTitle { text: @tr("Система"); }
+                    SettingRow {
+                        title: @tr("Завершать при закрытии окна");
+                        hint: @tr("По умолчанию музыка и загрузки продолжаются в фоне");
+                        Switch { label: @tr("Завершать при закрытии"); checked: Ui.close-exits; toggled => { Ui.close-exits = !Ui.close-exits; Actions.preferences-changed(); } }
+                    }
+                    SettingRow {
+                        title: @tr("Запускать при входе в систему");
+                        hint: @tr("Системная регистрация автозапуска");
+                        Switch { label: @tr("Автозапуск"); checked: Ui.autostart; toggled => { Actions.autostart(!Ui.autostart); } }
                     }
                     SectionTitle { text: @tr("Аккаунты"); }
                     SettingRow {

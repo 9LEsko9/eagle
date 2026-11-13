@@ -6,10 +6,10 @@ use eagle_net::{
     Client, Priority,
     growing::{Download, Location, Snapshot},
 };
-use eagle_store::{Cache, DownloadJob, RangeMap, Store};
+use eagle_store::{Cache, DownloadJob, DownloadState, RangeMap, Store};
 use std::{
     fs::{self, File},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -23,6 +23,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 enum Request {
     Account(String, mpsc::SyncSender<()>),
     Wake,
+    NetworkPolicy(eagle_net::policy::NetworkPolicy),
+    SystemNetwork(eagle_net::policy::NetworkPolicy),
     Done(i64, i64, bool),
     Shutdown,
 }
@@ -64,6 +66,20 @@ impl Downloads {
             .name("eg-downloads".into())
             .spawn(move || {
                 let mut account = String::new();
+                let allow_metered = store.setting("allow_metered").ok().flatten().as_deref() == Some("true");
+                let fixture = cfg!(test) || provider.name() == "fixture";
+                let mut network_policy = if fixture {
+                    eagle_net::policy::NetworkPolicy { allow_metered, ..Default::default() }
+                } else {
+                    eagle_net::system_network::query(allow_metered)
+                };
+                #[cfg(not(test))]
+                let _monitor = (!fixture).then(|| {
+                    let tx = replies.clone();
+                    eagle_net::system_network::NetworkMonitor::start(move |policy| {
+                        let _ = tx.send(Request::SystemNetwork(policy));
+                    })
+                });
                 let mut active: Vec<Active> = Vec::new();
                 for request in rx {
                     match request {
@@ -92,14 +108,45 @@ impl Downloads {
                             {
                                 let a = active.remove(index);
                                 let _ = a.thread.join();
-                                if let Err(error) = if success {
+                                if let Err(error) = if success
+                                    && a.job.state == DownloadState::AudioReady
+                                {
                                     store.finish_saved_download(&a.job)
+                                } else if success {
+                                    Ok(true)
                                 } else if a.attempt.unsupported_quality.load(Ordering::Acquire) {
                                     store.reject_download_quality(&a.job)
                                 } else {
                                     store.finish_download(&a.job, false)
                                 } {
                                     emit(Event::Error(error.to_string()));
+                                }
+                            }
+                        }
+                        Request::NetworkPolicy(policy) => {
+                            network_policy.allow_metered = policy.allow_metered;
+                            emit(Event::NetworkPolicy(network_policy));
+                            if !network_policy.allows_background() {
+                                for a in &active {
+                                    if let Err(error) = store.control_download(
+                                        &account,
+                                        a.job.id,
+                                        DownloadState::Queued,
+                                    ) {
+                                        emit(Event::Error(error.to_string()));
+                                    }
+                                    a.attempt.cancel();
+                                }
+                            }
+                        }
+                        Request::SystemNetwork(policy) => {
+                            network_policy.online = policy.online;
+                            network_policy.metered = policy.metered;
+                            emit(Event::NetworkPolicy(network_policy));
+                            if !network_policy.allows_background() {
+                                for a in &active {
+                                    if let Err(error) = store.control_download(&account, a.job.id, DownloadState::Queued) { emit(Event::Error(error.to_string())); }
+                                    a.attempt.cancel();
                                 }
                             }
                         }
@@ -125,7 +172,8 @@ impl Downloads {
                         }
                     }
                     // Keep cancelled attempts in the two physical slots until their threads exit.
-                    while active.len() < 2
+                    while network_policy.allows_background()
+                        && active.len() < 2
                         && !active
                             .iter()
                             .any(|a| a.attempt.cancelled.load(Ordering::Acquire))
@@ -152,16 +200,29 @@ impl Downloads {
                         match thread::Builder::new()
                             .name("eg-save-audio".into())
                             .spawn(move || {
-                                let success = audio(
-                                    &root,
-                                    &task_store,
-                                    &cache,
-                                    net.clone(),
-                                    provider.clone(),
-                                    &task,
-                                    &cancel,
-                                )
-                                .and_then(|()| {
+                                if task.state != DownloadState::AudioReady {
+                                    let result = audio(
+                                        &root,
+                                        &task_store,
+                                        &cache,
+                                        net.clone(),
+                                        provider.clone(),
+                                        &task,
+                                        &cancel,
+                                    );
+                                    if let Err(error) = &result {
+                                        log::warn!(provider = task.track.provider(), track_id = task.track.local(), kind = download_error_kind(error.as_ref()); "audio download failed");
+                                    }
+                                    let success = result.is_ok()
+                                        && !cancel.cancelled.load(Ordering::Acquire)
+                                        && matches!(
+                                            task_store.finish_download(&task, true),
+                                            Ok(true)
+                                        );
+                                    let _ = tx.send(Request::Done(task.id, task.revision, success));
+                                    return;
+                                }
+                                let success = (|| -> Result<()> {
                                     if cancel.cancelled.load(Ordering::Acquire) {
                                         return Err("загрузка отменена".into());
                                     }
@@ -180,7 +241,7 @@ impl Downloads {
                                         return Err("неверные метаданные трека".into());
                                     }
                                     crate::music::metadata(&task_store, &net, &root, &track)
-                                })
+                                })()
                                 .is_ok()
                                     && !cancel.cancelled.load(Ordering::Acquire);
                                 let _ = tx.send(Request::Done(task.id, task.revision, success));
@@ -213,6 +274,9 @@ impl Downloads {
             let _ = wait.recv();
         }
     }
+    pub(crate) fn network_policy(&self, policy: eagle_net::policy::NetworkPolicy) {
+        let _ = self.tx.send(Request::NetworkPolicy(policy));
+    }
     pub(crate) fn wake(&self) {
         let _ = self.tx.send(Request::Wake);
     }
@@ -244,6 +308,50 @@ fn save_map(path: &Path, map: &RangeMap) -> Result<()> {
         File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+fn download_error_kind(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    if let Some(error) = error.downcast_ref::<io::Error>() {
+        return match error.kind() {
+            io::ErrorKind::Interrupted => "cancelled",
+            io::ErrorKind::UnexpectedEof => "incomplete_audio",
+            io::ErrorKind::PermissionDenied => "permission_denied",
+            io::ErrorKind::StorageFull => "storage_full",
+            io::ErrorKind::Other => {
+                let message = error.to_string();
+                match message.as_str() {
+                    "ошибка сети или таймаут" => "network",
+                    "ETag или размер файла изменился; повторите воспроизведение" => {
+                        "resource_changed"
+                    }
+                    "неверный диапазон ответа" | "нет Content-Range" => {
+                        "invalid_range"
+                    }
+                    "не удалось сохранить ход загрузки" | "не удалось сохранить аудиокэш" => {
+                        "cache_write"
+                    }
+                    text if text.starts_with("HTTP ")
+                        && text[5..].bytes().all(|b| b.is_ascii_digit()) =>
+                    {
+                        "http_status"
+                    }
+                    _ => "io_other",
+                }
+            }
+            _ => "io",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<eagle_net::Error>() {
+        return match error {
+            eagle_net::Error::Changed => "resource_changed",
+            eagle_net::Error::Status(_) => "http_status",
+            eagle_net::Error::Network => "network",
+            eagle_net::Error::TooLarge => "too_large",
+            eagle_net::Error::Stopped => "network_stopped",
+            eagle_net::Error::QueueFull => "network_queue_full",
+            eagle_net::Error::Source(_) => "provider",
+        };
+    }
+    "other"
 }
 fn stream_error(error: eagle_core::ProviderError, unsupported: &AtomicBool) -> eagle_net::Error {
     if matches!(error, eagle_core::ProviderError::UnsupportedQuality) {
@@ -327,6 +435,12 @@ fn audio_with_resolver(
     }
     first
 }
+// Interrupted means a cancelled GrowingReader, not a transient read to retry.
+fn drain_download(reader: &mut impl Read) -> io::Result<()> {
+    let mut buffer = [0; 64 * 1024];
+    while reader.read(&mut buffer)? != 0 {}
+    Ok(())
+}
 fn staged_audio(
     root: &Path,
     store: &Store,
@@ -342,7 +456,15 @@ fn staged_audio(
     {
         let _lease = cache.lease(&job.track, job.quality);
         if cache.lookup(store, &job.track, job.quality)?.is_some() {
+            let track = job.track.to_string();
+            if store.requires_shared_authorization(&job.account, &track)? {
+                resolve()?;
+                if attempt.cancelled.load(Ordering::Acquire) {
+                    return Err("загрузка отменена".into());
+                }
+            }
             cache.pin(store, &job.track, job.quality, true)?;
+            store.record_audio_owner(&job.account, &track)?;
             return Ok(());
         }
     }
@@ -365,7 +487,15 @@ fn staged_audio(
                     .is_some_and(eagle_net::growing::strong_etag)
         });
     if let Some(map) = initial.as_ref().filter(|m| m.complete()) {
+        let track = job.track.to_string();
+        if store.requires_shared_authorization(&job.account, &track)? {
+            resolve()?;
+            if attempt.cancelled.load(Ordering::Acquire) {
+                return Err("загрузка отменена".into());
+            }
+        }
         cache.install_pinned(store, &job.track, job.quality, &path, map.clone())?;
+        store.record_audio_owner(&job.account, &track)?;
         return Ok(());
     }
     let initial = initial.map_or_else(Snapshot::default, |m| Snapshot {
@@ -406,7 +536,7 @@ fn staged_audio(
         }
     }
     let mut reader = download.reader(Arc::new(AtomicU32::new(0)), 0, Priority::Background)?;
-    io::copy(&mut reader, &mut io::sink())?;
+    drain_download(&mut reader)?;
     if attempt.cancelled.load(Ordering::Acquire) {
         return Err("загрузка отменена".into());
     }
@@ -431,6 +561,7 @@ fn staged_audio(
             pinned: false,
         },
     )?;
+    store.record_audio_owner(&job.account, &job.track.to_string())?;
     Ok(())
 }
 
@@ -439,7 +570,7 @@ mod tests {
     use super::*;
     use eagle_core::{Quality, SignedUrl};
     use eagle_store::DownloadState;
-    use std::{io::Read, net::TcpListener, sync::atomic::AtomicUsize, time::Duration};
+    use std::{net::TcpListener, sync::atomic::AtomicUsize, time::Duration};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     fn fixture() -> (PathBuf, Store, Cache, DownloadJob) {
         let root = std::env::temp_dir().join(format!(
@@ -454,6 +585,39 @@ mod tests {
             .unwrap();
         let job = store.claim_download("a").unwrap().unwrap();
         (root, store, cache, job)
+    }
+    #[test]
+    fn cancelled_growing_reader_does_not_retry_interrupted_forever() {
+        let root = std::env::temp_dir().join(format!(
+            "eg-cancel-reader-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let download = Download::start(
+            &root.join("audio"),
+            Arc::new(Client::new().unwrap()),
+            Arc::new(|| Err(eagle_net::Error::Network)),
+            Snapshot::default(),
+            Priority::Background,
+            None,
+        )
+        .unwrap();
+        let mut reader = download
+            .reader(Arc::new(AtomicU32::new(0)), 0, Priority::Background)
+            .unwrap();
+        download.cancel();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = drain_download(&mut reader);
+            drop(download);
+            let _ = tx.send(result.map_err(|error| error.kind()));
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(io::ErrorKind::Interrupted)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn only_explicit_quality_failure_marks_the_attempt() {
@@ -471,12 +635,73 @@ mod tests {
         assert!(flag.load(Ordering::Acquire));
     }
     #[test]
+    fn cached_audio_requires_explicit_authorization_for_another_account() {
+        let (root, store, cache, job) = fixture();
+        cache
+            .write_chunk(
+                &store,
+                &job.track,
+                job.quality,
+                &mut RangeMap::new(1),
+                0,
+                b"a",
+            )
+            .unwrap();
+        store
+            .record_audio_owner("a", &job.track.to_string())
+            .unwrap();
+        store
+            .enqueue_download("b", &job.track, job.quality)
+            .unwrap();
+        let b = store.claim_download("b").unwrap().unwrap();
+        let net = Arc::new(Client::new().unwrap());
+        assert!(
+            audio_with_resolver(
+                &root,
+                &store,
+                &cache,
+                net.clone(),
+                &b,
+                &Attempt::default(),
+                Arc::new(|| Err(eagle_net::Error::Network))
+            )
+            .is_err()
+        );
+        assert!(!store.owns_audio("b", &job.track.to_string()).unwrap());
+        assert!(
+            !store
+                .allows_local_playback("b", &job.track.to_string())
+                .unwrap()
+        );
+        audio_with_resolver(
+            &root,
+            &store,
+            &cache,
+            net,
+            &b,
+            &Attempt::default(),
+            Arc::new(|| Ok(SignedUrl::new("https://example.invalid/audio".into()).into())),
+        )
+        .unwrap();
+        assert!(store.owns_audio("b", &job.track.to_string()).unwrap());
+        assert!(
+            store
+                .allows_local_playback("b", &job.track.to_string())
+                .unwrap()
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn complete_cache_pins_in_place_without_resolving_or_copying() {
         let (root, store, cache, job) = fixture();
         // A complete unpinned file may be larger than the current limit after a settings change.
         let mut map = RangeMap::new(1);
         cache
             .write_chunk(&store, &job.track, job.quality, &mut map, 0, b"a")
+            .unwrap();
+        store
+            .record_audio_owner("a", &job.track.to_string())
             .unwrap();
         let before = fs::metadata(cache.path(&job.track, job.quality))
             .unwrap()
@@ -584,7 +809,7 @@ mod tests {
             Arc::new(Client::new().unwrap()),
             &job,
             &Attempt::default(),
-            Arc::new(|| panic!("complete staging must not request again")),
+            Arc::new(|| Ok(SignedUrl::new("https://example.invalid/audio".into()).into())),
         )
         .unwrap();
         assert_eq!(
@@ -672,6 +897,95 @@ mod tests {
         }
     }
     #[test]
+    fn network_policy_defers_background_work_until_allowed() {
+        use eagle_net::policy::{NetworkPolicy, NetworkStatus};
+        let (root, store, cache, job) = fixture();
+        cache
+            .write_chunk(
+                &store,
+                &job.track,
+                job.quality,
+                &mut RangeMap::new(1),
+                0,
+                b"x",
+            )
+            .unwrap();
+        let track = eagle_core::Track {
+            id: job.track.clone(),
+            title: "fixture".into(),
+            artists: vec![],
+            album: None,
+            album_title: None,
+            duration_ms: 1000,
+            cover: None,
+            availability: eagle_core::Availability::Available,
+        };
+        store.put_track(&track).unwrap();
+        store
+            .record_audio_owner("a", &job.track.to_string())
+            .unwrap();
+        let store = Arc::new(store);
+        let net = Arc::new(Client::new().unwrap());
+        let (tx, rx) = mpsc::channel();
+        let service = Downloads::start(
+            root.clone(),
+            store.clone(),
+            Arc::new(cache),
+            net.clone(),
+            Arc::new(eagle_yandex::Yandex::new(net)),
+            Arc::new(move |event| {
+                let _ = tx.send(event);
+            }),
+        )
+        .unwrap();
+        service.network_policy(NetworkPolicy {
+            allow_metered: true,
+            ..NetworkPolicy::default()
+        });
+        service
+            .tx
+            .send(Request::SystemNetwork(NetworkPolicy {
+                metered: NetworkStatus::Yes,
+                ..NetworkPolicy::default()
+            }))
+            .unwrap();
+        loop {
+            if let Event::NetworkPolicy(policy) = rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                && policy.metered == NetworkStatus::Yes
+            {
+                assert!(policy.allow_metered);
+                break;
+            }
+        }
+        service.network_policy(NetworkPolicy::default());
+        service
+            .tx
+            .send(Request::SystemNetwork(NetworkPolicy {
+                metered: NetworkStatus::Yes,
+                ..NetworkPolicy::default()
+            }))
+            .unwrap();
+        service.account("a".into());
+        assert_eq!(
+            store.downloads("a").unwrap()[0].state,
+            DownloadState::Queued
+        );
+        service
+            .tx
+            .send(Request::SystemNetwork(NetworkPolicy::default()))
+            .unwrap();
+        loop {
+            if let Event::Downloads(jobs) = rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                && jobs.iter().any(|j| j.state == DownloadState::Saved)
+            {
+                break;
+            }
+        }
+        drop(service);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn coordinator_recovers_running_jobs_and_only_processes_current_account() {
         let (root, store, cache, job) = fixture();
         cache
@@ -695,6 +1009,9 @@ mod tests {
             availability: eagle_core::Availability::Available,
         };
         store.put_track(&track).unwrap();
+        store
+            .record_audio_owner("a", &job.track.to_string())
+            .unwrap();
         store
             .enqueue_download("b", &job.track, job.quality)
             .unwrap();

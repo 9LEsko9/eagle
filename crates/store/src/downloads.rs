@@ -45,6 +45,7 @@ pub struct DownloadJob {
     pub id: i64,
     pub account: String,
     pub track: TrackId,
+    pub title: Option<String>,
     pub quality: Quality,
     pub state: DownloadState,
     /// Invalidates an in-flight result after a user action or process restart.
@@ -61,6 +62,10 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
         id: row.get(0)?,
         account: row.get(1)?,
         track: track.parse().map_err(|_| invalid())?,
+        title: row
+            .get::<_, Option<String>>(7)?
+            .and_then(|json| serde_json::from_str::<eagle_core::Track>(&json).ok())
+            .map(|track| track.title),
         quality: match quality.as_str() {
             "standard" => Quality::Standard,
             "high" => Quality::High,
@@ -74,7 +79,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
 impl Store {
     pub fn downloads(&self, account: &str) -> Result<Vec<DownloadJob>, Error> {
         let c = self.read()?;
-        let mut q = c.prepare("SELECT id,account,track,quality,state,revision,error FROM downloads WHERE account=?1 ORDER BY id")?;
+        let mut q = c.prepare("SELECT id,account,track,quality,state,revision,error,(SELECT json FROM tracks WHERE tracks.id=downloads.track) FROM downloads WHERE account=?1 ORDER BY id")?;
         Ok(q.query_map([account], row)?.collect::<Result<_, _>>()?)
     }
     /// Idempotent for active and completed jobs. Explicit retry resumes failed jobs.
@@ -101,7 +106,7 @@ impl Store {
     pub fn recover_downloads(&self, account: &str) -> Result<(), Error> {
         let account = account.to_owned();
         self.write(move |c| {
-            c.execute("UPDATE downloads SET state='queued',revision=revision+1,error=NULL WHERE account=?1 AND state IN ('running','audio_ready')", [account])?;
+            c.execute("UPDATE downloads SET state='queued',revision=revision+1,error=NULL WHERE account=?1 AND state='running'", [account])?;
             Ok(())
         })
     }
@@ -135,10 +140,11 @@ impl Store {
             if running >= 2 {
                 return Ok(None);
             }
-            let id: Option<i64> = tx.query_row("SELECT id FROM downloads WHERE account=?1 AND state='queued' ORDER BY id LIMIT 1", [&account], |r| r.get(0)).optional()?;
-            let Some(id) = id else { return Ok(None) };
+            let claimed: Option<(i64, String)> = tx.query_row("SELECT id,state FROM downloads WHERE account=?1 AND state IN ('queued','audio_ready') ORDER BY CASE state WHEN 'audio_ready' THEN 0 ELSE 1 END,id LIMIT 1", [&account], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((id, previous_state)) = claimed else { return Ok(None) };
             tx.execute("UPDATE downloads SET state='running',revision=revision+1,error=NULL WHERE id=?1", [id])?;
-            let job = tx.query_row("SELECT id,account,track,quality,state,revision,error FROM downloads WHERE id=?1", [id], row)?;
+            let mut job = tx.query_row("SELECT id,account,track,quality,state,revision,error,(SELECT json FROM tracks WHERE tracks.id=downloads.track) FROM downloads WHERE id=?1", [id], row)?;
+            if previous_state == "audio_ready" { job.state = DownloadState::AudioReady; }
             tx.commit()?;
             Ok(Some(job))
         })
@@ -176,7 +182,7 @@ impl Store {
         let account = account.to_owned();
         self.write(move |c| {
             let tx = c.transaction()?;
-            let job = tx.query_row("SELECT id,account,track,quality,state,revision,error FROM downloads WHERE id=?1 AND account=?2 AND state='saved'", params![id, account], row).optional()?;
+            let job = tx.query_row("SELECT id,account,track,quality,state,revision,error,(SELECT json FROM tracks WHERE tracks.id=downloads.track) FROM downloads WHERE id=?1 AND account=?2 AND state='saved'", params![id, account], row).optional()?;
             let Some(job) = job else { return Ok(None) };
             tx.execute("UPDATE downloads SET state='cancelled',revision=revision+1,error=NULL WHERE id=?1 AND account=?2", params![id, account])?;
             let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM downloads WHERE track=?1 AND quality=?2 AND state IN ('saved','audio_ready','running','queued','paused'))", params![job.track.to_string(), job.quality.key()], |row| row.get(0))?;
@@ -200,7 +206,7 @@ impl Store {
         let account = account.to_owned();
         self.write(move |c| {
             // Completed audio is never undone by a late pause/cancel click.
-            Ok(c.execute("UPDATE downloads SET state=?1,revision=revision+1,error=NULL WHERE id=?2 AND account=?3 AND state IN ('queued','running','paused','cancelled','failed')", params![state.key(), id, account])? == 1)
+            Ok(c.execute("UPDATE downloads SET state=?1,revision=revision+1,error=NULL WHERE id=?2 AND account=?3 AND state IN ('queued','running','audio_ready','paused','cancelled','failed')", params![state.key(), id, account])? == 1)
         })
     }
 }
@@ -209,6 +215,26 @@ impl Store {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    #[test]
+    fn audio_ready_survives_restart_and_is_claimed_before_queued_audio() {
+        let root = std::env::temp_dir().join(format!("eg-ready-priority-{}", std::process::id()));
+        let store = Store::open(&root).unwrap();
+        let first = "yandex:1".parse().unwrap();
+        let second = "yandex:2".parse().unwrap();
+        store.enqueue_download("a", &first, Quality::High).unwrap();
+        let job = store.claim_download("a").unwrap().unwrap();
+        assert!(store.finish_download(&job, true).unwrap());
+        store.enqueue_download("a", &second, Quality::High).unwrap();
+        drop(store);
+        let store = Store::open(&root).unwrap();
+        store.recover_downloads("a").unwrap();
+        let claimed = store.claim_download("a").unwrap().unwrap();
+        assert_eq!(claimed.track, first);
+        assert_eq!(claimed.state, DownloadState::AudioReady);
+        assert!(store.finish_saved_download(&claimed).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn collection_enqueue_is_atomic_idempotent_and_account_scoped() {
         let root = std::env::temp_dir().join(format!("eg-batch-downloads-{}", std::process::id()));
@@ -279,7 +305,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("eg-downloads-v2-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let c = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
-        c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE playback(account TEXT PRIMARY KEY,json TEXT NOT NULL); INSERT INTO settings VALUES('existing','kept'); PRAGMA user_version=2;").unwrap();
+        c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE tracks(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE playback(account TEXT PRIMARY KEY,json TEXT NOT NULL); INSERT INTO settings VALUES('existing','kept'); PRAGMA user_version=2;").unwrap();
         let state = crate::PlaybackState {
             shuffle: true,
             ..Default::default()
@@ -299,7 +325,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -597,6 +597,16 @@ fn run(
             && generation == state.request_generation
             && !state.stopped
         {
+            let reason = match &error {
+                Error::Source(reason) => *reason,
+                Error::Status(_) => "http_status",
+                Error::Network => "network",
+                Error::Changed => "resource_changed",
+                Error::TooLarge => "too_large",
+                Error::Stopped => "stopped",
+                Error::QueueFull => "queue_full",
+            };
+            log::warn!(reason = reason; "stream request failed");
             state.error = Some(error.to_string());
         }
         shared.changed.notify_all();

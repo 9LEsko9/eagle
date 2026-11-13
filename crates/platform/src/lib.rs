@@ -3,5 +3,7 @@
 
 //! Platform services.
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod autostart;
 pub mod logging;
 pub mod power;
