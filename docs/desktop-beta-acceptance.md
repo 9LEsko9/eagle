@@ -38,6 +38,10 @@ Relocation limitations remain explicit: a failed attempt retains its destination
 
 The reviewed changes passed 189 workspace tests, workspace/all-target clippy with `-D warnings`, formatting, seven Python tests and Rust 1.92 workspace/all-target checking. Clippy initially rejected an incomplete HTTP-header read in the new cancellation fixture; after correcting that fixture, its focused test and the complete clippy/MSRV checks passed again. Logs and detailed reviewer reports remain local under `.review/`. These fixes have not received a new native release measurement or platform CI run.
 
+PR #5 subsequently published `42b6d39`. Its first CI run passed Android, iOS and Linux MSRV; Windows/Linux desktop clippy failed and require their compiler logs. The dependency job failed on the `ksni` Unlicense and a new Tokio-to-tracing edge. A package-specific license exception and a Tokio wrapper exception retain the direct-tracing ban. Full local cargo-deny 0.20.2 checking then passed, including advisories, licenses, bans and sources; unchanged iOS policy also passed. Cargo-audit 0.23.0 found no vulnerabilities against RustSec snapshot `c03ed03`, but that local run did not check yanked versions. These observations do not replace the next remote CI run.
+
+The conflict with main was a squash-history divergence: `4824682` and main differed only in `instance.rs`, whose main version was already present in preserved commit `9735e02`. A reconciliation merge records main ancestry without changing the reviewed source tree.
+
 ## Implemented paths
 
 | Area | Behavior | Evidence required for acceptance |
