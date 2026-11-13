@@ -63,13 +63,21 @@ pub fn seed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+/// What the fixture implements; capability-driven routing reaches only these methods.
+const fn capabilities() -> Capabilities {
+    let mut c = Capabilities::none();
+    c.search_tracks = true;
+    c.likes = true;
+    c.playlists_read = true;
+    c
+}
 impl Provider for Fixture {
     fn info(&self) -> &ProviderInfo {
         static INFO: ProviderInfo = ProviderInfo {
             id: "fixture",
             name: "fixture",
             auth: AuthMethod::None,
-            capabilities: Capabilities::none(),
+            capabilities: capabilities(),
         };
         &INFO
     }

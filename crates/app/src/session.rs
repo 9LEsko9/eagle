@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop-facing commands and incremental events. No UI types cross this boundary.
+use crate::providers::Providers;
 use eagle_core::{
-    Album, Artist, Playlist, PlaylistEdit, PlaylistEditError, PlaylistSnapshot, PlaylistTrack,
-    Provider, RadioBatch, RadioError, RadioQueueItem, RadioSession, Track, TrackId,
+    Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
+    PlaylistSnapshot, PlaylistTrack, Provider, RadioBatch, RadioError, RadioQueueItem,
+    RadioSession, Track, TrackId,
 };
 pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
@@ -506,16 +508,16 @@ impl Session {
         Self::start_inner(root, None, emit)
     }
     /// Starts an isolated session without consulting the system credential store.
-    pub fn start_with_provider(
+    pub fn start_with_providers(
         root: PathBuf,
-        provider: Arc<dyn Provider>,
+        providers: Vec<Arc<dyn Provider>>,
         emit: impl Fn(Event) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        Self::start_inner(root, Some(provider), emit)
+        Self::start_inner(root, Some(providers), emit)
     }
     fn start_inner(
         root: PathBuf,
-        provider: Option<Arc<dyn Provider>>,
+        providers: Option<Vec<Arc<dyn Provider>>>,
         emit: impl Fn(Event) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (commands, rx) = mpsc::channel();
@@ -524,7 +526,7 @@ impl Session {
         let worker = thread::Builder::new()
             .name("eg-app".into())
             .spawn(move || {
-                if let Err(e) = Worker::new_with_provider(root, emit.clone(), tx, provider)
+                if let Err(e) = Worker::new_with_providers(root, emit.clone(), tx, providers)
                     .and_then(|w| w.run(rx))
                 {
                     (emit)(Event::Error(e.to_string()));
@@ -551,7 +553,7 @@ struct Worker {
     store: Arc<Store>,
     cache: Arc<Cache>,
     net: Arc<eagle_net::Client>,
-    provider: Arc<dyn Provider>,
+    providers: Arc<Providers>,
     catalog: Option<mpsc::Sender<CatalogRequest>>,
     catalog_worker: Option<thread::JoinHandle<()>>,
     engine: Option<Engine>,
@@ -607,21 +609,21 @@ impl Worker {
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
     ) -> Result<Self> {
-        Self::new_with_provider(root, emit, tx, None)
+        Self::new_with_providers(root, emit, tx, None)
     }
-    fn new_with_provider(
+    fn new_with_providers(
         root: PathBuf,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
-        provider: Option<Arc<dyn Provider>>,
+        providers: Option<Vec<Arc<dyn Provider>>>,
     ) -> Result<Self> {
-        Self::new_with_handles(root, emit, tx, provider, None)
+        Self::new_with_handles(root, emit, tx, providers, None)
     }
     fn new_with_handles(
         root: PathBuf,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
-        provider: Option<Arc<dyn Provider>>,
+        providers: Option<Vec<Arc<dyn Provider>>>,
         handles: Option<(Arc<Store>, Arc<Cache>)>,
     ) -> Result<Self> {
         let (store, cache) = if let Some(handles) = handles {
@@ -640,17 +642,22 @@ impl Worker {
             (store, cache)
         };
         let net = Arc::new(eagle_net::Client::new()?);
-        let provider = provider.unwrap_or_else(|| {
+        let providers = providers.unwrap_or_else(|| {
             #[cfg(not(test))]
             {
-                Arc::new(eagle_yandex::Yandex::new(net.clone()))
+                crate::providers::builtin(net.clone())
             }
             // Session tests must never touch the user's keychain or live account.
             #[cfg(test)]
             {
-                sync_tests::offline_provider()
+                vec![sync_tests::offline_provider()]
             }
         });
+        let order: Vec<String> = match store.setting("provider_order")? {
+            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let providers = Arc::new(Providers::new(providers, &order));
         let (catalog, requests) = mpsc::channel();
         let services = Catalog {
             covers: RefCell::new(VecDeque::new()),
@@ -659,7 +666,7 @@ impl Worker {
             root: root.clone(),
             net: net.clone(),
             store: store.clone(),
-            provider: provider.clone(),
+            providers: providers.clone(),
         };
         let replies = tx.clone();
         let catalog_worker = thread::Builder::new()
@@ -673,7 +680,7 @@ impl Worker {
             store.clone(),
             cache.clone(),
             net.clone(),
-            provider.clone(),
+            providers.clone(),
             emit.clone(),
         )?;
         let account = store.setting(ACCOUNT_UID)?.unwrap_or_default();
@@ -682,7 +689,7 @@ impl Worker {
             store,
             cache,
             net,
-            provider,
+            providers,
             catalog: Some(catalog),
             catalog_worker: Some(catalog_worker),
             engine: None,
@@ -1268,7 +1275,7 @@ impl Worker {
             downloads,
             covers,
             emit,
-            provider,
+            providers,
             tx,
             ..
         } = self;
@@ -1292,7 +1299,7 @@ impl Worker {
                     root,
                     emit.clone(),
                     tx,
-                    Some(provider),
+                    Some(providers.all().to_vec()),
                     Some((store, cache)),
                 )?
             }
@@ -1300,7 +1307,7 @@ impl Worker {
                 if let Some(error) = error {
                     (emit)(Event::Error(format!("Перенос не завершён: {error}")));
                 }
-                Self::new_with_provider(root, emit.clone(), tx, Some(provider))?
+                Self::new_with_providers(root, emit.clone(), tx, Some(providers.all().to_vec()))?
             }
         };
         next.engine_generation = next_engine_generation;
@@ -2495,7 +2502,11 @@ impl Worker {
         }
     }
     fn source(&self, track: &Arc<Track>) -> Result<eagle_engine::Source> {
-        let provider = self.provider.clone();
+        let provider = self
+            .providers
+            .for_track(&track.id)
+            .ok_or("провайдер недоступен")?
+            .clone();
         let id = track.id.clone();
         let owner_store = self.store.clone();
         let owner_account = self.account.clone();
@@ -2797,9 +2808,21 @@ struct Catalog {
     root: PathBuf,
     net: Arc<eagle_net::Client>,
     store: Arc<Store>,
-    provider: Arc<dyn Provider>,
+    providers: Arc<Providers>,
 }
 impl Catalog {
+    /// The provider that owns the track or collection `id`.
+    fn provider_for(&self, id: &TrackId) -> Result<&Arc<dyn Provider>> {
+        self.providers
+            .for_track(id)
+            .ok_or_else(|| "провайдер недоступен".into())
+    }
+    /// The first signed-in provider with the capability `f`.
+    fn provider_with(&self, f: impl Fn(&Capabilities) -> bool) -> Result<&Arc<dyn Provider>> {
+        self.providers
+            .first_with(f)
+            .ok_or_else(|| "войдите в аккаунт".into())
+    }
     fn run(&self, requests: mpsc::Receiver<CatalogRequest>, replies: mpsc::Sender<Message>) {
         let mut sync: Option<SyncState> = None;
         loop {
@@ -2887,19 +2910,27 @@ impl Catalog {
     fn sync_step(&self, state: &mut SyncState) -> Result<(Option<CatalogReply>, bool)> {
         match state.step {
             0 => {
-                let reply = match crate::music::sync_playlists(&self.store, self.provider.as_ref())
-                {
-                    Ok(()) => Some(self.command(Command::Collections)?),
-                    Err(error) => {
+                let synced = self
+                    .providers
+                    .first_with(|c| c.playlists_read)
+                    .map(|p| crate::music::sync_playlists(&self.store, p.as_ref()));
+                let reply = match synced {
+                    Some(Ok(())) => Some(self.command(Command::Collections)?),
+                    Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "playlist sync failed");
                         None
                     }
+                    None => None,
                 };
                 state.step = 1;
                 Ok((reply, false))
             }
             1 => {
-                let page = match self.provider.likes(state.cursor.as_deref()) {
+                let Some(provider) = self.providers.first_with(|c| c.likes) else {
+                    state.step = 3;
+                    return Ok((None, false));
+                };
+                let page = match provider.likes(state.cursor.as_deref()) {
                     Ok(page) => page,
                     Err(error) => {
                         log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
@@ -2932,31 +2963,41 @@ impl Catalog {
                 }
             }
             3 => {
-                let reply = match self.provider.liked_albums() {
-                    Ok(albums) => {
+                let reply = match self
+                    .providers
+                    .first_with(|c| c.liked_albums)
+                    .map(|p| p.liked_albums())
+                {
+                    Some(Ok(albums)) => {
                         self.store
                             .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?;
                         Some(CatalogReply::AlbumsSynced)
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked albums sync failed");
                         None
                     }
+                    None => None,
                 };
                 state.step = 4;
                 Ok((reply, false))
             }
             _ => {
-                let reply = match self.provider.liked_artists() {
-                    Ok(artists) => {
+                let reply = match self
+                    .providers
+                    .first_with(|c| c.liked_artists)
+                    .map(|p| p.liked_artists())
+                {
+                    Some(Ok(artists)) => {
                         self.store
                             .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?;
                         Some(CatalogReply::ArtistsSynced)
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked artists sync failed");
                         None
                     }
+                    None => None,
                 };
                 Ok((reply, true))
             }
@@ -2966,38 +3007,45 @@ impl Catalog {
     fn request(&self, request: CatalogRequest) -> Result<CatalogReply> {
         match request {
             CatalogRequest::RadioStart(_, account) => {
-                let result = match self.provider.account() {
-                    Ok(current) if current.id == account => self.provider.radio_start(),
-                    _ => Err(eagle_core::ProviderError::Auth.into()),
+                let result = match self.providers.first_with(|c| c.radio) {
+                    Some(provider) => match provider.account() {
+                        Ok(current) if current.id == account => provider.radio_start(),
+                        _ => Err(eagle_core::ProviderError::Auth.into()),
+                    },
+                    None => Err(eagle_core::ProviderError::Auth.into()),
                 };
                 Ok(CatalogReply::RadioResult(account, true, result))
             }
             CatalogRequest::RadioMore(_, account, mut session, queue) => {
-                let result = match self.provider.account() {
-                    Ok(current) if current.id == account => {
-                        self.provider.radio_next(&session, &queue).map(|batch| {
-                            session.batch = batch;
-                            session
-                        })
-                    }
-                    _ => Err(eagle_core::ProviderError::Auth.into()),
+                let result = match self.providers.first_with(|c| c.radio) {
+                    Some(provider) => match provider.account() {
+                        Ok(current) if current.id == account => {
+                            provider.radio_next(&session, &queue).map(|batch| {
+                                session.batch = batch;
+                                session
+                            })
+                        }
+                        _ => Err(eagle_core::ProviderError::Auth.into()),
+                    },
+                    None => Err(eagle_core::ProviderError::Auth.into()),
                 };
                 Ok(CatalogReply::RadioResult(account, false, result))
             }
             CatalogRequest::RefreshPlaylist(_, id) => {
                 let message = "плейлист изменился; обновите список и повторите действие".to_owned();
                 let snapshot = self
-                    .provider
-                    .playlist_snapshot(&id)
+                    .provider_for(&id)
                     .ok()
+                    .and_then(|provider| provider.playlist_snapshot(&id).ok())
                     .filter(|s| s.playlist.id == id);
                 let rows = snapshot.as_ref().and_then(|s| self.cache_playlist(s).ok());
                 Ok(CatalogReply::PlaylistEdited(snapshot, rows, Some(message)))
             }
             CatalogRequest::EditPlaylist(_, snapshot, edit) => {
-                let result = self.provider.edit_playlist(&snapshot, edit);
-                let succeeded = result.is_ok();
                 let id = snapshot.playlist.id.clone();
+                let provider = self.provider_for(&id)?;
+                let result = provider.edit_playlist(&snapshot, edit);
+                let succeeded = result.is_ok();
                 let (snapshot, error) = match result {
                     Ok(snapshot) if snapshot.playlist.id == id => (Some(snapshot), None),
                     Ok(_) => (
@@ -3005,7 +3053,7 @@ impl Catalog {
                         Some("Провайдер вернул другой плейлист; обновите список".into()),
                     ),
                     Err(error @ (PlaylistEditError::Conflict | PlaylistEditError::Uncertain)) => (
-                        self.provider
+                        provider
                             .playlist_snapshot(&id)
                             .ok()
                             .filter(|s| s.playlist.id == id),
@@ -3222,7 +3270,11 @@ impl Catalog {
             if !self.store.access(account, &key)?.access_due(now) {
                 continue;
             }
-            match self.provider.check_access(&track.id) {
+            let checked = match self.provider_for(&track.id) {
+                Ok(provider) => provider.check_access(&track.id),
+                Err(_) => Err(eagle_core::ProviderError::Unavailable),
+            };
+            match checked {
                 Ok(eagle_core::AccessCheck::Confirmed) => self.store.record_access(
                     account,
                     &key,
@@ -3262,44 +3314,80 @@ impl Catalog {
                 Ok(CatalogReply::Collections(playlists))
             }
             Command::Library => self.library(),
-            Command::Restore => Ok(match crate::music::restore_saved(self.provider.as_ref()) {
-                Ok(account) => {
-                    let changed = self.switch_account(&account.id)?;
-                    self.refresh_access(&account.id)?;
-                    CatalogReply::Account(changed)
+            Command::Restore => {
+                // Each provider restores on its own; one failing does not stop the others.
+                let mut restored = false;
+                let mut changed = false;
+                for provider in self.providers.all() {
+                    let id = provider.info().id;
+                    // Providers without sign-in are always signed in, so only token ones track an account.
+                    let tracked = matches!(provider.info().auth, AuthMethod::Token { .. });
+                    match crate::music::restore_saved(provider.as_ref()) {
+                        Ok(account) => {
+                            if tracked {
+                                self.providers.set_account(id, Some(account.clone()));
+                            }
+                            changed |= self.switch_account(&account.id)?;
+                            self.refresh_access(&account.id)?;
+                            restored = true;
+                        }
+                        Err(_) => {
+                            if tracked {
+                                self.providers.set_account(id, None);
+                            }
+                        }
+                    }
                 }
-                Err(_) => CatalogReply::Unchanged,
-            }),
+                Ok(if restored {
+                    CatalogReply::Account(changed)
+                } else {
+                    CatalogReply::Unchanged
+                })
+            }
             Command::SyncCollections => {
-                crate::music::sync_playlists(&self.store, self.provider.as_ref())?;
+                crate::music::sync_playlists(
+                    &self.store,
+                    self.provider_with(|c| c.playlists_read)?.as_ref(),
+                )?;
                 self.command(Command::Collections)
             }
             Command::SyncLibrary => {
-                crate::music::sync_likes(&self.store, self.provider.as_ref())?;
+                crate::music::sync_likes(&self.store, self.provider_with(|c| c.likes)?.as_ref())?;
                 // Album and artist likes are a bonus: their failure must not hide liked tracks.
-                match self.provider.liked_albums() {
-                    Ok(albums) => self
+                match self
+                    .providers
+                    .first_with(|c| c.liked_albums)
+                    .map(|p| p.liked_albums())
+                {
+                    Some(Ok(albums)) => self
                         .store
                         .put_setting(LIKED_ALBUMS, serde_json::to_string(&albums)?)?,
-                    Err(error) => {
+                    Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked albums sync failed")
                     }
+                    None => {}
                 }
-                match self.provider.liked_artists() {
-                    Ok(artists) => self
+                match self
+                    .providers
+                    .first_with(|c| c.liked_artists)
+                    .map(|p| p.liked_artists())
+                {
+                    Some(Ok(artists)) => self
                         .store
                         .put_setting(LIKED_ARTISTS, serde_json::to_string(&artists)?)?,
-                    Err(error) => {
+                    Some(Err(error)) => {
                         log::warn!(error = error.to_string().as_str(); "liked artists sync failed")
                     }
+                    None => {}
                 }
                 Ok(CatalogReply::Synced)
             }
             Command::Search(query) => {
-                self.tracks(self.provider.search(&query, 0)?.items, String::new())
+                let provider = self.provider_with(|c| c.search_tracks)?;
+                self.tracks(provider.search(&query, 0)?.items, String::new())
             }
             Command::SearchArtists(query) => Ok(CatalogReply::Cards(
-                self.provider
+                self.provider_with(|c| c.search_artists)?
                     .search_artists(&query, 0)?
                     .items
                     .iter()
@@ -3307,7 +3395,7 @@ impl Catalog {
                     .collect(),
             )),
             Command::SearchAlbums(query) => Ok(CatalogReply::Cards(
-                self.provider
+                self.provider_with(|c| c.search_albums)?
                     .search_albums(&query, 0)?
                     .items
                     .iter()
@@ -3315,7 +3403,7 @@ impl Catalog {
                     .collect(),
             )),
             Command::SearchPlaylists(query) => Ok(CatalogReply::Cards(
-                self.provider
+                self.provider_with(|c| c.search_playlists)?
                     .search_playlists(&query, 0)?
                     .items
                     .iter()
@@ -3323,7 +3411,9 @@ impl Catalog {
                     .collect(),
             )),
             Command::CreatePlaylist(title) => {
-                let playlist = self.provider.create_playlist(&title)?;
+                let playlist = self
+                    .provider_with(|c| c.playlists_edit)?
+                    .create_playlist(&title)?;
                 (|| -> Result<CatalogReply> {
                     self.store.put_json("playlists", &playlist.id.to_string(), serde_json::to_string(&playlist)?)?;
                     let CatalogReply::Collections(collections) = self.command(Command::Collections)? else { return Err("не удалось прочитать плейлисты".into()) };
@@ -3331,7 +3421,7 @@ impl Catalog {
                 })().map_err(|e| format!("Плейлист создан в Яндекс Музыке, но локальный список не обновлён. Обновите список; не создавайте его повторно. {e}").into())
             }
             Command::DeletePlaylist(id) => {
-                self.provider.delete_playlist(&id)?;
+                self.provider_for(&id)?.delete_playlist(&id)?;
                 (|| -> Result<CatalogReply> {
                     let key = id.to_string();
                     self.store.write(move |c| { c.execute("DELETE FROM playlists WHERE id=?1", [key])?; Ok(()) })?;
@@ -3340,7 +3430,7 @@ impl Catalog {
                 })().map_err(|e| format!("Плейлист удалён в Яндекс Музыке, но локальный список не обновлён. Обновите список. {e}").into())
             }
             Command::Album(id) => {
-                let mut album = self.provider.album(&id)?;
+                let mut album = self.provider_for(&id)?.album(&id)?;
                 let tracks = std::mem::take(&mut album.tracks);
                 let liked = self.liked_albums()?.iter().any(|a| a.id == id);
                 let header = Header {
@@ -3360,7 +3450,7 @@ impl Catalog {
                 self.page(tracks, title, header, Vec::new(), cover)
             }
             Command::Artist(id) => {
-                let page = self.provider.artist(&id)?;
+                let page = self.provider_for(&id)?.artist(&id)?;
                 let liked = self.liked_artists()?.iter().any(|a| a.id == id);
                 let header = Header {
                     id: id.to_string(),
@@ -3388,7 +3478,7 @@ impl Catalog {
             Command::LikeAlbum(id) => {
                 let mut albums = self.liked_albums()?;
                 let liked = !albums.iter().any(|a| a.id == id);
-                if let Err(error) = self.provider.set_album_liked(&id, liked) {
+                if let Err(error) = self.provider_for(&id)?.set_album_liked(&id, liked) {
                     log::warn!(error = error.to_string().as_str(); "album like failed");
                     return Ok(CatalogReply::CollectionLiked(id, !liked));
                 }
@@ -3406,7 +3496,7 @@ impl Catalog {
             Command::LikeArtist(id) => {
                 let mut artists = self.liked_artists()?;
                 let liked = !artists.iter().any(|a| a.id == id);
-                if let Err(error) = self.provider.set_artist_liked(&id, liked) {
+                if let Err(error) = self.provider_for(&id)?.set_artist_liked(&id, liked) {
                     log::warn!(error = error.to_string().as_str(); "artist like failed");
                     return Ok(CatalogReply::CollectionLiked(id, !liked));
                 }
@@ -3428,14 +3518,15 @@ impl Catalog {
                     [id.to_string()],
                     |r| r.get::<_, bool>(0),
                 )?;
-                let own = self.provider.account().ok().is_some_and(|account| {
+                let provider = self.provider_for(&id)?;
+                let own = provider.account().ok().is_some_and(|account| {
                     id.local()
                         .split_once('_')
                         .is_some_and(|(owner, _)| owner == account.id)
                 });
                 let deletable = cached && own;
                 let snapshot = if own {
-                    self.provider
+                    provider
                         .playlist_snapshot(&id)
                         .ok()
                         .filter(|s| s.playlist.id == id)
@@ -3444,7 +3535,7 @@ impl Catalog {
                 };
                 let p = match &snapshot {
                     Some(snapshot) => snapshot.playlist.clone(),
-                    None => self.provider.playlist(&id)?,
+                    None => provider.playlist(&id)?,
                 };
                 let cover = header_cover(&id, "playlist", p.cover.clone());
                 let mut page = self.page(
@@ -3469,8 +3560,17 @@ impl Catalog {
                 Ok(page)
             }
             Command::Login(token) => {
-                let account = self.provider.login(token.clone())?;
-                crate::music::remember_token(self.provider.as_ref(), &token)?;
+                // Until the command names its provider, sign-in goes to the first token provider.
+                let provider = self
+                    .providers
+                    .all()
+                    .iter()
+                    .find(|p| matches!(p.info().auth, AuthMethod::Token { .. }))
+                    .ok_or("провайдер недоступен")?;
+                let account = provider.login(token.clone())?;
+                crate::music::remember_token(provider.as_ref(), &token)?;
+                self.providers
+                    .set_account(provider.info().id, Some(account.clone()));
                 Ok(CatalogReply::Account(self.switch_account(&account.id)?))
             }
             Command::Like(id) => {
@@ -3479,7 +3579,7 @@ impl Catalog {
                     [id.to_string()],
                     |r| r.get::<_, bool>(0),
                 )?;
-                if let Err(error) = self.provider.set_liked(&id, liked) {
+                if let Err(error) = self.provider_for(&id)?.set_liked(&id, liked) {
                     // The UI already flipped the heart; tell it the real state.
                     return Ok(CatalogReply::LikeFailed(id, !liked, error.to_string()));
                 }
@@ -4204,7 +4304,7 @@ mod delta_tests {
             cache.pin(&store, &track.id, Quality::High, true).unwrap();
         }
         let (events, received) = mpsc::channel();
-        let session = Session::start_with_provider(source.clone(), provider, move |event| {
+        let session = Session::start_with_providers(source.clone(), vec![provider], move |event| {
             let _ = events.send(event);
         })
         .unwrap();
@@ -4770,7 +4870,7 @@ mod sync_tests {
                 id: "yandex",
                 name: "yandex",
                 auth: AuthMethod::None,
-                capabilities: Capabilities::none(),
+                capabilities: fixture_capabilities(),
             };
             &INFO
         }
@@ -4861,14 +4961,14 @@ mod sync_tests {
                     serde_json::to_string(&playlist).unwrap(),
                 )
                 .unwrap();
-            c.provider = Arc::new(EditFixture {
+            c.providers = registry(Arc::new(EditFixture {
                 snapshot: PlaylistSnapshot {
                     playlist: playlist.clone(),
                     revision: 7,
                 },
                 mode,
                 calls: std::sync::atomic::AtomicUsize::new(0),
-            });
+            }));
             let root = c.root.join("worker");
             let (tx, _) = mpsc::channel();
             let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
@@ -4927,7 +5027,7 @@ mod sync_tests {
                 mode,
                 calls: std::sync::atomic::AtomicUsize::new(0),
             });
-            c.provider = provider.clone();
+            c.providers = registry(provider.clone());
             let CatalogReply::PlaylistEdited(Some(result), Some(rows), error) = c
                 .request(CatalogRequest::EditPlaylist(
                     1,
@@ -4979,11 +5079,11 @@ mod sync_tests {
                 serde_json::to_string(&snapshot.playlist).unwrap(),
             )
             .unwrap();
-        c.provider = Arc::new(EditFixture {
+        c.providers = registry(Arc::new(EditFixture {
             snapshot,
             mode: 3,
             calls: std::sync::atomic::AtomicUsize::new(0),
-        });
+        }));
         let CatalogReply::Page {
             header,
             playlist_snapshot,
@@ -5017,7 +5117,7 @@ mod sync_tests {
             mode: 2,
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
-        c.provider = provider.clone();
+        c.providers = registry(provider.clone());
         c.store.write(|db| { db.execute_batch("CREATE TRIGGER fail_playlist BEFORE INSERT ON playlists BEGIN SELECT RAISE(ABORT, 'test failure'); END;")?; Ok(()) }).unwrap();
         let CatalogReply::PlaylistEdited(_, None, Some(message)) = c
             .request(CatalogRequest::EditPlaylist(
@@ -5045,6 +5145,24 @@ mod sync_tests {
             calls: Arc::default(),
         })
     }
+    /// A registry holding just `provider`; it is signed in because its auth is `None`.
+    fn registry(provider: Arc<dyn Provider>) -> Arc<Providers> {
+        Arc::new(Providers::new(vec![provider], &[]))
+    }
+    /// What the fixtures below implement, so the capability-driven routing reaches them.
+    const fn fixture_capabilities() -> Capabilities {
+        let mut c = Capabilities::none();
+        c.search_tracks = true;
+        c.search_artists = true;
+        c.search_albums = true;
+        c.search_playlists = true;
+        c.likes = true;
+        c.liked_albums = true;
+        c.liked_artists = true;
+        c.playlists_read = true;
+        c.playlists_edit = true;
+        c
+    }
     struct Fixture {
         fail: bool,
         empty: bool,
@@ -5057,7 +5175,7 @@ mod sync_tests {
                 id: "yandex",
                 name: "yandex",
                 auth: AuthMethod::None,
-                capabilities: Capabilities::none(),
+                capabilities: fixture_capabilities(),
             };
             &INFO
         }
@@ -5229,6 +5347,14 @@ mod sync_tests {
         }
     }
     fn catalog(fail: bool) -> Catalog {
+        catalog_with(registry(Arc::new(Fixture {
+            fail,
+            empty: false,
+            gate: None,
+            calls: Arc::default(),
+        })))
+    }
+    fn catalog_with(providers: Arc<Providers>) -> Catalog {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "eagle-sync-test-{}-{}",
@@ -5242,14 +5368,47 @@ mod sync_tests {
             last_artist: RefCell::new(None),
             store: Arc::new(Store::open(&root).unwrap()),
             net: Arc::new(eagle_net::Client::new().unwrap()),
-            provider: Arc::new(Fixture {
-                fail,
-                empty: false,
-                gate: None,
-                calls: Arc::default(),
-            }),
+            providers,
             root,
         }
+    }
+    #[test]
+    fn track_and_album_commands_reach_the_provider_that_owns_the_id() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let fakea = Arc::new(FakeProvider::new("fakea"));
+        let mut track = fake_track("fakeb", "1", "Song", "Artist", 1000);
+        track.album = Some("fakeb:al1".parse().unwrap());
+        track.album_title = Some("Album".into());
+        let fakeb = Arc::new(FakeProvider::new("fakeb").with_tracks(vec![track]));
+        let all: Vec<Arc<dyn Provider>> = vec![fakea.clone(), fakeb.clone()];
+        let providers = Arc::new(Providers::new(all, &[]));
+        providers.set_account("fakea", Some(fakea.login(Token::new("a".into())).unwrap()));
+        providers.set_account("fakeb", Some(fakeb.login(Token::new("b".into())).unwrap()));
+        let c = catalog_with(providers);
+
+        let id: TrackId = "fakeb:1".parse().unwrap();
+        c.request(CatalogRequest::Command(0, Command::Like(id.clone())))
+            .unwrap();
+        assert_eq!(fakeb.set_liked_calls(), vec![(id.clone(), true)]);
+        assert!(fakea.set_liked_calls().is_empty());
+
+        let CatalogReply::Page { items, title, .. } = c
+            .request(CatalogRequest::Command(
+                0,
+                Command::Album("fakeb:al1".parse().unwrap()),
+            ))
+            .unwrap()
+        else {
+            panic!("album page expected");
+        };
+        assert_eq!(title, "Album");
+        assert_eq!(items[0].track.id, id);
+
+        let unknown = c.request(CatalogRequest::Command(
+            0,
+            Command::Album("nope:al1".parse().unwrap()),
+        ));
+        assert!(unknown.is_err());
     }
     #[test]
     fn search_categories_route_cards_and_empty_results() {
@@ -5301,12 +5460,12 @@ mod sync_tests {
         };
         assert!(created.tracks.is_empty());
         assert_eq!(items[0].id, id);
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: true,
             empty: false,
             gate: None,
             calls: Arc::default(),
-        });
+        }));
         assert!(c.command(Command::DeletePlaylist(id.clone())).is_err());
         assert!(
             c.command(Command::CreatePlaylist("failure".into()))
@@ -5315,12 +5474,12 @@ mod sync_tests {
         assert!(
             matches!(c.command(Command::Collections).unwrap(), CatalogReply::Collections(items) if items.len() == 1)
         );
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: false,
             empty: false,
             gate: None,
             calls: Arc::default(),
-        });
+        }));
         assert!(
             matches!(c.command(Command::DeletePlaylist(id)).unwrap(), CatalogReply::PlaylistChanged(items, None, Some(_)) if items.is_empty())
         );
@@ -5391,12 +5550,12 @@ mod sync_tests {
     #[test]
     fn playlist_failure_does_not_block_likes_and_collection_events() {
         let mut c = catalog(false);
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: true,
             empty: true,
             gate: None,
             calls: Arc::default(),
-        });
+        }));
         c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
         let mut state = SyncState::default();
         assert!(c.sync_step(&mut state).unwrap().0.is_none());
@@ -5449,12 +5608,12 @@ mod sync_tests {
     fn catalog_drains_commands_and_cancels_old_account_sync() {
         let mut c = catalog(false);
         let gate = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: false,
             empty: false,
             gate: Some(gate.clone()),
             calls: Arc::default(),
-        });
+        }));
         c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
         let store = c.store.clone();
         let (tx, rx) = mpsc::channel();
@@ -5504,12 +5663,12 @@ mod sync_tests {
         let mut c = catalog(false);
         let gate = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: false,
             empty: false,
             gate: Some(gate.clone()),
             calls: calls.clone(),
-        });
+        }));
         c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -5545,12 +5704,12 @@ mod sync_tests {
         let mut c = catalog(false);
         let gate = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: false,
             empty: false,
             gate: Some(gate.clone()),
             calls: calls.clone(),
-        });
+        }));
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || c.run(rx, reply_tx));
@@ -5587,12 +5746,12 @@ mod sync_tests {
     #[test]
     fn empty_page_clears_likes_only_on_publication() {
         let mut c = catalog(false);
-        c.provider = Arc::new(Fixture {
+        c.providers = registry(Arc::new(Fixture {
             fail: false,
             empty: true,
             gate: None,
             calls: Arc::default(),
-        });
+        }));
         c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
         let mut state = SyncState::default();
         c.sync_step(&mut state).unwrap();

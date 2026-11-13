@@ -104,37 +104,37 @@ pub fn run_with_options(
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_inner(root, bootstrap_root, software, None)
 }
-pub fn run_with_provider(
+pub fn run_with_providers(
     root: PathBuf,
     software: bool,
-    provider: Arc<dyn eagle_core::Provider>,
+    providers: Vec<Arc<dyn eagle_core::Provider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root.clone(), root, software, Some(provider))
+    run_inner(root.clone(), root, software, Some(providers))
 }
-pub fn run_with_provider_and_bootstrap(
+pub fn run_with_providers_and_bootstrap(
     root: PathBuf,
     bootstrap_root: PathBuf,
     software: bool,
-    provider: Arc<dyn eagle_core::Provider>,
+    providers: Vec<Arc<dyn eagle_core::Provider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root, bootstrap_root, software, Some(provider))
+    run_inner(root, bootstrap_root, software, Some(providers))
 }
 fn run_inner(
     root: PathBuf,
     bootstrap_root: PathBuf,
     software: bool,
-    provider: Option<Arc<dyn eagle_core::Provider>>,
+    providers: Option<Vec<Arc<dyn eagle_core::Provider>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut primaries) = claim_instances(&root, &bootstrap_root)? else {
         return Ok(());
     };
     let original_root = root.clone();
-    let root = if provider.is_none() {
+    let root = if providers.is_none() {
         eagle_app::resolve_storage(root, &bootstrap_root)?
     } else {
         root
     };
-    if provider.is_none()
+    if providers.is_none()
         && !claim_resolved(&root, &original_root, &bootstrap_root, &mut primaries)?
     {
         return Ok(());
@@ -152,9 +152,9 @@ fn run_inner(
     let emit = move |event| {
         let _ = events.send(event);
     };
-    let notify_on_close = provider.is_none();
-    let session = match provider {
-        Some(provider) => Session::start_with_provider(root.clone(), provider, emit)?,
+    let notify_on_close = providers.is_none();
+    let session = match providers {
+        Some(providers) => Session::start_with_providers(root.clone(), providers, emit)?,
         None => Session::start(root.clone(), emit)?,
     };
     let sender = session.sender();

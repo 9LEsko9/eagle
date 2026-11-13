@@ -9,13 +9,21 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Fixture;
+/// What the fixture implements; capability-driven routing reaches only these methods.
+const fn capabilities() -> Capabilities {
+    let mut c = Capabilities::none();
+    c.search_tracks = true;
+    c.likes = true;
+    c.playlists_read = true;
+    c
+}
 impl Provider for Fixture {
     fn info(&self) -> &ProviderInfo {
         static INFO: ProviderInfo = ProviderInfo {
             id: "yandex",
             name: "yandex",
             auth: AuthMethod::None,
-            capabilities: Capabilities::none(),
+            capabilities: capabilities(),
         };
         &INFO
     }

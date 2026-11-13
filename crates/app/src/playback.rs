@@ -3,7 +3,7 @@ use crossterm::{
     event::{self, Event as TerminalEvent, KeyCode, KeyEventKind},
     terminal,
 };
-use eagle_core::{Encryption, Provider, Quality, SignedUrl, TrackId};
+use eagle_core::{Encryption, Quality, SignedUrl, TrackId};
 use eagle_engine::{Config, Engine, Event, Interrupt, MediaSource, PositionAnchor, Source, State};
 use eagle_net::{
     Client, Priority,
@@ -301,9 +301,13 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
     };
     let store = Arc::new(Store::open(root)?);
     let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT * 4, &store)?);
-    let provider = Arc::new(eagle_yandex::Yandex::new(net.clone()));
+    let providers = crate::providers::Providers::new(crate::providers::builtin(net.clone()), &[]);
     // A missing saved token surfaces later, when a stream is requested.
-    let _ = crate::music::restore_saved(provider.as_ref());
+    for provider in providers.all() {
+        if matches!(provider.info().auth, eagle_core::AuthMethod::Token { .. }) {
+            let _ = crate::music::restore_saved(provider.as_ref());
+        }
+    }
     let mut sources = Vec::new();
     let mut prepared = HashMap::<String, Source>::new();
     for item in &options.items {
@@ -325,10 +329,9 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
                     let url = SignedUrl::new(item.clone());
                     Arc::new(move || Ok(url.clone().into()))
                 } else {
-                    if id.provider() != "yandex" {
-                        return Err("сетевой провайдер ещё не реализован".into());
-                    }
-                    let provider = provider.clone();
+                    let Some(provider) = providers.for_track(&id).cloned() else {
+                        return Err("провайдер недоступен".into());
+                    };
                     let id = id.clone();
                     let store = store.clone();
                     let root = root.to_owned();

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::providers::Providers;
 use eagle_core::{
     Account, Encryption, Provider, ProviderError, Quality, SignedUrl, Stream, Token, TrackId,
 };
@@ -288,24 +289,33 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let (command, tail) = if args[0] == "yandex" {
-        let (a, b) = args[1..].split_first().ok_or("укажите команду Яндекса")?;
-        (a.as_str(), b)
-    } else {
-        (args[0].as_str(), &args[1..])
-    };
     let net = Arc::new(Client::new()?);
-    let provider = eagle_yandex::Yandex::new(net.clone());
+    if args[0] == "play" {
+        return crate::playback::run(&args[1..], root, net);
+    }
+    let providers = Providers::new(crate::providers::builtin(net.clone()), &[]);
+    // Without a provider id the command goes to the first provider by priority.
+    let (provider, words) = match providers.get(&args[0]) {
+        Some(provider) => (provider, &args[1..]),
+        None => (providers.all().first().ok_or("нет провайдеров")?, args),
+    };
+    let (command, tail) = words
+        .split_first()
+        .map(|(command, tail)| (command.as_str(), tail))
+        .ok_or("укажите команду провайдера")?;
+    if command == "play" {
+        return crate::playback::run(tail, root, net);
+    }
     if command == "login" {
         let token = prompt_token()?;
         let account = provider.login(token.clone())?;
-        remember_token(&provider, &token)?;
+        remember_token(provider.as_ref(), &token)?;
         println!("Вход выполнен: {}", account.id);
-        sync(&Store::open(root)?, &provider)?;
+        sync(&Store::open(root)?, provider.as_ref())?;
         return Ok(());
     }
     if command == "status" {
-        let a = restore_saved(&provider)?;
+        let a = restore_saved(provider.as_ref())?;
         println!("Аккаунт: {}, Plus: {}", a.id, a.subscription);
         return Ok(());
     }
@@ -313,7 +323,7 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         return crate::playback::run(tail, root, net);
     }
     // Other commands work only with the saved token; a missing one fails with `Auth` below.
-    let _ = restore_saved(&provider);
+    let _ = restore_saved(provider.as_ref());
     let store = Store::open(root)?;
     let tid =
         || -> Result<TrackId> { Ok(tail.first().ok_or("укажите provider:id")?.parse()?) };
@@ -378,13 +388,13 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         }
         "like" | "unlike" => {
             provider.set_liked(&tid()?, command == "like")?;
-            sync(&store, &provider)?;
+            sync(&store, provider.as_ref())?;
         }
         "dislike" | "undislike" => {
             provider.set_disliked(&tid()?, command == "dislike")?;
-            sync(&store, &provider)?;
+            sync(&store, provider.as_ref())?;
         }
-        "sync" => sync(&store, &provider)?,
+        "sync" => sync(&store, provider.as_ref())?,
         _ => return Err("неизвестная команда; запустите eagle-cli без аргументов".into()),
     }
     Ok(())

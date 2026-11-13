@@ -16,10 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&root)?;
         std::fs::write(root.join(".eagle-fixture"), b"fixture")?;
         eagle_app::fixture::seed(&root)?;
-        return eagle_ui::run_with_provider(
+        return eagle_ui::run_with_providers(
             root,
             args.iter().any(|arg| arg == "--software"),
-            eagle_app::fixture::provider(),
+            vec![eagle_app::fixture::provider()],
         );
     }
     let result = eagle_ui::run_with_options(

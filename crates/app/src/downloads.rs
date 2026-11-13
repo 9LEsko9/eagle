@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Persistent audio download queue. No window or audio device is required.
+use crate::providers::Providers;
 use crate::session::Event;
 use eagle_core::{Encryption, Provider};
 use eagle_net::{
@@ -57,7 +58,7 @@ impl Downloads {
         store: Arc<Store>,
         cache: Arc<Cache>,
         net: Arc<Client>,
-        provider: Arc<dyn Provider>,
+        providers: Arc<Providers>,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
     ) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
@@ -67,7 +68,7 @@ impl Downloads {
             .spawn(move || {
                 let mut account = String::new();
                 let allow_metered = store.setting("allow_metered").ok().flatten().as_deref() == Some("true");
-                let fixture = cfg!(test) || provider.info().id == "fixture";
+                let fixture = cfg!(test) || providers.all().iter().any(|p| p.info().id == "fixture");
                 let mut network_policy = if fixture {
                     eagle_net::policy::NetworkPolicy { allow_metered, ..Default::default() }
                 } else {
@@ -186,13 +187,18 @@ impl Downloads {
                                 break;
                             }
                         };
+                        // The provider that owns the track; a missing one stops claiming, like an error.
+                        let Some(provider) = providers.for_track(&job.track).cloned() else {
+                            emit(Event::Error("провайдер недоступен".into()));
+                            break;
+                        };
                         let attempt = Arc::new(Attempt::default());
                         let (root, task_store, cache, net, provider, tx, cancel, task) = (
                             root.clone(),
                             store.clone(),
                             cache.clone(),
                             net.clone(),
-                            provider.clone(),
+                            provider,
                             replies.clone(),
                             attempt.clone(),
                             job.clone(),
@@ -229,9 +235,7 @@ impl Downloads {
                                     let track = match task_store.track(&task.track)? {
                                         Some(track) => track,
                                         None => {
-                                            if provider.info().id != task.track.provider()
-                                                || provider.account()?.id != task.account
-                                            {
+                                            if provider.account()?.id != task.account {
                                                 return Err("аккаунт загрузки изменился".into());
                                             }
                                             provider.track(&task.track)?
@@ -372,12 +376,11 @@ fn audio(
     let unsupported_quality = attempt.unsupported_quality.clone();
     let resolve = Arc::new(move || {
         // Credentials can also be changed by another entry point between launches.
-        if provider.info().id != id.provider()
-            || provider
-                .account()
-                .map_err(|_| eagle_net::Error::Source("не удалось проверить аккаунт загрузки"))?
-                .id
-                != account
+        if provider
+            .account()
+            .map_err(|_| eagle_net::Error::Source("не удалось проверить аккаунт загрузки"))?
+            .id
+            != account
         {
             return Err(eagle_net::Error::Source("аккаунт загрузки изменился"));
         }
@@ -1011,7 +1014,10 @@ mod tests {
             store.clone(),
             Arc::new(cache),
             net.clone(),
-            Arc::new(eagle_yandex::Yandex::new(net)),
+            Arc::new(Providers::new(
+                vec![Arc::new(eagle_yandex::Yandex::new(net))],
+                &[],
+            )),
             Arc::new(move |event| {
                 let _ = tx.send(event);
             }),
@@ -1103,7 +1109,10 @@ mod tests {
             store.clone(),
             Arc::new(cache),
             net.clone(),
-            Arc::new(eagle_yandex::Yandex::new(net)),
+            Arc::new(Providers::new(
+                vec![Arc::new(eagle_yandex::Yandex::new(net))],
+                &[],
+            )),
             Arc::new(move |event| {
                 let _ = tx.send(event);
             }),
