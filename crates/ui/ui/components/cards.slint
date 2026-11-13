@@ -100,25 +100,39 @@ export component CardGrid inherits Rectangle {
     in property <length> top;
     in property <length> view-height;
     private property <length> gap: 20px;
-    private property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
+    out property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
     private property <length> art: (self.width - (columns - 1) * gap) / columns;
-    private property <length> row-height: art + 52px + gap;
-    private property <int> first-row: floor(max(0px, root.top) / root.row-height);
-    private property <int> visible-rows: ceil(root.view-height / root.row-height) + 1;
+    out property <length> row-height: art + 52px + gap;
+    private property <int> first-row: min(ceil(root.cards.length / root.columns), floor(max(0px, root.top) / root.row-height));
+    private property <int> visible-rows: max(0, min(ceil(root.cards.length / root.columns), ceil((root.top + root.view-height) / root.row-height)) - root.first-row);
+    out property <int> start: max(0, root.first-row - 1) * root.columns;
+    out property <int> instantiated-count: root.visible-rows == 0 ? 0 : max(0, min(root.cards.length - root.start, (root.visible-rows + 2) * root.columns));
+    callback anchor-changed(length);
+    private property <int> previous-columns;
+    private property <length> previous-row-height;
     function report() {
-        Actions.visible-cards(root.first-row * root.columns, root.visible-rows * root.columns);
+        Actions.visible-cards(root.start, root.instantiated-count);
     }
     height: ceil(cards.length / columns) * row-height;
-    init => { root.report(); }
+    init => { root.previous-columns = root.columns; root.previous-row-height = root.row-height; root.report(); }
     changed first-row => { root.report(); }
+    changed width => {
+        if root.previous-row-height > 0px {
+            root.anchor-changed(floor(floor(max(0px, root.top) / root.previous-row-height) * root.previous-columns / root.columns) * root.row-height);
+        }
+        root.previous-columns = root.columns;
+        root.previous-row-height = root.row-height;
+        root.report();
+    }
     changed columns => { root.report(); }
     changed visible-rows => { root.report(); }
     changed height => { root.report(); }
-    for card[index] in root.cards : Tile {
-        card: card;
+    for offset in root.instantiated-count : Tile {
+        private property <int> index: root.start + offset;
+        card: root.cards[self.index];
         art: root.art;
-        x: mod(index, root.columns) * (root.art + root.gap);
-        y: floor(index / root.columns) * root.row-height;
+        x: mod(self.index, root.columns) * (root.art + root.gap);
+        y: floor(self.index / root.columns) * root.row-height;
         width: root.art;
         height: root.art + 52px;
     }

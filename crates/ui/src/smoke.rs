@@ -48,6 +48,7 @@ impl Smoke {
                             }
                             _ => {}
                         }
+                        crate::record_fixture_window(&root, stage);
                         if let Err(error) = std::fs::write(root.join("smoke-stage"), stage) {
                             log::warn!("fixture smoke marker: {error}");
                         }

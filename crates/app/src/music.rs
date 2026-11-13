@@ -149,7 +149,7 @@ pub(crate) fn metadata(
     let valid_cover = |path: &Path, size| {
         fs::metadata(path)
             .ok()
-            .filter(|m| m.len() <= 8 * 1024 * 1024)
+            .filter(|m| m.len() <= eagle_palette::MAX_COVER_BYTES as u64)
             .and_then(|_| fs::read(path).ok())
             .and_then(|bytes| eagle_palette::decode_cover(&bytes, size).ok())
             .is_some()
@@ -176,7 +176,7 @@ pub(crate) fn metadata(
                 format!("https://{}", cover.replace("%%", "600x600"))
             };
             let mut request = Request::get(SignedUrl::new(url));
-            request.limit = 8 * 1024 * 1024;
+            request.limit = eagle_palette::MAX_COVER_BYTES;
             let response = net.request(Priority::Metadata, request, None)?;
             eagle_palette::process(&response.bytes, &temp_small, &temp_large)?
         } else {

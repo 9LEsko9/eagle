@@ -66,6 +66,9 @@ export global Ui {
     in property <bool> visible-to-user: true;
     in-out property <Route> route: Route.library;
     in-out property <bool> panel-open;
+    in-out property <bool> queue-editor-open;
+    in-out property <string> queue-focused-occurrence;
+    in-out property <length> queue-scroll-y;
     in-out property <bool> drawer-open;
     in-out property <bool> list-covers: true;
     in-out property <bool> compact;
@@ -86,6 +89,7 @@ export global Ui {
     in-out property <bool> confirm-delete;
 }
 export global Actions {
+    callback panel-content(bool);
     callback save(string);
     callback save-all();
     callback preferences-changed();

@@ -58,10 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RepaintBufferType::NewBuffer,
         ))))?;
     } else {
-        slint::BackendSelector::new()
-            .backend_name("winit".into())
-            .renderer_name("software".into())
-            .select()?;
+        eagle_ui::Renderer::from_args(std::env::args())?.select()?;
     }
     let ui = DesktopWindow::new()?;
     slint::select_bundled_translation("ru")?;

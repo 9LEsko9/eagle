@@ -75,6 +75,13 @@ export component DesktopWindow inherits Window {
         Layout.width = self.width;
         if !Layout.compact { Ui.drawer-open = false; }
     }
+    private property <float> panel-lifetime: Ui.panel-open ? 1 : 0;
+    animate panel-lifetime { duration: Motion.base; }
+    changed panel-lifetime => {
+        if root.panel-lifetime == 0 || root.panel-lifetime == 1 {
+            Actions.panel-content(Ui.panel-open);
+        }
+    }
     private property <length> bar-height: 80px;
     keys := FocusScope {
         VerticalLayout {
@@ -131,9 +138,8 @@ export component DesktopWindow inherits Window {
             PlayerBar { height: root.bar-height; }
         }
         // Floating «Сейчас играет» on windows too narrow for a third column.
-        if Layout.narrow : NowPlayingCard {
+        if Layout.narrow && (Ui.panel-open || root.panel-lifetime > 0) : NowPlayingCard {
             floating: true;
-            visible: Ui.panel-open;
             x: parent.width - self.width - 16px;
             y: 16px;
             height: parent.height - root.bar-height - 32px;

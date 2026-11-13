@@ -5,6 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Logging stays outside the directory that Session can relocate.
     let logger = eagle_platform::logging::Logger::init(&bootstrap.join("logs"))?;
     let args: Vec<String> = std::env::args().collect();
+    let renderer = eagle_ui::Renderer::from_args(&args)?;
     if let Some(index) = args.iter().position(|arg| arg == "--fixture-root") {
         let root = std::path::PathBuf::from(
             args.get(index + 1)
@@ -15,18 +16,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         std::fs::create_dir_all(&root)?;
         std::fs::write(root.join(".eagle-fixture"), b"fixture")?;
-        eagle_app::fixture::seed(&root)?;
+        if !root.join(".fixture-prepared").exists() {
+            eagle_app::fixture::seed(&root)?;
+        }
+        if args.iter().any(|arg| arg == "--fixture-prepare-only") {
+            return Ok(());
+        }
         return eagle_ui::run_with_providers(
             root,
-            args.iter().any(|arg| arg == "--software"),
-            vec![eagle_app::fixture::provider()],
+            renderer,
+            vec![eagle_app::fixture::stress_provider()],
         );
     }
-    let result = eagle_ui::run_with_options(
-        eagle_app::data_directory()?,
-        bootstrap,
-        std::env::args().any(|arg| arg == "--software"),
-    );
+    let result = eagle_ui::run_with_options(eagle_app::data_directory()?, bootstrap, renderer);
     logger.flush()?;
     result
 }

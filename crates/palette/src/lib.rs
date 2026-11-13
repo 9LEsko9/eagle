@@ -1,7 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Bounded cover decoding, two persisted sizes and median-cut colors.
 use image::{ImageReader, Limits, imageops::FilterType};
-use std::{io::Cursor, path::Path};
+use std::{io::Cursor, path::Path, sync::Mutex};
+pub const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
+// Downloads may prepare disk thumbnails while the UI worker is active.
+static DECODER: Mutex<()> = Mutex::new(());
+fn cover_reader(bytes: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, Box<dyn std::error::Error>> {
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err("cover exceeds byte limit".into());
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(1200);
+    limits.max_image_height = Some(1200);
+    limits.max_alloc = Some(8 * 1024 * 1024);
+    reader.limits(limits);
+    Ok(reader)
+}
 /// Split the box with the largest channel spread, then take its weighted mean.
 pub fn median_cut(pixels: &[[u8; 3]], count: usize) -> Vec<[u8; 3]> {
     if pixels.is_empty() || count == 0 {
@@ -46,12 +61,8 @@ pub fn process(
     small: &Path,
     large: &Path,
 ) -> Result<Vec<[u8; 3]>, Box<dyn std::error::Error>> {
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
+    let _decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    let reader = cover_reader(bytes)?;
     let image = reader.decode()?;
     let pixels: Vec<_> = image
         .resize_exact(32, 32, FilterType::Triangle)
@@ -211,12 +222,8 @@ pub fn decode_cover(bytes: &[u8], size: u32) -> Result<Cover, Box<dyn std::error
     if !(1..=1200).contains(&size) {
         return Err("invalid cover size".into());
     }
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
+    let _decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    let reader = cover_reader(bytes)?;
     let decoded = reader.decode()?;
     let samples: Vec<_> = decoded
         .resize_exact(32, 32, FilterType::Triangle)
@@ -232,4 +239,25 @@ pub fn decode_cover(bytes: &[u8], size: u32) -> Result<Cover, Box<dyn std::error
         rgba: image.into_raw(),
         dominant,
     })
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut output = Cursor::new(Vec::new());
+        image::RgbImage::new(width, height)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+    #[test]
+    fn rejects_corruption_compressed_limit_and_oversized_dimensions() {
+        assert!(decode_cover(b"broken", 64).is_err());
+        assert!(decode_cover(&vec![0; MAX_COVER_BYTES + 1], 64).is_err());
+        assert!(decode_cover(&png(1201, 1), 64).is_err());
+        let cover = decode_cover(&png(1200, 1200), 600).unwrap();
+        assert_eq!(cover.rgba.len(), 600 * 600 * 4);
+        assert!(decode_cover(&png(1, 1), 1201).is_err());
+    }
 }

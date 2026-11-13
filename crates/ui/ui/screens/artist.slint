@@ -84,6 +84,7 @@ export component ArtistScreen inherits Flickable {
             cards: Library.cards;
             top: -root.viewport-y - self.y;
             view-height: root.height;
+            anchor-changed(top) => { root.viewport-y = -top - self.y; }
         }
     }
 }

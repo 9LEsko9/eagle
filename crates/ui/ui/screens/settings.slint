@@ -1,3 +1,4 @@
+import { ListView } from "std-widgets.slint";
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, ThemeMode, Type, Motion, Layout } from "../globals/theme.slint";
 import { Ui, Actions, Route, Player, Status, Storage } from "../globals/bridge.slint";
@@ -233,7 +234,10 @@ export component SettingsScreen inherits Flickable {
                         text: @tr("Загрузок пока нет. Выберите «Сохранить офлайн» в меню трека.");
                         color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap;
                     }
+                    if Storage.jobs.length > 0 : ListView {
+                    height: min(440px, Storage.jobs.length * 132px);
                     for job in Storage.jobs : VerticalLayout {
+                        height: 132px;
                         padding-top: 12px; padding-bottom: 12px; spacing: 4px;
                         Text { text: job.track; color: Theme.t.tx; font-size: Type.body; overflow: elide; }
                         Text { text: job.quality + " · " + job.status; color: Theme.t.tx2; font-size: Type.meta; }
@@ -247,6 +251,7 @@ export component SettingsScreen inherits Flickable {
                             if job.retryable : TextButton { text: @tr("Продолжить"); clicked => { Actions.download-control(job.id, 1); } }
                             if job.cancellable : TextButton { text: @tr("Отменить"); clicked => { Actions.download-control(job.id, 2); } }
                         }
+                    }
                     }
                     SectionTitle { text: @tr("Система"); }
                     SettingRow {

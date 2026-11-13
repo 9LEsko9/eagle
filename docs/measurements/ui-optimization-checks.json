@@ -1,0 +1,70 @@
+{
+  "date": "2026-11-13",
+  "acceptance": "accepted_by_user",
+  "reason": "User confirmed the window appeared, accepted observed approximately 130 MB and closed further optimization",
+  "baseline_commit": "3ddc4c5f3b01dc9ed3f73addc4e18f560f86a9c0",
+  "current_commit": "92ba914cbbc159987d33927694411e2c8339e229",
+  "dirty": true,
+  "release_desktop_sha256": "72b155d2c872767552f21316ab88f5ee5139084339a0ed2d14d9960ed5a82f83",
+  "checks": {
+    "cargo_fmt_all_check": "passed",
+    "cargo_test_workspace": "passed",
+    "workspace_passed": 359,
+    "workspace_ignored": 1,
+    "rust_1_92_desktop_build": "passed",
+    "release_desktop_and_cli_build": "passed",
+    "python_tests": 8,
+    "software_headless_preview": "passed",
+    "software_preview_pngs": 36,
+    "desktop_tree_without_skia": [
+      "macos",
+      "windows",
+      "linux"
+    ],
+    "windows_linux_build_ci": "not run for local changes; remote query failed TLS trust (OSStatus -26276)"
+  },
+  "cli_idle_comparison": {
+    "seconds": 5,
+    "before": {
+      "scenario": "idle",
+      "os": "Darwin",
+      "arch": "arm64",
+      "duration_seconds": "5.006797583017033",
+      "cpu_percent_one_core": "0.0",
+      "phys_footprint_bytes": "1786264",
+      "voluntary_switches_observed": "",
+      "binary_bytes": "6727424",
+      "info_records_per_second": "0",
+      "package_idle_wakeups": "0",
+      "interrupt_wakeups": "0"
+    },
+    "after": {
+      "scenario": "idle",
+      "os": "Darwin",
+      "arch": "arm64",
+      "duration_seconds": "5.0042617919971235",
+      "cpu_percent_one_core": "0.0",
+      "phys_footprint_bytes": "1769880",
+      "voluntary_switches_observed": "",
+      "binary_bytes": "6727440",
+      "info_records_per_second": "0",
+      "package_idle_wakeups": "0",
+      "interrupt_wakeups": "0"
+    },
+    "before_sha256": "bec8b96615ac915f914bb6b2136485f14fe4cfe0c80d0869ec0fbdcd9e14ade0",
+    "after_sha256": "b8a79d73c1baa3b7d5971da3d44552b5df3c22475b7c22bd16e1fffad05418c0",
+    "limitation": "Short idle CLI regression smoke; does not exercise Session, audio, UI, GPU or the open-window memory budget"
+  },
+  "gui_probes": [
+    "ui-skia-baseline-1.json",
+    "ui-skia-retry.json",
+    "ui-femtovg-probe.json"
+  ],
+  "user_acceptance": {
+    "date": "2026-11-13",
+    "reported_memory": "approximately 130 MB",
+    "metric_and_units": "not independently verified",
+    "formal_original_budgets_verified": false,
+    "further_optimization": "closed by user decision"
+  }
+}

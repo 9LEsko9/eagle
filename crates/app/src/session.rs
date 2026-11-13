@@ -15,7 +15,7 @@ pub use eagle_store::DownloadState;
 use eagle_store::{Cache, Store};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, mpsc},
     thread,
@@ -126,8 +126,22 @@ fn cards_of(
 fn cards_reply(rows: &[(Card, Option<u64>)]) -> CatalogReply {
     CatalogReply::Cards(rows.iter().map(|(card, _)| card.clone()).collect())
 }
+// Include every connected account: changing a secondary provider must invalidate artwork too.
+fn artwork_context(store: &Store, providers: &Providers) -> Result<String> {
+    let accounts = providers
+        .all()
+        .iter()
+        .map(|provider| {
+            let id = provider.info().id;
+            store.setting(&account_key(id)).map(|account| (id, account))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(serde_json::to_string(&accounts)?)
+}
 fn header_cover(id: &TrackId, kind: &str, uri: Option<String>) -> Option<crate::covers::Job> {
     uri.map(|uri| crate::covers::Job {
+        context: String::new(),
+        reply: None,
         key: format!("h:{id}"),
         stem: format!("{kind}_{}", id.to_string().replace(':', "_")),
         uri: Some(uri),
@@ -143,6 +157,8 @@ fn card_job(card: &Card) -> crate::covers::Job {
         "album"
     };
     crate::covers::Job {
+        context: String::new(),
+        reply: None,
         key: card.key.clone(),
         stem: format!("{kind}_{}", card.id.to_string().replace(':', "_")),
         uri: card.cover.clone(),
@@ -437,7 +453,11 @@ pub enum Event {
     /// Album or artist like state, by id.
     CollectionLiked(TrackId, bool),
     /// Decoded artwork for the item with this UI key.
-    Thumbnail(String, Arc<eagle_palette::Cover>),
+    Thumbnail(
+        String,
+        Arc<eagle_palette::Cover>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ),
     Cover(CoverTarget, TrackId, Arc<eagle_palette::Cover>),
 }
 
@@ -791,12 +811,13 @@ impl Worker {
         };
         let providers = Arc::new(Providers::new(providers, &order).with_tokens(tokens));
         let (catalog, requests) = mpsc::channel();
+        let covers = crate::covers::Covers::start(root.clone(), net.clone(), emit.clone())?;
         let services = Catalog {
-            covers: RefCell::new(VecDeque::new()),
+            #[cfg(test)]
+            root: root.clone(),
+            cover_requests: Some(covers.handle()),
             last_album: RefCell::new(None),
             last_artist: RefCell::new(None),
-            root: root.clone(),
-            net: net.clone(),
             store: store.clone(),
             providers: providers.clone(),
             likes_more: std::cell::Cell::new(false),
@@ -808,7 +829,6 @@ impl Worker {
             .spawn(move || {
                 services.run(requests, replies);
             })?;
-        let covers = crate::covers::Covers::start(root.clone(), net.clone(), emit.clone())?;
         let online = tx.clone();
         let downloads = crate::downloads::Downloads::start(
             root.clone(),
@@ -823,6 +843,7 @@ impl Worker {
         )?;
         let account = stored_account(&store, &providers)?;
         downloads.account(account.clone());
+        covers.set_context(&artwork_context(&store, &providers)?);
         let profile = store.profile_id()?;
         let mut worker = Self {
             store,
@@ -1596,6 +1617,9 @@ impl Worker {
         self.restored_position = Duration::ZERO;
         self.last_position = None;
         self.account = account;
+        self.cover_generation = self.cover_generation.wrapping_add(1);
+        self.covers
+            .set_context(&artwork_context(&self.store, &self.providers)?);
         self.downloads.account(self.account.clone());
         self.player = Arc::default();
         self.restore_playback()?;
@@ -1755,6 +1779,8 @@ impl Worker {
                     .find(|t| t.id == id);
                 if let Some(track) = track {
                     jobs.push(crate::covers::Job {
+                        context: String::new(),
+                        reply: None,
                         stem: track.id.to_string().replace(':', "_"),
                         uri: track.cover.clone(),
                         size: 64,
@@ -1997,6 +2023,18 @@ impl Worker {
                 | Command::Artists
         ) {
             self.view_generation += 1;
+            self.covers.invalidate();
+            if self.ui_attached
+                && let Some(track) = &self.player.track
+                && let Some(catalog) = &self.catalog
+            {
+                let _ = catalog.send(CatalogRequest::Cover(
+                    track.clone(),
+                    CoverTarget::Player,
+                    0,
+                    self.cover_generation,
+                ));
+            }
             self.header_job = None;
             self.playlist_snapshot = None;
             self.busy = true;
@@ -3046,12 +3084,12 @@ enum CatalogReply {
     LikesPending,
 }
 struct Catalog {
-    covers: RefCell<VecDeque<(TrackId, Arc<eagle_palette::Cover>)>>,
+    #[cfg(test)]
+    root: PathBuf,
+    cover_requests: Option<crate::covers::Handle>,
     /// Last opened album/artist, so a like from its header can be listed without a refetch.
     last_album: RefCell<Option<Album>>,
     last_artist: RefCell<Option<Artist>>,
-    root: PathBuf,
-    net: Arc<eagle_net::Client>,
     store: Arc<Store>,
     providers: Arc<Providers>,
     /// Set when a like flush stopped at a full batch with due likes left.
@@ -3088,7 +3126,43 @@ impl Catalog {
             };
             if let Some(request) = request {
                 match request {
-                    CatalogRequest::ClearCovers => self.covers.borrow_mut().clear(),
+                    CatalogRequest::Cover(track, target, generation, cover_generation)
+                        if self.cover_requests.is_some() =>
+                    {
+                        let replies = replies.clone();
+                        let id = track.id.clone();
+                        let context = id.provider().to_owned();
+                        let job = crate::covers::Job {
+                            key: format!(
+                                "{}:{}",
+                                if matches!(target, CoverTarget::Player) {
+                                    "now"
+                                } else {
+                                    "h"
+                                },
+                                id
+                            ),
+                            context,
+                            stem: id.to_string().replace(':', "_"),
+                            uri: track.cover.clone(),
+                            size: 600,
+                            reply: Some(Arc::new(move |cover| {
+                                let _ = replies.send(Message::Catalog(
+                                    generation,
+                                    Box::new(Ok(CatalogReply::Cover(
+                                        target,
+                                        id.clone(),
+                                        cover,
+                                        cover_generation,
+                                    ))),
+                                ));
+                            })),
+                        };
+                        if let Some(handle) = &self.cover_requests {
+                            handle.request(vec![job]);
+                        }
+                    }
+                    CatalogRequest::ClearCovers => {}
                     CatalogRequest::Command(_, Command::SyncCollections | Command::SyncLibrary) => {
                         if sync.is_none() {
                             sync = Some(SyncState::default());
@@ -3453,10 +3527,7 @@ impl Catalog {
                 };
                 Ok(CatalogReply::PlaylistEdited(snapshot, rows, error))
             }
-            CatalogRequest::ClearCovers => {
-                self.covers.borrow_mut().clear();
-                Ok(CatalogReply::Unchanged)
-            }
+            CatalogRequest::ClearCovers => Ok(CatalogReply::Unchanged),
             CatalogRequest::FlushLikes { online } => {
                 if online && let Err(error) = self.store.wake_like_jobs() {
                     log::warn!(error = error.to_string().as_str(); "like wake failed");
@@ -3465,45 +3536,8 @@ impl Catalog {
                 Ok(CatalogReply::Unchanged)
             }
             CatalogRequest::Command(_, command) => self.command(command),
-            CatalogRequest::Cover(track, target, _, cover_generation) => {
-                {
-                    let mut covers = self.covers.borrow_mut();
-                    if let Some(index) = covers.iter().position(|(id, _)| id == &track.id) {
-                        let entry = covers.remove(index).ok_or("обложка удалена из кэша")?;
-                        let cover = entry.1.clone();
-                        covers.push_front(entry);
-                        return Ok(CatalogReply::Cover(
-                            target,
-                            track.id.clone(),
-                            cover,
-                            cover_generation,
-                        ));
-                    }
-                }
-                let name = track.id.to_string().replace(':', "_");
-                let path = self.root.join("covers").join(format!("{name}-600.png"));
-                if !path.exists()
-                    && (track.cover.is_none()
-                        || crate::music::metadata(&self.store, &self.net, &self.root, &track)
-                            .is_err())
-                {
-                    return Ok(CatalogReply::Unchanged);
-                }
-                let cover = Arc::new(eagle_palette::decode_cover(&std::fs::read(path)?, 600)?);
-                {
-                    let mut covers = self.covers.borrow_mut();
-                    covers.push_front((track.id.clone(), cover.clone()));
-                    if covers.len() > 3 {
-                        covers.pop_back();
-                    }
-                }
-                Ok(CatalogReply::Cover(
-                    target,
-                    track.id.clone(),
-                    cover,
-                    cover_generation,
-                ))
-            }
+            // Asynchronous artwork is handled by the shared cover worker in `run`.
+            CatalogRequest::Cover(..) => Ok(CatalogReply::Unchanged),
         }
     }
 
@@ -4033,6 +4067,8 @@ impl Catalog {
                     ..Header::default()
                 };
                 let cover = page.artist.cover.clone().map(|uri| crate::covers::Job {
+                    context: String::new(),
+                    reply: None,
                     key: format!("h:{id}"),
                     stem: format!("artist_{}", id.to_string().replace(':', "_")),
                     uri: Some(uri),
@@ -6126,13 +6162,13 @@ mod sync_tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         Catalog {
+            cover_requests: None,
             likes_more: std::cell::Cell::new(false),
             clock: wall_clock(),
-            covers: RefCell::new(VecDeque::new()),
             last_album: RefCell::new(None),
             last_artist: RefCell::new(None),
             store: Arc::new(Store::open(&root).unwrap()),
-            net: Arc::new(eagle_net::Client::new().unwrap()),
+
             providers,
             root,
         }
@@ -7335,13 +7371,12 @@ mod like_delivery_tests {
         let root = std::env::temp_dir().join(format!("eagle-like-catalog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         Catalog {
-            covers: RefCell::new(VecDeque::new()),
+            cover_requests: None,
             last_album: RefCell::new(None),
             last_artist: RefCell::new(None),
-            root: root.clone(),
-            net: Arc::new(eagle_net::Client::new().unwrap()),
             store: Arc::new(Store::open(&root).unwrap()),
             providers,
+            root,
             likes_more: std::cell::Cell::new(false),
             clock: wall_clock(),
         }

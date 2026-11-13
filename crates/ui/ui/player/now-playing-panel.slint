@@ -15,8 +15,8 @@ export global Source {
 // The card itself. It slides 24 px and fades in; nothing around it is re-laid out per frame.
 export component NowPlayingCard inherits Rectangle {
     in property <bool> floating;
-    private property <bool> edit-queue;
-    private property <string> focused-occurrence;
+    in-out property <bool> edit-queue <=> Ui.queue-editor-open;
+    in-out property <string> focused-occurrence <=> Ui.queue-focused-occurrence;
     private property <length> drag-origin;
     private property <int> drag-index;
     private property <string> drag-id;
@@ -122,6 +122,7 @@ export component NowPlayingCard inherits Rectangle {
                     }
                 }
                 ListView {
+                viewport-y <=> Ui.queue-scroll-y;
                 vertical-stretch: 1;
                 for entry[index] in Library.queue-order : Rectangle {
                     height: 84px;
@@ -198,5 +199,7 @@ export component NowPlayingCard inherits Rectangle {
 export component NowPlayingPanel inherits Rectangle {
     width: Ui.panel-open ? 336px : 0px;
     clip: true;
-    NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }
+    private property <float> lifetime: Ui.panel-open ? 1 : 0;
+    animate lifetime { duration: Motion.base; }
+    if Ui.panel-open || root.lifetime > 0 : NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }
 }

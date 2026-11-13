@@ -126,7 +126,7 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
             root.to_owned(),
             Arc::new(eagle_net::Client::new()?),
             Arc::new(move |event| {
-                if let crate::session::Event::Thumbnail(_, _) = event {
+                if let crate::session::Event::Thumbnail(_, _, _) = event {
                     let _ = tx.send(());
                 }
             }),
@@ -143,6 +143,8 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
                         covers.request(
                             (start..(start + 20).min(count))
                                 .map(|n| crate::covers::Job {
+                                    context: String::new(),
+                                    reply: None,
                                     key: format!("{prefix}:fixture:{n}"),
                                     stem: "fixture".into(),
                                     uri: None,

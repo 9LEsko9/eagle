@@ -10,18 +10,22 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::Instant,
 };
 slint::include_modules!();
 mod bridge;
+mod events;
+#[cfg(test)]
+mod grid_tests;
 mod instance;
 mod media;
 #[cfg(target_os = "windows")]
 mod native_window;
 mod notification;
 mod preferences;
+mod renderer;
+pub use renderer::Renderer;
 mod smoke;
 mod tray;
 #[cfg(target_os = "macos")]
@@ -31,6 +35,28 @@ use eagle_app::session::{Command, CommandSender, Event};
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU64;
 
+#[derive(Clone, Default)]
+struct QueueEditorState {
+    open: bool,
+    focused: slint::SharedString,
+    scroll_y: f32,
+}
+impl QueueEditorState {
+    fn capture(ui: &DesktopWindow) -> Self {
+        let state = ui.global::<Ui>();
+        Self {
+            open: state.get_queue_editor_open(),
+            focused: state.get_queue_focused_occurrence(),
+            scroll_y: state.get_queue_scroll_y(),
+        }
+    }
+    fn apply(&self, ui: &DesktopWindow) {
+        let state = ui.global::<Ui>();
+        state.set_queue_focused_occurrence(self.focused.clone());
+        state.set_queue_editor_open(self.open);
+        state.set_queue_scroll_y(self.scroll_y);
+    }
+}
 struct Shell {
     root: PathBuf,
     bootstrap_root: PathBuf,
@@ -44,9 +70,10 @@ struct Shell {
     player: Option<Arc<eagle_app::session::PlayerState>>,
     notify_on_close: bool,
     fixture: bool,
-    software: bool,
+    renderer: Renderer,
     window: Option<DesktopWindow>,
     waiting_snapshot: bool,
+    queue_editor: QueueEditorState,
     storage_locks: Vec<(
         PathBuf,
         Arc<eagle_store::relocation::StorageLease>,
@@ -54,6 +81,150 @@ struct Shell {
     )>,
 }
 thread_local! { static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) }; }
+
+struct Dispatch {
+    batch: Mutex<events::Batch>,
+    media: Mutex<Option<media::Handle>>,
+    anchor: Arc<Mutex<Option<PositionAnchor>>>,
+    visible: Arc<AtomicBool>,
+    open: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    pending: Arc<AtomicU64>,
+    closed: AtomicBool,
+}
+impl Dispatch {
+    fn send(self: &Arc<Self>, event: Event) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(media) = self
+            .media
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            media.event(&event);
+        }
+        #[allow(deprecated)]
+        let last_snapshot = matches!(&event, Event::Snapshot(_))
+            && self
+                .pending
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .ok()
+                == Some(1);
+        let Some(event) = bridge::coalesce_hidden_position(
+            event,
+            self.visible.load(Ordering::Acquire),
+            &self.anchor,
+        ) else {
+            return;
+        };
+        if !self.open.load(Ordering::Acquire)
+            && !matches!(&event, Event::Player(_) | Event::Storage { .. })
+        {
+            return;
+        }
+        let schedule = {
+            let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+            batch.push(events::Envelope {
+                event,
+                epoch: self.generation.load(Ordering::Acquire),
+                last_snapshot,
+            });
+            if batch.scheduled {
+                false
+            } else {
+                batch.scheduled = true;
+                true
+            }
+        };
+        if schedule {
+            self.schedule();
+        }
+    }
+    fn schedule(self: &Arc<Self>) {
+        let dispatch = self.clone();
+        if slint::invoke_from_event_loop(move || dispatch.drain()).is_err() {
+            self.closed.store(true, Ordering::Release);
+            *self.batch.lock().unwrap_or_else(|e| e.into_inner()) = events::Batch::default();
+        }
+    }
+    fn drain(self: Arc<Self>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let started = Instant::now();
+        while started.elapsed() < std::time::Duration::from_millis(2) {
+            let next = self.batch.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            let Some(events::Envelope {
+                event,
+                epoch,
+                last_snapshot,
+            }) = next
+            else {
+                break;
+            };
+            if let Event::Storage { folder, .. } = &event {
+                update_storage_root(folder.clone());
+            }
+            SHELL.with(|shell| {
+                let mut shell = shell.borrow_mut();
+                let Some(shell) = shell.as_mut() else {
+                    return;
+                };
+                let player = match &event {
+                    Event::Player(player) => Some(player.clone()),
+                    Event::Snapshot(snapshot) => Some(snapshot.player.clone()),
+                    _ => None,
+                };
+                if let Some(player) = player {
+                    if let Some(tray) = &shell.tray {
+                        tray.update(&player);
+                    }
+                    shell.player = Some(player);
+                }
+                let restoring = shell.waiting_snapshot && matches!(&event, Event::Snapshot(_));
+                if !shell.open.load(Ordering::Acquire)
+                    || !accept_event(
+                        &mut shell.waiting_snapshot,
+                        shell.generation.load(Ordering::Acquire) == epoch,
+                        matches!(&event, Event::Snapshot(_)),
+                        last_snapshot,
+                    )
+                {
+                    return;
+                }
+                if let Some(ui) = &shell.window {
+                    bridge::deliver(ui, event);
+                    if restoring {
+                        shell.queue_editor.apply(ui);
+                    }
+                }
+            });
+        }
+        let (again, retry) = {
+            let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+            let retry = std::mem::take(&mut batch.retry_artwork);
+            let again = !batch.is_empty();
+            batch.scheduled = again;
+            (again, retry)
+        };
+        if retry {
+            SHELL.with(|shell| {
+                if let Some(ui) = shell
+                    .borrow()
+                    .as_ref()
+                    .and_then(|shell| shell.window.as_ref())
+                {
+                    bridge::retry_artwork(ui);
+                }
+            });
+        }
+        if again {
+            self.schedule();
+        }
+    }
+}
 
 fn claim_instances(
     root: &std::path::Path,
@@ -94,35 +265,35 @@ fn claim_resolved(
     }
 }
 
-pub fn run(root: PathBuf, software: bool) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root.clone(), root, software, None)
+pub fn run(root: PathBuf, renderer: Renderer) -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(root.clone(), root, renderer, None)
 }
 pub fn run_with_options(
     root: PathBuf,
     bootstrap_root: PathBuf,
-    software: bool,
+    renderer: Renderer,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root, bootstrap_root, software, None)
+    run_inner(root, bootstrap_root, renderer, None)
 }
 pub fn run_with_providers(
     root: PathBuf,
-    software: bool,
+    renderer: Renderer,
     providers: Vec<Arc<dyn eagle_core::Provider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root.clone(), root, software, Some(providers))
+    run_inner(root.clone(), root, renderer, Some(providers))
 }
 pub fn run_with_providers_and_bootstrap(
     root: PathBuf,
     bootstrap_root: PathBuf,
-    software: bool,
+    renderer: Renderer,
     providers: Vec<Arc<dyn eagle_core::Provider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(root, bootstrap_root, software, Some(providers))
+    run_inner(root, bootstrap_root, renderer, Some(providers))
 }
 fn run_inner(
     root: PathBuf,
     bootstrap_root: PathBuf,
-    software: bool,
+    renderer: Renderer,
     providers: Option<Vec<Arc<dyn eagle_core::Provider>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut primaries) = claim_instances(&root, &bootstrap_root)? else {
@@ -139,19 +310,24 @@ fn run_inner(
     {
         return Ok(());
     }
-    slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name(if software { "software" } else { "skia" }.into())
-        .select()?;
+    renderer.select()?;
     let anchor = Arc::new(Mutex::new(None::<PositionAnchor>));
     let visible = Arc::new(AtomicBool::new(false));
     let open = Arc::new(AtomicBool::new(false));
     let generation = Arc::new(AtomicU64::new(0));
     let pending = Arc::new(AtomicU64::new(0));
-    let (events, rx) = mpsc::channel();
-    let emit = move |event| {
-        let _ = events.send(event);
-    };
+    let dispatch = Arc::new(Dispatch {
+        batch: Mutex::new(events::Batch::default()),
+        media: Mutex::new(None),
+        anchor: anchor.clone(),
+        visible: visible.clone(),
+        open: open.clone(),
+        generation: generation.clone(),
+        pending: pending.clone(),
+        closed: AtomicBool::new(false),
+    });
+    let delivery = dispatch.clone();
+    let emit = move |event| delivery.send(event);
     let notify_on_close = providers.is_none();
     let session = match providers {
         Some(providers) => Session::start_with_providers(root.clone(), providers, emit)?,
@@ -185,86 +361,14 @@ fn run_inner(
             player: None,
             notify_on_close,
             fixture: !notify_on_close,
-            software,
+            renderer,
             window: None,
             waiting_snapshot: false,
+            queue_editor: QueueEditorState::default(),
             storage_locks: Vec::new(),
         })
     });
-    let event_media = media.handle();
-    let dispatcher = std::thread::Builder::new()
-        .name("eg-ui-events".into())
-        .spawn(move || {
-            while let Ok(event) = rx.recv() {
-                event_media.event(&event);
-                if let Event::Storage { folder, .. } = &event {
-                    let folder = folder.clone();
-                    let _ = slint::invoke_from_event_loop(move || update_storage_root(folder));
-                }
-                let player = match &event {
-                    Event::Player(player) => Some(player.clone()),
-                    Event::Snapshot(snapshot) => Some(snapshot.player.clone()),
-                    _ => None,
-                };
-                if let Some(player) = player {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        SHELL.with(|shell| {
-                            if let Some(shell) = shell.borrow_mut().as_mut() {
-                                if let Some(tray) = &shell.tray {
-                                    tray.update(&player);
-                                }
-                                shell.player = Some(player);
-                            }
-                        })
-                    });
-                }
-                let snapshot = matches!(&event, Event::Snapshot(_));
-                // fetch_update is available on our Rust 1.92 MSRV.
-                #[allow(deprecated)]
-                let last_snapshot = if snapshot {
-                    pending
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                        .ok()
-                        == Some(1)
-                } else {
-                    false
-                };
-                let Some(event) = bridge::coalesce_hidden_position(
-                    event,
-                    visible.load(Ordering::Acquire),
-                    &anchor,
-                ) else {
-                    continue;
-                };
-                if !open.load(Ordering::Acquire) {
-                    continue;
-                }
-                let epoch = generation.load(Ordering::Acquire);
-                if slint::invoke_from_event_loop(move || {
-                    SHELL.with(|shell| {
-                        let mut shell = shell.borrow_mut();
-                        let Some(shell) = shell.as_mut() else {
-                            return;
-                        };
-                        if !accept_event(
-                            &mut shell.waiting_snapshot,
-                            shell.generation.load(Ordering::Acquire) == epoch,
-                            snapshot,
-                            last_snapshot,
-                        ) {
-                            return;
-                        }
-                        if let Some(ui) = &shell.window {
-                            bridge::deliver(ui, event);
-                        }
-                    });
-                })
-                .is_err()
-                {
-                    break;
-                }
-            }
-        })?;
+    *dispatch.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(media.handle());
     show_window()?;
     slint::invoke_from_event_loop(|| {
         let sender = SHELL.with(|shell| shell.borrow().as_ref().map(|shell| shell.sender.clone()));
@@ -315,10 +419,10 @@ fn run_inner(
         shell.map(|shell| shell.storage_locks)
     });
     bridge::clear();
+    dispatch.closed.store(true, Ordering::Release);
     drop(session);
     drop(activations);
     drop(storage_locks);
-    let _ = dispatcher.join();
     media.shutdown();
     result?;
     Ok(())
@@ -427,7 +531,7 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
         });
         return Ok(());
     }
-    let (root, sender, anchor, visible, fixture, software) = SHELL
+    let (root, sender, anchor, visible, fixture, renderer) = SHELL
         .with(|shell| {
             let shell = shell.borrow();
             let shell = shell.as_ref()?;
@@ -437,30 +541,47 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
                 shell.anchor.clone(),
                 shell.visible.clone(),
                 shell.fixture,
-                shell.software,
+                shell.renderer,
             ))
         })
         .ok_or("window shell unavailable")?;
-    let ui = DesktopWindow::new()?;
+    let ui = DesktopWindow::new().map_err(|error| {
+        format!(
+            "Unable to create {} window: {error}. Try --software.",
+            renderer.name()
+        )
+    })?;
     // Generated Slint components register their bundled translations on construction.
     slint::select_bundled_translation("ru")?;
-    if software {
+    if renderer == Renderer::Software {
         log::info!(target: "eagle_ui", "rendering API: software");
-    } else if ui
-        .window()
-        .set_rendering_notifier(|state, api| {
-            if matches!(state, slint::RenderingState::RenderingSetup) {
-                let api = match api {
-                    slint::GraphicsAPI::NativeOpenGL { .. } => "OpenGL",
-                    slint::GraphicsAPI::WebGL { .. } => "WebGL",
-                    _ => "unknown",
-                };
-                log::info!(target: "eagle_ui", "rendering API: {api}");
-            }
-        })
-        .is_err()
-    {
-        log::info!(target: "eagle_ui", "rendering API: unknown");
+    } else {
+        let gpu_root = root.clone();
+        if ui
+            .window()
+            .set_rendering_notifier(move |state, api| {
+                if matches!(state, slint::RenderingState::RenderingSetup) {
+                    let api = match api {
+                        slint::GraphicsAPI::WGPU29 { device, .. } => {
+                            format!("WGPU/{:?}", device.adapter_info().backend)
+                        }
+                        slint::GraphicsAPI::NativeOpenGL { .. } => "OpenGL".to_owned(),
+                        slint::GraphicsAPI::WebGL { .. } => "WebGL".to_owned(),
+                        _ => "unknown".to_owned(),
+                    };
+                    log::info!(target: "eagle_ui", "rendering API: {api}");
+                    if fixture {
+                        let _ = std::fs::write(
+                            gpu_root.join("fixture-gpu.json"),
+                            serde_json::json!({"actual_graphics_api": api}).to_string(),
+                        );
+                    }
+                }
+            })
+            .is_err()
+        {
+            log::info!(target: "eagle_ui", "rendering API: unknown");
+        }
     }
     let preferences = preferences::Preferences::load(&root);
     preferences.apply(&ui);
@@ -699,7 +820,10 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
                 shell.open.store(false, Ordering::Release);
                 shell.visible.store(false, Ordering::Release);
                 shell.generation.fetch_add(1, Ordering::AcqRel);
-                if shell.window.take().is_some() {
+                if let Some(ui) = shell.window.take() {
+                    if !shell.waiting_snapshot {
+                        shell.queue_editor = QueueEditorState::capture(&ui);
+                    }
                     let _ = shell.sender.send(Command::UiAttached(false));
                 }
             }
@@ -711,7 +835,11 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
         bridge::clear();
         #[cfg(target_os = "macos")]
         set_dock_visible(false);
-        return Err(error.into());
+        return Err(format!(
+            "Unable to show {} window: {error}. Try --software.",
+            renderer.name()
+        )
+        .into());
     }
     SHELL.with(|shell| {
         if let Some(shell) = shell.borrow_mut().as_mut() {
@@ -807,11 +935,22 @@ mod tests {
             weak.upgrade().is_none(),
             "closed window must release its component"
         );
+        let editor = QueueEditorState {
+            open: true,
+            focused: "17".into(),
+            scroll_y: -336.,
+        };
         let reopened = DesktopWindow::new().unwrap();
+        editor.apply(&reopened);
+        let restored = QueueEditorState::capture(&reopened);
+        assert!(restored.open);
+        assert_eq!(restored.focused, "17");
+        assert_eq!(restored.scroll_y, -336.);
         reopened.show().unwrap();
         reopened.hide().unwrap();
         drop(reopened);
         bridge::tests::structural_changes_and_cover_toggle_release_artwork();
+        grid_tests::visible_cards_keep_source_actions();
         let ui = DesktopWindow::new().unwrap();
         let rows = Rc::new(VecModel::from(vec![TrackItem {
             id: "yandex:1".into(),
@@ -1012,5 +1151,23 @@ mod tests {
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(10));
         slint::platform::update_timers_and_animations();
         assert_eq!(*positions.borrow(), before);
+    }
+}
+
+fn record_fixture_window(root: &std::path::Path, stage: &str) {
+    let value = SHELL.with(|shell| {
+        let shell = shell.borrow();
+        let shell = shell.as_ref()?;
+        let size = shell.window.as_ref().map(|ui| ui.window().size());
+        Some(serde_json::json!({
+            "stage": stage,
+            "surface_physical_pixels": size.map(|size| [size.width, size.height]),
+            "scale_factor": shell.window.as_ref().map(|ui| ui.window().scale_factor()),
+            "window_open": shell.open.load(Ordering::Acquire),
+            "visible_to_user": shell.visible.load(Ordering::Acquire),
+        }))
+    });
+    if let Some(value) = value {
+        let _ = std::fs::write(root.join("fixture-window.json"), value.to_string());
     }
 }
