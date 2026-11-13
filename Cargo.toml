@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/provider-sdk", "crates/providers/yandex", "crates/providers/vk", "crates/providers/_template", "crates/net", "crates/store", "crates/engine", "crates/palette", "crates/platform", "crates/app", "crates/ui", "crates/cli", "crates/desktop", "xtask"]
+members = ["crates/core", "crates/provider-sdk", "crates/providers/yandex", "crates/providers/vk", "crates/providers/_template", "crates/net", "crates/store", "crates/engine", "crates/palette", "crates/platform", "crates/app", "crates/ui", "crates/cli", "crates/desktop", "xtask", "tools/brand"]
 
 [workspace.package]
 version = "0.1.0"
