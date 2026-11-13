@@ -697,6 +697,8 @@ pub(super) fn apply_colors(ui: &DesktopWindow) {
         tx: color(panel.text),
         tx2: color(panel.secondary),
     });
+    #[cfg(target_os = "macos")]
+    super::window_chrome::apply(ui);
 }
 
 thread_local! { static UI_BRIDGE: RefCell<Option<Rc<Bridge>>> = const { RefCell::new(None) }; }

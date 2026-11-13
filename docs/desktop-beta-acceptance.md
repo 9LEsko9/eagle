@@ -18,6 +18,12 @@ An independent minimal AppKit program reproduced missing `applicationDidFinishLa
 
 Repeat the native fixture from the user's normal graphical terminal after restoring access. A headless screenshot pass or a successful compile does not resolve this blocker. The [measurement record](measurements/desktop-beta-release.json) retains this failed attempt separately from earlier valid samples.
 
+### User-session startup recovery and title bar
+
+The real player had survived a WindowServer restart and retained both single-instance locks. Ordinary new launches therefore activated that orphan and exited. After a private SQLite backup and termination of only the verified old process, the user launched the new release from Terminal and confirmed that its window appeared. This restores ordinary startup; automated native fixtures in the tool context remain unverified. The code does not yet automatically recover an orphan after a graphical-session failure.
+
+The native macOS title bar now takes the selected theme's opaque background, with a matching light/dark appearance. Auto mode releases the native appearance override and reconciles the actual system theme through a weak, deferred callback. It adds no polling timer. The user confirmed the visible title-bar correction on the new release (SHA-256 `cce4ea9a4355c6c1bd7fa65babb64f9843355401b0bb081c0cf947269f35bb66`). UI tests (8), formatting, UI/all-targets clippy with `-D warnings`, Rust 1.92 and release build passed. The complete native theme-switch/fullscreen/reopen matrix has not been performed.
+
 ## Implemented paths
 
 | Area | Behavior | Evidence required for acceptance |

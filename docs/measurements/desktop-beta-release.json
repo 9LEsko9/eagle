@@ -313,5 +313,16 @@
     "status": "failed before first native stage; no performance samples",
     "comparison": "Earlier b7037d2 binary also failed to reach its first stage in a separate 12-second control.",
     "independent_probe": "Minimal AppKit process did not receive applicationDidFinishLaunching; main queue and prelaunch timer worked. CGSession was NULL; Computer Use service startup failed."
+  },
+  "user_session_recovery": {
+    "ordinary_window_opened": "confirmed by user after stopping the orphaned previous instance which retained both locks after WindowServer restart",
+    "data_protection": "private SQLite backup retained locally; no saved audio removed",
+    "native_titlebar": "user confirmed corrected appearance after full quit and restart",
+    "binary_sha256": "cce4ea9a4355c6c1bd7fa65babb64f9843355401b0bb081c0cf947269f35bb66",
+    "limitations": [
+      "Tool-initiated native startup remains blocked in its graphical-session context.",
+      "Automatic recovery of an orphaned GUI process is not implemented.",
+      "Full native theme-switch, fullscreen and reopen matrix not performed."
+    ]
   }
 }

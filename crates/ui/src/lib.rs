@@ -24,6 +24,8 @@ mod notification;
 mod preferences;
 mod smoke;
 mod tray;
+#[cfg(target_os = "macos")]
+mod window_chrome;
 
 use eagle_app::session::{Command, CommandSender, Event};
 use std::cell::RefCell;
@@ -544,6 +546,8 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
                             .set_system_dark(theme == slint::winit_030::winit::window::Theme::Dark);
                     }
                 });
+                #[cfg(target_os = "macos")]
+                window_chrome::apply(&ui);
             }
         }
     })?;

@@ -40,4 +40,4 @@ ksni = { version = "=0.3.7", features = ["blocking"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSApplication", "NSRunningApplication"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSApplication", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "objc2-core-foundation"] }
