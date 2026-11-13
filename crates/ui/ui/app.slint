@@ -77,7 +77,7 @@ export component DesktopWindow inherits Window {
         if !Layout.compact { Ui.drawer-open = false; }
     }
     private property <float> panel-lifetime: Ui.panel-open ? 1 : 0;
-    animate panel-lifetime { duration: Motion.base; }
+    animate panel-lifetime { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; }
     changed panel-lifetime => {
         if root.panel-lifetime == 0 || root.panel-lifetime == 1 {
             Actions.panel-content(Ui.panel-open);

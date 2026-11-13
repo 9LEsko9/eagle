@@ -1005,6 +1005,7 @@ mod tests {
         grid_tests::visible_cards_keep_source_actions();
         let ui = DesktopWindow::new().unwrap();
         let rows = Rc::new(VecModel::from(vec![TrackItem {
+            occurrence: Default::default(),
             id: "yandex:1".into(),
             album_id: "".into(),
             album: "".into(),

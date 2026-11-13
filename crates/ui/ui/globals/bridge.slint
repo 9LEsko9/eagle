@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 export enum Status { idle, loading, playing, paused, buffering }
 export enum Route { saved, history, library, search, album, playlist, login, settings, albums, artists, artist, radio }
-export struct TrackItem { blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
+export struct TrackItem { occurrence: string, blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
 export struct CollectionItem { id: string, title: string }
 // Album or artist tile. `key` routes artwork; `id` opens it.
 export struct CardItem { id: string, key: string, title: string, subtitle: string, cover: image, round: bool, route: Route }
@@ -100,10 +100,8 @@ export global Actions {
     callback autostart(bool);
     callback move-storage(string);
     callback remove-saved(string);
+    callback jump-to(string);
     callback enqueue-next(string);
-    callback move-queue(string, int);
-    callback shift-queue(string, int);
-    callback play-next(string);
     callback play(string);
     callback play-row(int);
     callback play-all(bool);

@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .map(|(i, (title, artist, album, duration))| TrackItem {
+            occurrence: Default::default(),
             blocked_reason: Default::default(),
             id: format!("fixture:{i}").into(),
             album_id: format!("fixture:album:{i}").into(),

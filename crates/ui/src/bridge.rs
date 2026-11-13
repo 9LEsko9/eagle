@@ -34,6 +34,7 @@ fn image(cover: &eagle_palette::Cover) -> slint::Image {
 fn track_item(item: LibraryItem) -> TrackItem {
     let seconds = item.track.duration_ms / 1000;
     TrackItem {
+        occurrence: Default::default(),
         blocked_reason: item.blocked_reason.clone().unwrap_or_default().into(),
         id: item.track.id.to_string().into(),
         album_id: item
@@ -331,23 +332,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let current = snapshot
                 .current
                 .and_then(|id| snapshot.queue.iter().position(|(item, _)| *item == id));
-            let mut queue: Vec<_> = current.map_or_else(Vec::new, |index| {
+            let queue: Vec<_> = current.map_or_else(Vec::new, |index| {
                 snapshot.queue[index + 1..]
                     .iter()
                     .map(|(_, track)| track.clone())
                     .collect()
             });
-            if snapshot.player.repeat == eagle_app::session::Repeat::All
-                && let Some(index) = current
-            {
-                queue.extend(
-                    snapshot.queue[..index]
-                        .iter()
-                        .map(|(_, track)| track.clone()),
-                );
-            }
-            queue.truncate(4);
-            apply(ui, Event::Queue(queue), bridge);
             apply(
                 ui,
                 Event::QueueOrder {
@@ -356,6 +346,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 },
                 bridge,
             );
+            apply(ui, Event::Queue(queue), bridge);
             apply(ui, Event::Player(snapshot.player), bridge);
             if let Some(position) = snapshot.position {
                 apply(ui, Event::Position(position), bridge);
@@ -484,15 +475,27 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .iter()
                 .map(|t| format!("t:{}", t.id))
                 .collect::<Vec<_>>();
+            let ids = bridge.queue_ids.borrow();
+            let start = bridge
+                .queue_current
+                .get()
+                .and_then(|id| ids.iter().position(|entry| *entry == id))
+                .map_or(ids.len(), |index| index + 1);
             let items = tracks
                 .into_iter()
-                .map(|track| {
-                    track_item(LibraryItem {
+                .enumerate()
+                .map(|(index, track)| {
+                    let mut item = track_item(LibraryItem {
                         sources: Vec::new(),
                         blocked_reason: None,
                         track,
                         liked: false,
-                    })
+                    });
+                    item.occurrence = ids
+                        .get(start + index)
+                        .map_or_else(String::new, u64::to_string)
+                        .into();
+                    item
                 })
                 .collect::<Vec<_>>();
             ui.global::<Library>()
@@ -556,10 +559,9 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 if state.track.is_none() {
                     String::new()
                 } else {
-                    state.bitrate_kbps.map_or_else(
-                        || "Битрейт неизвестен".to_owned(),
-                        |value| format!("{value} кбит/с"),
-                    )
+                    state
+                        .bitrate_kbps
+                        .map_or_else(String::new, |value| format!("{value} кбит/с"))
                 }
                 .into(),
             );
@@ -961,21 +963,9 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         let _ = tx.send(Command::CacheLimit(limit));
     });
     let tx = sender.clone();
-    actions.on_shift_queue(move |id, delta| {
+    actions.on_jump_to(move |id| {
         if let Ok(id) = id.parse() {
-            let _ = tx.send(Command::ShiftQueue { id, delta });
-        }
-    });
-    let tx = sender.clone();
-    actions.on_move_queue(move |id, to| {
-        if let (Ok(id), Ok(to)) = (id.parse(), usize::try_from(to)) {
-            let _ = tx.send(Command::MoveQueue { id, to });
-        }
-    });
-    let tx = sender.clone();
-    actions.on_play_next(move |id| {
-        if let Ok(id) = id.parse() {
-            let _ = tx.send(Command::PlayNext(id));
+            let _ = tx.send(Command::JumpTo(id));
         }
     });
     let tx = sender.clone();
@@ -1494,10 +1484,7 @@ pub(super) mod tests {
             ..Default::default()
         };
         apply(&ui, Event::Player(Arc::new(unknown)), &bridge);
-        assert_eq!(
-            ui.global::<Player>().get_quality().as_str(),
-            "Битрейт неизвестен"
-        );
+        assert_eq!(ui.global::<Player>().get_quality().as_str(), "");
         apply(&ui, Event::Downloads(Vec::new()), &bridge);
         assert_eq!(ui.global::<Storage>().get_jobs().row_count(), 0);
         assert_eq!(rows.row_count(), 1);

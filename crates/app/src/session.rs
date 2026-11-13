@@ -229,6 +229,7 @@ pub enum Command {
         delta: i32,
     },
     PlayNext(u64),
+    JumpTo(u64),
     /// Add a fresh occurrence from local metadata immediately after the current one.
     EnqueueNext(TrackId),
     Open(View),
@@ -525,20 +526,12 @@ fn select_play_all(
     }
 }
 
-fn upcoming(queue: &[Arc<Track>], current: usize, repeat: Repeat) -> Vec<Arc<Track>> {
-    if current >= queue.len() {
-        return Vec::new();
-    }
-    let remaining = queue.iter().skip(current + 1);
-    if repeat == Repeat::All {
-        remaining
-            .chain(queue.iter().take(current))
-            .take(4)
-            .cloned()
-            .collect()
-    } else {
-        remaining.take(4).cloned().collect()
-    }
+fn upcoming(queue: &[Arc<Track>], current: usize, _repeat: Repeat) -> Vec<Arc<Track>> {
+    queue
+        .iter()
+        .skip(current.saturating_add(1))
+        .cloned()
+        .collect()
 }
 
 fn playback_order(queue: &[Arc<Track>], sources: &[Arc<Track>]) -> Result<Vec<usize>> {
@@ -2069,6 +2062,7 @@ impl Worker {
                 | Command::MoveQueue { .. }
                 | Command::ShiftQueue { .. }
                 | Command::PlayNext(_)
+                | Command::JumpTo(_)
                 | Command::EnqueueNext(_)
                 | Command::Next
         );
@@ -2343,6 +2337,23 @@ impl Worker {
                     .clamp(0, self.queue.len().saturating_sub(1) as i64)
                     as usize;
                 self.move_queue(id, to)?;
+            }
+            Command::JumpTo(id) => {
+                let index = self
+                    .queue
+                    .iter()
+                    .position(|track| self.occurrence_id(track) == id)
+                    .ok_or("трек уже не в очереди")?;
+                if self.engine.is_none() {
+                    self.select_paused(index);
+                } else {
+                    let paused = self.player.status == State::Paused;
+                    self.current = index;
+                    self.play_current()?;
+                    if paused && let Some(engine) = &self.engine {
+                        engine.pause()?;
+                    }
+                }
             }
             Command::PlayNext(id) => {
                 let from = self
@@ -5149,6 +5160,56 @@ mod delta_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn jump_to_keeps_skipped_tracks_behind() {
+        let root = std::env::temp_dir().join(format!("eagle-jump-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.queue = (1..=4).map(|id| row(id, false).track).collect();
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        worker.select_paused(0);
+        let target = worker.occurrence_id(&worker.queue[2]);
+        worker.command(Command::JumpTo(target)).unwrap();
+        assert_eq!(worker.current, 2);
+        worker.command(Command::Previous).unwrap();
+        assert_eq!(worker.current, 1);
+        worker.command(Command::Previous).unwrap();
+        assert_eq!(worker.current, 0);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn jump_to_unknown_occurrence_changes_nothing() {
+        let root = std::env::temp_dir().join(format!("eagle-jump-missing-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.queue = (1..=4).map(|id| row(id, false).track).collect();
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        worker.select_paused(0);
+        let before = worker.snapshot();
+        assert_eq!(
+            worker
+                .command(Command::JumpTo(u64::MAX))
+                .unwrap_err()
+                .to_string(),
+            "трек уже не в очереди"
+        );
+        let after = worker.snapshot();
+        assert_eq!(before.current, after.current);
+        assert_eq!(
+            before.queue.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            after.queue.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+        assert!(Arc::ptr_eq(&before.player, &after.player));
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn successive_keyboard_moves_follow_occurrence_after_each_move() {
         let root = std::env::temp_dir().join(format!("eagle-shift-{}", std::process::id()));
         let (tx, _) = mpsc::channel();
@@ -5299,7 +5360,7 @@ mod delta_tests {
         assert_eq!(playback_order(&queue, &queue).unwrap(), [0, 1, 2]);
     }
     #[test]
-    fn upcoming_wraps_only_for_repeat_all() {
+    fn upcoming_contains_only_tracks_after_current() {
         let queue = vec![
             row(1, false).track,
             row(2, false).track,
@@ -5313,7 +5374,7 @@ mod delta_tests {
         };
         assert_eq!(ids(Repeat::Off), ["yandex:3"]);
         assert_eq!(ids(Repeat::One), ["yandex:3"]);
-        assert_eq!(ids(Repeat::All), ["yandex:3", "yandex:1"]);
+        assert_eq!(ids(Repeat::All), ["yandex:3"]);
     }
     #[test]
     fn repeated_source_resets_position_and_rotated_sources_map_to_queue() {
