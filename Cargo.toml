@@ -16,11 +16,29 @@ license = "GPL-3.0-or-later"
 thiserror = "2"
 log = { version = "0.4", features = ["std", "kv", "release_max_level_debug"] }
 
+# Dev and test builds: the target directory stays small and builds use less RAM.
+# Backtraces keep file and line numbers; dependencies carry no debug info.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.build-override]
+opt-level = 0
+debug = false
+
+# opt-level 3 is the "-O3" of rustc; LTO and one codegen unit give the smallest, fastest binary,
+# and panic=abort drops the unwinding tables.
 [profile.release]
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+debug = false
+incremental = false
 
 [profile.profiling]
 inherits = "release"
