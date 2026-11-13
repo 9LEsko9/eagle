@@ -382,6 +382,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("oled", ThemeMode::Oled, Route::Playlist, true, false, 1280.),
         (
+            "paused-graphite",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "paused-paper",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "paused-oled",
+            ThemeMode::Oled,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
             "albums",
             ThemeMode::Graphite,
             Route::Albums,
@@ -543,12 +567,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
                 shown.clear();
             }
-            ui.global::<Player>()
-                .set_status(if name.starts_with("saved-blocked") {
+            ui.global::<Player>().set_status(
+                if name.starts_with("saved-blocked") || name.starts_with("paused-") {
                     Status::Paused
                 } else {
                     Status::Playing
-                });
+                },
+            );
             if name.starts_with("saved-blocked") {
                 shown[0].available = false;
                 shown[0].blocked_reason = "Провайдер подтвердил потерю доступа".into();

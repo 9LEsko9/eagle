@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Motion } from "../globals/theme.slint";
+import { GlyphSwap } from "glyph-swap.slint";
 
-// Filled round button; the glyph morphs between a triangle and two bars, the disc
-// dips while pressed.
+// Filled round button; the disc dips while pressed.
 export component PlayPause inherits Rectangle {
     in property <bool> playing;
     in property <color> fg: Theme.t.tx;
@@ -11,8 +11,6 @@ export component PlayPause inherits Rectangle {
     callback clicked();
     width: size;
     height: size;
-    private property <float> t: playing ? 1 : 0;
-    animate t { duration: Motion.play; easing: cubic-bezier(0.2, 0, 0, 1); }
     private property <float> scale: touch.pressed ? 0.96 : 1;
     animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
     accessible-role: button;
@@ -28,25 +26,17 @@ export component PlayPause inherits Rectangle {
         border-color: root.glyph;
         transform-scale-x: root.scale * 100%;
         transform-scale-y: root.scale * 100%;
-        Path {
-            width: root.size * 0.4;
+        GlyphSwap {
+            width: root.size * 0.45;
             height: self.width;
-            // Optical centring: the triangle is nudged right, the bars are not.
-            x: (parent.width - self.width) / 2 + 1.5px * (1 - root.t);
+            x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            viewbox-width: 16;
-            viewbox-height: 16;
-            fill: root.glyph;
-            MoveTo { x: 3 - 0.5 * root.t; y: 1; }
-            LineTo { x: 8.5 - 2 * root.t; y: 4.15 - 3.15 * root.t; }
-            LineTo { x: 8.5 - 2 * root.t; y: 11.85 + 3.15 * root.t; }
-            LineTo { x: 3 - 0.5 * root.t; y: 15; }
-            Close { }
-            MoveTo { x: 8.5 + 1 * root.t; y: 4.15 - 3.15 * root.t; }
-            LineTo { x: 14 - 0.5 * root.t; y: 8 - 7 * root.t; }
-            LineTo { x: 14 - 0.5 * root.t; y: 8 + 7 * root.t; }
-            LineTo { x: 8.5 + 1 * root.t; y: 11.85 + 3.15 * root.t; }
-            Close { }
+            on: root.playing;
+            off-icon: @image-url("../icons/play.svg");
+            on-icon: @image-url("../icons/pause.svg");
+            fg: root.glyph;
+            icon-size: root.size * 0.45;
+            off-offset: root.size * 0.03;
         }
     }
     focus := FocusScope {
