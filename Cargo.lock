@@ -1478,6 +1478,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eagle-provider-template"
+version = "0.1.0"
+dependencies = [
+ "eagle-provider-sdk",
+]
+
+[[package]]
 name = "eagle-store"
 version = "0.1.0"
 dependencies = [

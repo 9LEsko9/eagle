@@ -18,3 +18,4 @@ roxmltree = "0.20"
 [dev-dependencies]
 eagle-core = { path = "../../core" }
 eagle-net = { path = "../../net" }
+eagle-provider-sdk = { path = "../../provider-sdk", features = ["testkit"] }

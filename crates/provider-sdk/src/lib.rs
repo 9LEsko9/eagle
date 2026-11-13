@@ -11,3 +11,6 @@ mod info;
 pub use info::*;
 mod http;
 pub use http::*;
+
+#[cfg(feature = "testkit")]
+pub mod testkit;

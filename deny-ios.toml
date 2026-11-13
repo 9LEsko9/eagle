@@ -74,6 +74,11 @@ version = "=0.1.0"
 allow = ["GPL-3.0-or-later"]
 
 [[licenses.exceptions]]
+name = "eagle-provider-template"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
 name = "xtask"
 version = "=0.1.0"
 allow = ["GPL-3.0-or-later"]

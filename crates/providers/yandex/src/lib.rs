@@ -792,6 +792,13 @@ fn direct_link(xml: &[u8]) -> Result<String, ProviderError> {
 #[cfg(test)]
 mod tests {
     use eagle_net::Client;
+    #[test]
+    fn info_passes_conformance_checks() {
+        // Full `conformance::run` needs recorded responses; only the self-description is checked here.
+        let provider = Yandex::new(Arc::new(Client::new().unwrap()));
+        let violations = eagle_provider_sdk::testkit::conformance::check_info(provider.info());
+        assert!(violations.is_empty(), "{violations:?}");
+    }
     fn mock_api(responses: Vec<&'static str>) -> (Yandex, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

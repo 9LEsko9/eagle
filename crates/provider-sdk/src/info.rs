@@ -122,12 +122,16 @@ mod tests {
 
     #[test]
     fn intersect_is_per_flag() {
-        let mut provider = Capabilities::default();
-        provider.likes = true;
-        provider.radio = true;
-        let mut account = Capabilities::default();
-        account.likes = true;
-        account.lyrics = true;
+        let provider = Capabilities {
+            likes: true,
+            radio: true,
+            ..Capabilities::default()
+        };
+        let account = Capabilities {
+            likes: true,
+            lyrics: true,
+            ..Capabilities::default()
+        };
         let effective = provider.intersect(&account);
         assert!(effective.likes);
         assert!(!effective.radio && !effective.lyrics);

@@ -9,6 +9,10 @@ rust-version.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
 
+[features]
+# Test kit for provider authors: FakeProvider and conformance checks.
+testkit = []
+
 [dependencies]
 thiserror.workspace = true
 log.workspace = true
