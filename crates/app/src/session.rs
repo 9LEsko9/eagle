@@ -227,6 +227,8 @@ pub enum Repeat {
 #[derive(Debug)]
 pub struct PlayerState {
     pub bitrate_kbps: Option<u32>,
+    /// Provider id of the copy actually playing; may differ from `track.id`'s provider.
+    pub source_provider: Option<String>,
     pub track: Option<Arc<Track>>,
     pub status: State,
     pub volume: f32,
@@ -238,6 +240,7 @@ impl Default for PlayerState {
     fn default() -> Self {
         Self {
             bitrate_kbps: None,
+            source_provider: None,
             track: None,
             status: State::Idle,
             volume: 1.,
@@ -490,6 +493,8 @@ enum Message {
     Catalog(u64, Box<std::result::Result<CatalogReply, String>>),
     Engine(u64, eagle_engine::Event),
     Bitrate(u64, u64, Option<u32>),
+    /// The copy of the track that was really chosen for playback.
+    Source(u64, u64, TrackId),
 }
 #[derive(Clone)]
 pub struct CommandSender(mpsc::Sender<Message>);
@@ -567,6 +572,8 @@ struct Worker {
     engine_events: Option<thread::JoinHandle<()>>,
     engine_generation: u64,
     audio_bitrates: HashMap<u64, Option<u32>>,
+    /// Provider id of the copy that plays, per queue occurrence.
+    audio_sources: HashMap<u64, String>,
     tx: mpsc::Sender<Message>,
     rows: Vec<LibraryItem>,
     queue: Vec<Arc<Track>>,
@@ -707,6 +714,7 @@ impl Worker {
             engine_events: None,
             engine_generation: 0,
             audio_bitrates: HashMap::new(),
+            audio_sources: HashMap::new(),
             tx,
             rows: Vec::new(),
             queue: Vec::new(),
@@ -1053,6 +1061,9 @@ impl Worker {
                     Message::Engine(_, _) => {}
                     Message::Bitrate(generation, id, bitrate) => {
                         self.apply_bitrate(generation, id, bitrate);
+                    }
+                    Message::Source(generation, occurrence, id) => {
+                        self.apply_source(generation, occurrence, id);
                     }
                     Message::Catalog(generation, reply) => {
                         let reply = *reply;
@@ -2504,6 +2515,23 @@ impl Worker {
             self.player.repeat,
         )));
     }
+    fn apply_source(&mut self, generation: u64, occurrence: u64, id: TrackId) {
+        if generation != self.engine_generation {
+            return;
+        }
+        let provider = id.provider().to_owned();
+        self.audio_sources.insert(occurrence, provider.clone());
+        if self
+            .player
+            .track
+            .as_ref()
+            .is_some_and(|track| self.occurrence_id(track) == occurrence)
+            && self.player.source_provider.as_deref() != Some(provider.as_str())
+        {
+            Arc::make_mut(&mut self.player).source_provider = Some(provider);
+            (self.emit)(Event::Player(self.player.clone()));
+        }
+    }
     fn apply_bitrate(&mut self, generation: u64, occurrence: u64, bitrate: Option<u32>) {
         if generation != self.engine_generation {
             return;
@@ -2521,79 +2549,30 @@ impl Worker {
         }
     }
     fn source(&self, track: &Arc<Track>) -> Result<eagle_engine::Source> {
-        let provider = self
-            .providers
-            .for_track(&track.id)
-            .ok_or("провайдер недоступен")?
-            .clone();
-        let id = track.id.clone();
-        let owner_store = self.store.clone();
-        let owner_account = self.account.clone();
-        let resolve: Arc<eagle_net::growing::Resolve> = Arc::new(move || {
-            if provider
-                .account()
-                .map_err(|_| eagle_net::Error::Source("не удалось подтвердить аккаунт"))?
-                .id
-                != owner_account
-            {
-                return Err(eagle_net::Error::Source(
-                    "аккаунт воспроизведения изменился",
-                ));
-            }
-            let stream = provider
-                .resolve_stream(&id, Quality::High)
-                .map_err(|_| eagle_net::Error::Source("не удалось получить аудиоссылку"))?;
-            if !matches!(stream.encryption, eagle_core::Encryption::None) {
-                return Err(eagle_net::Error::Source(
-                    "шифрованный поток не поддерживается",
-                ));
-            }
-            owner_store
-                .record_audio_owner(&owner_account, &id.to_string())
-                .map_err(|_| {
-                    eagle_net::Error::Source("не удалось сохранить права на локальный файл")
-                })?;
-            Ok(eagle_net::growing::Location {
-                bitrate_kbps: stream.bitrate_kbps,
-                url: stream.url,
-                expires_at: Some(stream.expires_at),
-            })
-        });
-        let tx = self.tx.clone();
+        if self.providers.for_track(&track.id).is_none() {
+            return Err("провайдер недоступен".into());
+        }
+        let bitrate_tx = self.tx.clone();
+        let source_tx = self.tx.clone();
         let generation = self.engine_generation;
         let occurrence = self.occurrence_id(track);
-        let authorize_resolve = resolve.clone();
-        let authorize_store = self.store.clone();
-        let authorize_account = self.account.clone();
-        let authorize_id = track.id.to_string();
-        let source = crate::playback::streamed_with_hooks(
-            self.store.clone(),
-            self.cache.clone(),
-            self.net.clone(),
-            track.id.clone(),
-            Quality::High,
-            resolve,
-            crate::playback::PlaybackHooks {
-                on_bitrate: Arc::new(move |bitrate| {
-                    let _ = tx.send(Message::Bitrate(generation, occurrence, bitrate));
-                }),
-                authorize_local: Arc::new(move || {
-                    if authorize_store.allows_local_playback(&authorize_account, &authorize_id)? {
-                        return Ok(true);
-                    }
-                    authorize_resolve()?;
-                    Ok(authorize_store.owns_audio(&authorize_account, &authorize_id)?)
-                }),
-            },
-        )?;
-        let store = self.store.clone();
-        let account = self.account.clone();
-        let id = track.id.to_string();
-        Ok(eagle_engine::Source::new(move |interrupt| {
-            if !store.access(&account, &id)?.allows_playback() {
-                return Err("Провайдер подтвердил потерю доступа к сохранённому треку".into());
-            }
-            source.open_reader(interrupt)
+        Ok(crate::source::lazy_source(crate::source::SourceContext {
+            providers: self.providers.clone(),
+            store: self.store.clone(),
+            cache: self.cache.clone(),
+            net: self.net.clone(),
+            account_provider: self
+                .providers
+                .account_provider()
+                .map(|p| p.info().id.to_owned()),
+            account: self.account.clone(),
+            requested: track.id.clone(),
+            on_bitrate: Arc::new(move |bitrate| {
+                let _ = bitrate_tx.send(Message::Bitrate(generation, occurrence, bitrate));
+            }),
+            on_source: Arc::new(move |id| {
+                let _ = source_tx.send(Message::Source(generation, occurrence, id.clone()));
+            }),
         }))
     }
     fn play_current(&mut self) -> Result<()> {
@@ -2606,6 +2585,7 @@ impl Worker {
         self.history_marker = None;
         self.history_recorded = false;
         self.audio_bitrates.clear();
+        self.audio_sources.clear();
         self.last_position = None;
         self.restored_position = Duration::ZERO;
         let mut engine = Engine::new(Config::default())?;
@@ -2726,6 +2706,7 @@ impl Worker {
                     state.track = Some(track.clone());
                     state.liked = self.queue_likes.contains(&track.id);
                     state.bitrate_kbps = self.audio_bitrates.get(&occurrence).copied().flatten();
+                    state.source_provider = self.audio_sources.get(&occurrence).cloned();
                     self.emit_queue();
                     (self.emit)(Event::Player(self.player.clone()));
                 }
@@ -3663,6 +3644,7 @@ impl Clone for PlayerState {
         Self {
             track: self.track.clone(),
             bitrate_kbps: self.bitrate_kbps,
+            source_provider: self.source_provider.clone(),
             status: self.status,
             volume: self.volume,
             liked: self.liked,
