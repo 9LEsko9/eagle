@@ -20,6 +20,7 @@ export component IconButton inherits Rectangle {
     out property <bool> hovered: touch.has-hover;
     out property <bool> focused: focus.has-focus;
     callback clicked();
+    public function focus-button() { focus.focus(); }
     // Set by a click so that only the user's own action pops, not list recycling.
     private property <bool> armed;
     private property <bool> popping;

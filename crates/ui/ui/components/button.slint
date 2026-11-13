@@ -9,6 +9,8 @@ export component TextButton inherits Rectangle {
     in property <bool> outline;
     in property <bool> enabled: true;
     out property <bool> hovered: touch.has-hover;
+    out property <bool> has-focus: focus.has-focus;
+    public function focus-button() { focus.focus(); }
     callback clicked();
     private property <color> fg: primary ? Theme.t.bg : Theme.t.tx;
     private property <float> scale: touch.pressed ? 0.96 : 1;

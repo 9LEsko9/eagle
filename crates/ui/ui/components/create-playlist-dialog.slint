@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type, Motion } from "../globals/theme.slint";
+import { Ui, Actions } from "../globals/bridge.slint";
+import { Field } from "controls.slint";
+import { TextButton } from "button.slint";
+
+export component CreatePlaylistDialog inherits Rectangle {
+    background: transparent;
+    private property <float> lifetime: Ui.create-playlist ? 1 : 0;
+    animate lifetime { duration: Motion.base; }
+    private property <float> scale: Ui.create-playlist ? 1 : 0.96;
+    animate scale { duration: Motion.base; easing: cubic-bezier(0.2, 0, 0, 1); }
+    if Ui.create-playlist || root.lifetime > 0 : Rectangle {
+        background: #00000059;
+        opacity: root.lifetime;
+        focus := FocusScope {
+            private property <bool> open: Ui.create-playlist;
+            changed open => { if self.open { field.focus-input(); } }
+        key-pressed(e) => {
+            if Ui.create-playlist && (e.text == Key.Tab || e.text == Key.Backtab) {
+                if e.text == Key.Tab {
+                    if field.has-focus { cancel.focus-button(); }
+                    else if cancel.has-focus && create.enabled { create.focus-button(); }
+                    else { field.focus-input(); }
+                } else {
+                    if field.has-focus && create.enabled { create.focus-button(); }
+                    else if field.has-focus { cancel.focus-button(); }
+                    else if create.has-focus { cancel.focus-button(); }
+                    else { field.focus-input(); }
+                }
+                return accept;
+            }
+            return reject;
+        }
+        TouchArea { width: parent.width; height: parent.height; clicked => { Ui.create-playlist = false; } }
+        card := Rectangle {
+            width: min(400px, parent.width - 32px);
+            height: layout.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.t.bg;
+            border-radius: 16px;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000059;
+            transform-scale-x: root.scale * 100%;
+            transform-scale-y: root.scale * 100%;
+            TouchArea { }
+            layout := VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                Text { text: @tr("Новый плейлист"); color: Theme.t.tx; font-size: Type.title; font-weight: 700; }
+                field := Field {
+                    placeholder: @tr("Название плейлиста");
+                    text <=> Ui.playlist-name;
+                    accepted(text) => { if !Ui.playlist-busy && Actions.valid-playlist-name(text) { Actions.create-playlist(text); } }
+                    init => { self.focus-input(); }
+                }
+                if Ui.error != "" : Text { text: Ui.error; color: Theme.t.tx; font-size: Type.meta; wrap: word-wrap; }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    cancel := TextButton { text: @tr("Отмена"); outline: true; clicked => { Ui.create-playlist = false; } }
+                    create := TextButton { text: @tr("Создать"); primary: true; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
+                }
+            }
+        }
+        }
+    }
+}

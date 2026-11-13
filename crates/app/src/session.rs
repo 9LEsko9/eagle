@@ -239,6 +239,13 @@ pub enum Command {
     SyncLibrary,
     SyncCollections,
     Collections,
+    /// Discard pending search replies while retaining visible results.
+    InvalidateSearch,
+    SearchUi {
+        id: u64,
+        kind: u8,
+        query: String,
+    },
     Search(String),
     SearchArtists(String),
     SearchAlbums(String),
@@ -444,6 +451,15 @@ pub enum Event {
     Busy(bool),
     Player(Arc<PlayerState>),
     Position(PositionAnchor),
+    SearchFailed {
+        id: u64,
+        message: String,
+    },
+    SearchResults {
+        id: u64,
+        rows: Vec<LibraryItem>,
+        cards: Vec<Card>,
+    },
     Library(Vec<LibraryDelta>),
     /// Whole-list replacement: cheaper for the UI than thousands of row deltas.
     LibraryReset(Vec<LibraryItem>),
@@ -716,6 +732,7 @@ struct Worker {
     busy: bool,
     engine_queue: Vec<Arc<Track>>,
     view_generation: u64,
+    search_ui_id: Option<u64>,
     view: View,
     playlist_id: Option<TrackId>,
     playlist_snapshot: Option<PlaylistSnapshot>,
@@ -876,6 +893,7 @@ impl Worker {
             busy: false,
             engine_queue: Vec::new(),
             view_generation: 0,
+            search_ui_id: None,
             view: View::Library,
             playlist_id: None,
             playlist_snapshot: None,
@@ -1254,8 +1272,18 @@ impl Worker {
                                 }
                                 self.title = title.clone();
                                 self.length = length;
-                                self.publish(items);
-                                (self.emit)(Event::Collection { title, length });
+                                if let Some(id) = self.search_ui_id {
+                                    self.rows = items;
+                                    self.cards.clear();
+                                    (self.emit)(Event::SearchResults {
+                                        id,
+                                        rows: self.rows.clone(),
+                                        cards: Vec::new(),
+                                    });
+                                } else {
+                                    self.publish(items);
+                                    (self.emit)(Event::Collection { title, length });
+                                }
                             }
                             Ok(CatalogReply::Page {
                                 items,
@@ -1297,9 +1325,19 @@ impl Worker {
                             }
                             Ok(CatalogReply::Cards(cards)) => {
                                 self.header_job = None;
-                                self.publish(Vec::new());
-                                self.cards = cards.clone();
-                                (self.emit)(Event::Cards(cards));
+                                if let Some(id) = self.search_ui_id {
+                                    self.rows.clear();
+                                    self.cards = cards;
+                                    (self.emit)(Event::SearchResults {
+                                        id,
+                                        rows: Vec::new(),
+                                        cards: self.cards.clone(),
+                                    });
+                                } else {
+                                    self.publish(Vec::new());
+                                    self.cards = cards.clone();
+                                    (self.emit)(Event::Cards(cards));
+                                }
                             }
                             Ok(CatalogReply::CollectionLiked(id, liked)) => {
                                 if self.header.id == id.to_string() {
@@ -1390,7 +1428,13 @@ impl Worker {
                                 // Background sync failures (offline, expired token) keep the cached view.
                                 log::warn!(error = message.as_str(); "background catalog request failed");
                             }
-                            Err(message) => (self.emit)(Event::Error(message)),
+                            Err(message) => {
+                                if let Some(id) = self.search_ui_id {
+                                    (self.emit)(Event::SearchFailed { id, message });
+                                } else {
+                                    (self.emit)(Event::Error(message));
+                                }
+                            }
                         }
                     }
                 }
@@ -2015,6 +2059,15 @@ impl Worker {
                 | Command::Albums
                 | Command::Artists
         ) {
+            if !matches!(
+                &command,
+                Command::Search(_)
+                    | Command::SearchArtists(_)
+                    | Command::SearchAlbums(_)
+                    | Command::SearchPlaylists(_)
+            ) {
+                self.search_ui_id = None;
+            }
             self.view_generation += 1;
             self.covers.invalidate();
             if self.ui_attached
@@ -2376,6 +2429,7 @@ impl Worker {
                 }
             }
             Command::Open(view) => {
+                self.search_ui_id = None;
                 self.playlist_id = None;
                 self.playlist_snapshot = None;
                 self.title.clear();
@@ -2458,13 +2512,26 @@ impl Worker {
                 self.cards.clear();
                 self.request(Command::Artist(id))?;
             }
+            Command::InvalidateSearch => {
+                self.search_ui_id = None;
+                self.view_generation += 1;
+                self.busy = false;
+                (self.emit)(Event::Busy(false));
+            }
+            Command::SearchUi { id, kind, query } => {
+                self.search_ui_id = Some(id);
+                let command = match kind {
+                    1 => Command::SearchArtists(query),
+                    2 => Command::SearchAlbums(query),
+                    3 => Command::SearchPlaylists(query),
+                    _ => Command::Search(query),
+                };
+                self.command(command)?;
+            }
             command @ (Command::Search(_)
             | Command::SearchArtists(_)
             | Command::SearchAlbums(_)
             | Command::SearchPlaylists(_)) => {
-                self.publish(Vec::new());
-                self.cards.clear();
-                (self.emit)(Event::Cards(Vec::new()));
                 let query = match &command {
                     Command::Search(query)
                     | Command::SearchArtists(query)
@@ -2473,6 +2540,19 @@ impl Worker {
                     _ => unreachable!(),
                 };
                 if query.trim().is_empty() {
+                    if let Some(id) = self.search_ui_id {
+                        self.rows.clear();
+                        self.cards.clear();
+                        (self.emit)(Event::SearchResults {
+                            id,
+                            rows: Vec::new(),
+                            cards: Vec::new(),
+                        });
+                    } else {
+                        self.publish(Vec::new());
+                        self.cards.clear();
+                        (self.emit)(Event::Cards(Vec::new()));
+                    }
                     self.view_generation += 1;
                     self.busy = false;
                     (self.emit)(Event::Busy(false));
@@ -5498,6 +5578,11 @@ mod delta_tests {
             assert_eq!(worker.current, 1);
         }
         assert_eq!(worker.player.repeat, Repeat::Off);
+        worker.rows = vec![row(1, false)];
+        let generation = worker.view_generation;
+        worker.command(Command::InvalidateSearch).unwrap();
+        assert_eq!(worker.view_generation, generation + 1);
+        assert_eq!(worker.rows.len(), 1);
         // No catalog is attached: blank searches must only invalidate local results.
         for command in [
             Command::Search(" ".into()),
@@ -5529,6 +5614,10 @@ mod delta_tests {
             tx,
         )
         .unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let (catalog_tx, catalog_rx) = mpsc::channel();
+        worker.catalog = Some(catalog_tx);
         worker.view = View::Search;
         worker.view_generation = 20;
         let id: TrackId = "yandex:1_13".parse().unwrap();
@@ -5542,6 +5631,7 @@ mod delta_tests {
             .playlist_changed(19, vec![], Some(playlist), None)
             .unwrap();
         assert_eq!(worker.view, View::Search);
+        assert!(catalog_rx.try_recv().is_err());
         assert!(
             events_rx
                 .try_iter()
@@ -5552,7 +5642,6 @@ mod delta_tests {
         worker.playlist_changed(20, vec![], None, Some(id)).unwrap();
         assert_eq!(worker.view, View::Playlist);
         worker.catalog.take();
-        worker.catalog_worker.take().unwrap().join().unwrap();
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5658,6 +5747,84 @@ mod delta_tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn search_results_can_open_artist_album_and_playlist() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let root =
+            std::env::temp_dir().join(format!("eagle-search-navigation-{}", std::process::id()));
+        let mut track = fake_track("fakea", "1", "Song", "Artist", 1000);
+        track.album = Some("fakea:album".parse().unwrap());
+        let provider = Arc::new(FakeProvider::new("fakea").with_tracks(vec![track]));
+        let (tx, rx) = mpsc::channel();
+        let session = Session::start_with_providers(root.clone(), vec![provider], move |event| {
+            let _ = tx.send(event);
+        })
+        .unwrap();
+        let sender = session.sender();
+        sender
+            .send(Command::Login {
+                provider: "fakea".into(),
+                token: Token::new("test".into()),
+            })
+            .unwrap();
+        let receive = |predicate: &dyn Fn(&Event) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                if predicate(&event) {
+                    return;
+                }
+            }
+        };
+        receive(
+            &|event| matches!(event, Event::Providers(items) if items.iter().any(|p| p.id == "fakea" && p.signed_in)),
+        );
+        for (id, command, target) in [
+            (
+                1,
+                Command::Artist("fakea:artist-artist".parse().unwrap()),
+                "fakea:artist-artist",
+            ),
+            (
+                2,
+                Command::Album("fakea:album".parse().unwrap()),
+                "fakea:album",
+            ),
+        ] {
+            sender.send(Command::Open(View::Search)).unwrap();
+            sender
+                .send(Command::SearchUi {
+                    id,
+                    kind: 0,
+                    query: "Song".into(),
+                })
+                .unwrap();
+            receive(
+                &|event| matches!(event, Event::SearchResults { id: got, rows, .. } if *got == id && !rows.is_empty()),
+            );
+            sender.send(command).unwrap();
+            receive(&|event| matches!(event, Event::Header(header) if header.id == target));
+        }
+        sender.send(Command::Open(View::Search)).unwrap();
+        sender
+            .send(Command::SearchUi {
+                id: 3,
+                kind: 0,
+                query: "Song".into(),
+            })
+            .unwrap();
+        receive(
+            &|event| matches!(event, Event::SearchResults { id: 3, rows, .. } if !rows.is_empty()),
+        );
+        sender
+            .send(Command::Playlist("fakea:missing".parse().unwrap()))
+            .unwrap();
+        receive(&|event| matches!(event, Event::Error(_)));
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn cached_library_is_available_offline_and_shutdown_joins_workers() {
         let root = std::env::temp_dir().join(format!("eagle-session-{}", std::process::id()));
