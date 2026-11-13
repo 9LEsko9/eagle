@@ -71,6 +71,7 @@ fn album_card(album: &Album) -> Card {
         },
         cover: album.cover.clone(),
         round: false,
+        sources: Vec::new(),
     }
 }
 fn artist_card(artist: &Artist) -> Card {
@@ -81,6 +82,7 @@ fn artist_card(artist: &Artist) -> Card {
         subtitle: String::new(),
         cover: artist.cover.clone(),
         round: true,
+        sources: Vec::new(),
     }
 }
 fn playlist_card(playlist: &Playlist) -> Card {
@@ -91,7 +93,38 @@ fn playlist_card(playlist: &Playlist) -> Card {
         subtitle: String::new(),
         cover: playlist.cover.clone(),
         round: false,
+        sources: Vec::new(),
     }
+}
+/// The first page of cards of one kind from `provider`.
+fn cards_of(
+    provider: &dyn Provider,
+    kind: CardKind,
+    query: &str,
+) -> std::result::Result<Vec<Card>, ProviderError> {
+    Ok(match kind {
+        CardKind::Artists => provider
+            .search_artists(query, 0)?
+            .items
+            .iter()
+            .map(artist_card)
+            .collect(),
+        CardKind::Albums => provider
+            .search_albums(query, 0)?
+            .items
+            .iter()
+            .map(album_card)
+            .collect(),
+        CardKind::Playlists => provider
+            .search_playlists(query, 0)?
+            .items
+            .iter()
+            .map(playlist_card)
+            .collect(),
+    })
+}
+fn cards_reply(rows: &[(Card, Option<u64>)]) -> CatalogReply {
+    CatalogReply::Cards(rows.iter().map(|(card, _)| card.clone()).collect())
 }
 fn header_cover(id: &TrackId, kind: &str, uri: Option<String>) -> Option<crate::covers::Job> {
     uri.map(|uri| crate::covers::Job {
@@ -300,6 +333,15 @@ pub struct Card {
     pub subtitle: String,
     pub cover: Option<String>,
     pub round: bool,
+    /// Ids of the same artist on other providers, folded into this card. Not shown in the UI.
+    pub sources: Vec<TrackId>,
+}
+/// The kinds of cards that search can return.
+#[derive(Clone, Copy, Debug)]
+enum CardKind {
+    Artists,
+    Albums,
+    Playlists,
 }
 /// Extra header data for album and artist screens.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3077,15 +3119,25 @@ impl Catalog {
                                 Command::CreatePlaylist(_) | Command::DeletePlaylist(_)
                             )
                         );
-                        let reply = match &request {
-                            CatalogRequest::Command(_, Command::Search(query)) => self
-                                .search_merged(query, &|partial| {
-                                    let _ = replies
-                                        .send(Message::Catalog(generation, Box::new(Ok(partial))));
-                                }),
-                            _ => self.request(request),
-                        }
-                        .map_err(|e| e.to_string());
+                        let send_partial = |partial: CatalogReply| {
+                            let _ =
+                                replies.send(Message::Catalog(generation, Box::new(Ok(partial))));
+                        };
+                        let reply =
+                            match &request {
+                                CatalogRequest::Command(_, Command::Search(query)) => {
+                                    self.search_merged(query, &send_partial)
+                                }
+                                CatalogRequest::Command(_, Command::SearchArtists(query)) => self
+                                    .search_cards_merged(CardKind::Artists, query, &send_partial),
+                                CatalogRequest::Command(_, Command::SearchAlbums(query)) => {
+                                    self.search_cards_merged(CardKind::Albums, query, &send_partial)
+                                }
+                                CatalogRequest::Command(_, Command::SearchPlaylists(query)) => self
+                                    .search_cards_merged(CardKind::Playlists, query, &send_partial),
+                                _ => self.request(request),
+                            }
+                            .map_err(|e| e.to_string());
                         let reply = if mutation {
                             Ok(reply.unwrap_or_else(CatalogReply::PlaylistFailed))
                         } else {
@@ -3730,6 +3782,61 @@ impl Catalog {
             _ => self.merged_rows(&rows),
         }
     }
+    /// Asks every signed-in provider that can search for `kind`, in priority order. Like
+    /// `search_merged`, `emit` gets the list so far after each provider except the last. An
+    /// artist that the store groups with an already shown one is folded into that card; albums
+    /// and playlists are never merged. Fails only when no provider answered.
+    fn search_cards_merged(
+        &self,
+        kind: CardKind,
+        query: &str,
+        emit: &dyn Fn(CatalogReply),
+    ) -> Result<CatalogReply> {
+        let capability: fn(&Capabilities) -> bool = match kind {
+            CardKind::Artists => |c| c.search_artists,
+            CardKind::Albums => |c| c.search_albums,
+            CardKind::Playlists => |c| c.search_playlists,
+        };
+        let providers: Vec<_> = self.providers.with_capability(capability).collect();
+        if providers.is_empty() {
+            return Err("войдите в аккаунт".into());
+        }
+        // Each shown card with its artist group, if it has one.
+        let mut rows: Vec<(Card, Option<u64>)> = Vec::new();
+        let mut answered = false;
+        let mut failure = None;
+        for (at, provider) in providers.iter().enumerate() {
+            match cards_of(provider.as_ref(), kind, query) {
+                Ok(cards) => {
+                    answered = true;
+                    for card in cards {
+                        let group = match kind {
+                            CardKind::Artists => self.store.artist_group(&card.id)?,
+                            CardKind::Albums | CardKind::Playlists => None,
+                        };
+                        let same = group
+                            .and_then(|grp| rows.iter_mut().find(|(_, shown)| *shown == Some(grp)));
+                        match same {
+                            Some((shown, _)) => shown.sources.push(card.id),
+                            None => rows.push((card, group)),
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!(provider = provider.info().id; "card search failed: {error}");
+                    failure = Some(error);
+                    continue;
+                }
+            }
+            if at + 1 < providers.len() {
+                emit(cards_reply(&rows));
+            }
+        }
+        match (answered, failure) {
+            (false, Some(error)) => Err(error.into()),
+            _ => Ok(cards_reply(&rows)),
+        }
+    }
     fn merged_rows(&self, rows: &[(Track, Vec<TrackId>)]) -> Result<CatalogReply> {
         let CatalogReply::Tracks(mut items, title) = self.tracks(
             rows.iter().map(|(track, _)| track.clone()).collect(),
@@ -3868,30 +3975,15 @@ impl Catalog {
                 Ok(CatalogReply::Synced)
             }
             Command::Search(query) => self.search_merged(&query, &|_| {}),
-            Command::SearchArtists(query) => Ok(CatalogReply::Cards(
-                self.provider_with(|c| c.search_artists)?
-                    .search_artists(&query, 0)?
-                    .items
-                    .iter()
-                    .map(artist_card)
-                    .collect(),
-            )),
-            Command::SearchAlbums(query) => Ok(CatalogReply::Cards(
-                self.provider_with(|c| c.search_albums)?
-                    .search_albums(&query, 0)?
-                    .items
-                    .iter()
-                    .map(album_card)
-                    .collect(),
-            )),
-            Command::SearchPlaylists(query) => Ok(CatalogReply::Cards(
-                self.provider_with(|c| c.search_playlists)?
-                    .search_playlists(&query, 0)?
-                    .items
-                    .iter()
-                    .map(playlist_card)
-                    .collect(),
-            )),
+            Command::SearchArtists(query) => {
+                self.search_cards_merged(CardKind::Artists, &query, &|_| {})
+            }
+            Command::SearchAlbums(query) => {
+                self.search_cards_merged(CardKind::Albums, &query, &|_| {})
+            }
+            Command::SearchPlaylists(query) => {
+                self.search_cards_merged(CardKind::Playlists, &query, &|_| {})
+            }
             Command::CreatePlaylist(title) => {
                 let playlist = self
                     .provider_with(|c| c.playlists_edit)?
@@ -6176,6 +6268,167 @@ mod sync_tests {
         assert!(
             matches!(c.command(Command::SearchArtists("empty".into())).unwrap(), CatalogReply::Cards(cards) if cards.is_empty())
         );
+    }
+    /// Two signed-in fakes in the given priority `order`; `failing` injects a network error.
+    fn card_search_pair(
+        a: eagle_provider_sdk::testkit::FakeProvider,
+        b: eagle_provider_sdk::testkit::FakeProvider,
+        order: &[&str],
+        failing: (bool, bool),
+    ) -> (
+        Catalog,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+    ) {
+        let fail = || ProviderError::Network;
+        let a = Arc::new(if failing.0 { a.fail_with(fail) } else { a });
+        let b = Arc::new(if failing.1 { b.fail_with(fail) } else { b });
+        let all: Vec<Arc<dyn Provider>> = vec![a.clone(), b.clone()];
+        let order: Vec<String> = order.iter().map(|id| (*id).to_string()).collect();
+        let providers = Arc::new(Providers::new(all, &order));
+        providers.set_account("fakea", Some(a.login(Token::new("a".into())).unwrap()));
+        providers.set_account("fakeb", Some(b.login(Token::new("b".into())).unwrap()));
+        (catalog_with(providers), a, b)
+    }
+    #[test]
+    fn artist_search_merges_the_same_artist_across_providers() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let a = FakeProvider::new("fakea")
+            .with_tracks(vec![fake_track("fakea", "1", "Song", "Same", 180_000)]);
+        let b = FakeProvider::new("fakeb")
+            .with_tracks(vec![fake_track("fakeb", "9", "Song", "Same", 180_500)]);
+        let (c, _, _) = card_search_pair(a, b, &["fakea", "fakeb"], (false, false));
+        // The same recording on both providers joins the two artist ids into one group.
+        c.store
+            .put_track(&fake_track("fakea", "1", "Song", "Same", 180_000))
+            .unwrap();
+        c.store
+            .put_track(&fake_track("fakeb", "9", "Song", "Same", 180_500))
+            .unwrap();
+        let CatalogReply::Cards(cards) = c
+            .search_cards_merged(CardKind::Artists, "same", &|_| {})
+            .unwrap()
+        else {
+            panic!("cards expected");
+        };
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id.to_string(), "fakea:artist-same");
+        assert_eq!(
+            cards[0].sources,
+            ["fakeb:artist-same".parse::<TrackId>().unwrap()]
+        );
+    }
+    #[test]
+    fn namesakes_without_a_shared_track_stay_separate() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let a = FakeProvider::new("fakea")
+            .with_tracks(vec![fake_track("fakea", "1", "Solo A", "Same", 180_000)]);
+        let b = FakeProvider::new("fakeb")
+            .with_tracks(vec![fake_track("fakeb", "9", "Solo B", "Same", 240_000)]);
+        let (c, _, _) = card_search_pair(a, b, &["fakea", "fakeb"], (false, false));
+        c.store
+            .put_track(&fake_track("fakea", "1", "Solo A", "Same", 180_000))
+            .unwrap();
+        c.store
+            .put_track(&fake_track("fakeb", "9", "Solo B", "Same", 240_000))
+            .unwrap();
+        let CatalogReply::Cards(cards) = c
+            .search_cards_merged(CardKind::Artists, "same", &|_| {})
+            .unwrap()
+        else {
+            panic!("cards expected");
+        };
+        assert_eq!(cards.len(), 2);
+        assert!(cards.iter().all(|card| card.sources.is_empty()));
+    }
+    #[test]
+    fn albums_and_playlists_are_listed_by_provider_priority_without_merging() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let album = |provider: &str| {
+            let mut track = fake_track(provider, "1", "Song", "Artist", 1000);
+            track.album = Some(format!("{provider}:al1").parse().unwrap());
+            track.album_title = Some("Same Album".into());
+            track
+        };
+        let playlist = |provider: &str| Playlist {
+            id: format!("{provider}:pl1").parse().unwrap(),
+            title: "Same Mix".into(),
+            tracks: vec![],
+            cover: None,
+        };
+        let a = FakeProvider::new("fakea")
+            .with_tracks(vec![album("fakea")])
+            .with_playlists(vec![playlist("fakea")]);
+        let b = FakeProvider::new("fakeb")
+            .with_tracks(vec![album("fakeb")])
+            .with_playlists(vec![playlist("fakeb")]);
+        // Same titles on both providers: the cards stay apart.
+        let (c, _, _) = card_search_pair(a, b, &["fakeb", "fakea"], (false, false));
+        let ids = |kind| {
+            let CatalogReply::Cards(cards) = c.search_cards_merged(kind, "same", &|_| {}).unwrap()
+            else {
+                panic!("cards expected");
+            };
+            cards
+                .iter()
+                .map(|card| card.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(CardKind::Albums), ["fakeb:al1", "fakea:al1"]);
+        assert_eq!(ids(CardKind::Playlists), ["fakeb:pl1", "fakea:pl1"]);
+    }
+    #[test]
+    fn card_search_survives_one_failing_provider() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let artists = || {
+            (
+                FakeProvider::new("fakea")
+                    .with_tracks(vec![fake_track("fakea", "1", "Song", "Same", 1000)]),
+                FakeProvider::new("fakeb")
+                    .with_tracks(vec![fake_track("fakeb", "9", "Song", "Other", 1000)]),
+            )
+        };
+        let (a, b) = artists();
+        let (c, _, _) = card_search_pair(a, b, &["fakea", "fakeb"], (true, false));
+        let CatalogReply::Cards(cards) = c
+            .search_cards_merged(CardKind::Artists, "", &|_| {})
+            .unwrap()
+        else {
+            panic!("cards expected");
+        };
+        let ids: Vec<_> = cards.iter().map(|card| card.id.to_string()).collect();
+        assert_eq!(ids, ["fakeb:artist-other"]);
+        let (a, b) = artists();
+        let (c, _, _) = card_search_pair(a, b, &["fakea", "fakeb"], (true, true));
+        assert!(
+            c.search_cards_merged(CardKind::Artists, "", &|_| {})
+                .is_err()
+        );
+    }
+    #[test]
+    fn card_search_reports_first_results_before_the_slow_provider() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let a = FakeProvider::new("fakea")
+            .with_tracks(vec![fake_track("fakea", "1", "Song", "Same", 1000)]);
+        let b = FakeProvider::new("fakeb")
+            .with_tracks(vec![fake_track("fakeb", "9", "Song", "Other", 1000)])
+            .with_delay(Duration::from_millis(200));
+        let (c, _, _) = card_search_pair(a, b, &["fakea", "fakeb"], (false, false));
+        let partials = std::cell::RefCell::new(Vec::new());
+        let reply = c
+            .search_cards_merged(CardKind::Artists, "", &|partial| {
+                let CatalogReply::Cards(cards) = partial else {
+                    panic!("cards expected");
+                };
+                partials.borrow_mut().push(cards.len());
+            })
+            .unwrap();
+        // The only partial arrives before the slow provider has answered.
+        assert_eq!(*partials.borrow(), vec![1]);
+        let CatalogReply::Cards(cards) = reply else {
+            panic!("cards expected");
+        };
+        assert_eq!(cards.len(), 2);
     }
     #[test]
     fn album_opens_tracks_header_and_own_artwork() {

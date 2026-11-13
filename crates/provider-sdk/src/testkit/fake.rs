@@ -26,6 +26,7 @@ type Failure = Box<dyn Fn() -> ProviderError + Send + Sync>;
 pub struct FakeProvider {
     info: ProviderInfo,
     tracks: Vec<Track>,
+    playlists: Vec<Playlist>,
     unavailable: Vec<&'static str>,
     failure: Option<Failure>,
     delay: Duration,
@@ -71,6 +72,7 @@ impl FakeProvider {
                 capabilities,
             },
             tracks: Vec::new(),
+            playlists: Vec::new(),
             unavailable: Vec::new(),
             failure: None,
             delay: Duration::ZERO,
@@ -89,6 +91,12 @@ impl FakeProvider {
     /// Replaces the catalog.
     pub fn with_tracks(mut self, tracks: Vec<Track>) -> Self {
         self.tracks = tracks;
+        self
+    }
+
+    /// Replaces the playlists that `search_playlists` finds by title.
+    pub fn with_playlists(mut self, playlists: Vec<Playlist>) -> Self {
+        self.playlists = playlists;
         self
     }
 
@@ -397,6 +405,7 @@ impl Provider for FakeProvider {
 
     fn search_artists(&self, query: &str, page: u32) -> Result<Page<Artist>, ProviderError> {
         self.guard()?;
+        thread::sleep(self.delay);
         let matches = self
             .all_artists()
             .into_iter()
@@ -407,6 +416,7 @@ impl Provider for FakeProvider {
 
     fn search_albums(&self, query: &str, page: u32) -> Result<Page<Album>, ProviderError> {
         self.guard()?;
+        thread::sleep(self.delay);
         let matches = self
             .album_ids()
             .iter()
@@ -416,9 +426,16 @@ impl Provider for FakeProvider {
         Ok(page_of(matches, page as usize))
     }
 
-    fn search_playlists(&self, _query: &str, page: u32) -> Result<Page<Playlist>, ProviderError> {
+    fn search_playlists(&self, query: &str, page: u32) -> Result<Page<Playlist>, ProviderError> {
         self.guard()?;
-        Ok(page_of(Vec::new(), page as usize))
+        thread::sleep(self.delay);
+        let matches = self
+            .playlists
+            .iter()
+            .filter(|p| contains_ci(&p.title, query))
+            .cloned()
+            .collect();
+        Ok(page_of(matches, page as usize))
     }
 
     fn playlist_snapshot(&self, _id: &TrackId) -> Result<PlaylistSnapshot, ProviderError> {
