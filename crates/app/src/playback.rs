@@ -301,11 +301,12 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
     };
     let store = Arc::new(Store::open(root)?);
     let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT * 4, &store)?);
-    let providers = crate::providers::Providers::new(crate::providers::builtin(net.clone()), &[]);
+    let providers = crate::providers::Providers::new(crate::providers::builtin(net.clone()), &[])
+        .with_tokens(Arc::new(crate::tokens::Keyring));
     // A missing saved token surfaces later, when a stream is requested.
     for provider in providers.all() {
         if matches!(provider.info().auth, eagle_core::AuthMethod::Token { .. }) {
-            let _ = crate::music::restore_saved(provider.as_ref());
+            let _ = providers.restore(provider.as_ref());
         }
     }
     let mut sources = Vec::new();

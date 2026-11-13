@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop-facing commands and incremental events. No UI types cross this boundary.
-use crate::providers::{Providers, account_key, liked_albums_key, liked_artists_key};
+use crate::providers::{
+    ProviderStatus, Providers, account_key, liked_albums_key, liked_artists_key,
+};
 use eagle_core::{
     Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
     PlaylistSnapshot, PlaylistTrack, Provider, RadioBatch, RadioError, RadioQueueItem,
@@ -177,7 +179,17 @@ pub enum Command {
     SearchPlaylists(String),
     CreatePlaylist(String),
     DeletePlaylist(TrackId),
-    Login(Token),
+    /// Signs in to one provider with a token the user typed.
+    Login {
+        provider: String,
+        token: Token,
+    },
+    /// Forgets the provider's token. Offline saves of its account go too unless `keep_saved`;
+    /// likes and playlists stay.
+    Logout {
+        provider: String,
+        keep_saved: bool,
+    },
     Album(TrackId),
     Playlist(TrackId),
     Artist(TrackId),
@@ -307,6 +319,8 @@ pub struct SessionSnapshot {
     pub position: Option<PositionAnchor>,
 }
 pub enum Event {
+    /// Every provider with its sign-in state; sent whenever any of them changes.
+    Providers(Vec<ProviderStatus>),
     RadioState {
         ready: bool,
         busy: bool,
@@ -519,7 +533,7 @@ impl Session {
         root: PathBuf,
         emit: impl Fn(Event) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        Self::start_inner(root, None, emit)
+        Self::start_inner(root, None, Arc::new(crate::tokens::Keyring), emit)
     }
     /// Starts an isolated session without consulting the system credential store.
     pub fn start_with_providers(
@@ -527,11 +541,17 @@ impl Session {
         providers: Vec<Arc<dyn Provider>>,
         emit: impl Fn(Event) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        Self::start_inner(root, Some(providers), emit)
+        Self::start_inner(
+            root,
+            Some(providers),
+            Arc::new(crate::tokens::MemoryTokens::default()),
+            emit,
+        )
     }
     fn start_inner(
         root: PathBuf,
         providers: Option<Vec<Arc<dyn Provider>>>,
+        tokens: Arc<dyn crate::tokens::TokenStore>,
         emit: impl Fn(Event) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let (commands, rx) = mpsc::channel();
@@ -540,8 +560,9 @@ impl Session {
         let worker = thread::Builder::new()
             .name("eg-app".into())
             .spawn(move || {
-                if let Err(e) = Worker::new_with_providers(root, emit.clone(), tx, providers)
-                    .and_then(|w| w.run(rx))
+                if let Err(e) =
+                    Worker::new_with_providers(root, emit.clone(), tx, providers, tokens)
+                        .and_then(|w| w.run(rx))
                 {
                     (emit)(Event::Error(e.to_string()));
                 }
@@ -628,21 +649,29 @@ impl Worker {
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
     ) -> Result<Self> {
-        Self::new_with_providers(root, emit, tx, None)
+        Self::new_with_providers(
+            root,
+            emit,
+            tx,
+            None,
+            Arc::new(crate::tokens::MemoryTokens::default()),
+        )
     }
     fn new_with_providers(
         root: PathBuf,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
         providers: Option<Vec<Arc<dyn Provider>>>,
+        tokens: Arc<dyn crate::tokens::TokenStore>,
     ) -> Result<Self> {
-        Self::new_with_handles(root, emit, tx, providers, None)
+        Self::new_with_handles(root, emit, tx, providers, tokens, None)
     }
     fn new_with_handles(
         root: PathBuf,
         emit: Arc<dyn Fn(Event) + Send + Sync>,
         tx: mpsc::Sender<Message>,
         providers: Option<Vec<Arc<dyn Provider>>>,
+        tokens: Arc<dyn crate::tokens::TokenStore>,
         handles: Option<(Arc<Store>, Arc<Cache>)>,
     ) -> Result<Self> {
         let (store, cache) = if let Some(handles) = handles {
@@ -676,7 +705,7 @@ impl Worker {
             Some(json) => serde_json::from_str(&json).unwrap_or_default(),
             None => Vec::new(),
         };
-        let providers = Arc::new(Providers::new(providers, &order));
+        let providers = Arc::new(Providers::new(providers, &order).with_tokens(tokens));
         let (catalog, requests) = mpsc::channel();
         let services = Catalog {
             covers: RefCell::new(VecDeque::new()),
@@ -1009,6 +1038,7 @@ impl Worker {
             }
             self.request(Command::Collections)?;
             self.request(Command::Library)?;
+            (self.emit)(Event::Providers(self.providers.statuses()));
             self.background(Command::Restore)?;
             loop {
                 let message = if self.player.status == State::Playing {
@@ -1200,6 +1230,12 @@ impl Worker {
                                 }
                                 self.downloads.account(self.account.clone());
                                 (self.emit)(Event::Account);
+                                (self.emit)(Event::Providers(self.providers.statuses()));
+                                self.background(Command::SyncCollections)?;
+                                self.background(Command::SyncLibrary)?;
+                            }
+                            Ok(CatalogReply::Providers) => {
+                                (self.emit)(Event::Providers(self.providers.statuses()));
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
@@ -1319,6 +1355,7 @@ impl Worker {
                     emit.clone(),
                     tx,
                     Some(providers.all().to_vec()),
+                    providers.tokens().clone(),
                     Some((store, cache)),
                 )?
             }
@@ -1326,7 +1363,13 @@ impl Worker {
                 if let Some(error) = error {
                     (emit)(Event::Error(format!("Перенос не завершён: {error}")));
                 }
-                Self::new_with_providers(root, emit.clone(), tx, Some(providers.all().to_vec()))?
+                Self::new_with_providers(
+                    root,
+                    emit.clone(),
+                    tx,
+                    Some(providers.all().to_vec()),
+                    providers.tokens().clone(),
+                )?
             }
         };
         next.engine_generation = next_engine_generation;
@@ -1395,6 +1438,45 @@ impl Worker {
         match self.providers.account_provider() {
             Some(provider) if provider.info().id == track.provider() => &self.account,
             _ => "",
+        }
+    }
+    /// Forgets one provider's session. Its likes and playlists stay; offline saves of the
+    /// account that owns them are removed unless `keep_saved`.
+    fn logout(&mut self, provider_id: &str, keep_saved: bool) -> Result<()> {
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or("провайдер недоступен")?
+            .clone();
+        let id = provider.info().id;
+        let owns_account = self.providers.account_provider().map(|p| p.info().id) == Some(id);
+        let mut failure = None;
+        if owns_account && !keep_saved {
+            for job in self.store.downloads(&self.account)? {
+                if job.state == DownloadState::Saved
+                    && job.track.provider() == id
+                    && let Err(error) = self.cache.remove_saved(&self.store, &self.account, job.id)
+                {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        self.providers.sign_out(provider.as_ref())?;
+        let account_setting = account_key(id);
+        self.store.write(move |c| {
+            c.execute("DELETE FROM settings WHERE key=?1", [account_setting])?;
+            Ok(())
+        })?;
+        if owns_account {
+            self.reset_account_view()?;
+            (self.emit)(Event::Downloads(self.store.downloads(&self.account)?));
+            (self.emit)(Event::Snapshot(Box::new(self.snapshot())));
+        }
+        (self.emit)(Event::Providers(self.providers.statuses()));
+        self.storage()?;
+        match failure {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
         }
     }
     fn reset_account_view(&mut self) -> Result<()> {
@@ -1822,7 +1904,9 @@ impl Worker {
                 | Command::EnqueueNext(_)
                 | Command::Next
         );
-        if matches!(&command, Command::Login(_)) {
+        if let Command::Login { provider, .. } = &command
+            && self.providers.account_provider().map(|p| p.info().id) == Some(provider.as_str())
+        {
             self.downloads.account(String::new());
         }
         match command {
@@ -2214,8 +2298,12 @@ impl Worker {
             }
             command @ (Command::Library
             | Command::Collections
-            | Command::Login(_)
+            | Command::Login { .. }
             | Command::Like(_)) => self.request(command)?,
+            Command::Logout {
+                provider,
+                keep_saved,
+            } => self.logout(&provider, keep_saved)?,
             Command::Album(id) => {
                 self.title.clear();
                 self.header = Header::default();
@@ -2808,6 +2896,8 @@ enum CatalogReply {
     Tracks(Vec<LibraryItem>, String),
     Liked(TrackId, bool),
     Account(bool),
+    /// Sign-in state changed without touching the account.
+    Providers,
 }
 struct Catalog {
     covers: RefCell<VecDeque<(TrackId, Arc<eagle_palette::Cover>)>>,
@@ -2856,7 +2946,7 @@ impl Catalog {
                         }
                     }
                     request => {
-                        if matches!(&request, CatalogRequest::Command(_, Command::Login(_))) {
+                        if matches!(&request, CatalogRequest::Command(_, Command::Login { .. })) {
                             sync = None;
                         } else if sync.is_some()
                             && matches!(&request, CatalogRequest::Command(_, Command::Like(_)))
@@ -3436,35 +3526,23 @@ impl Catalog {
             Command::Library => self.library(),
             Command::Restore => {
                 // Each provider restores on its own; one failing does not stop the others.
+                let account_provider = self.account_id();
                 let mut restored = false;
                 let mut changed = false;
                 for provider in self.providers.all() {
-                    let id = provider.info().id;
-                    // Providers without sign-in are always signed in, so only token ones track an account.
-                    let tracked = matches!(provider.info().auth, AuthMethod::Token { .. });
-                    match crate::music::restore_saved(provider.as_ref()) {
-                        Ok(account) => {
-                            if tracked {
-                                self.providers.set_account(id, Some(account.clone()));
-                            }
-                            // Only the account provider's uid is stored as the account.
-                            if tracked {
-                                changed |= self.switch_account(&account.id)?;
-                            }
-                            self.refresh_access(&account.id)?;
-                            restored = true;
-                        }
-                        Err(_) => {
-                            if tracked {
-                                self.providers.set_account(id, None);
-                            }
-                        }
+                    let Ok(account) = self.providers.restore(provider.as_ref()) else {
+                        continue;
+                    };
+                    if Some(provider.info().id) == account_provider {
+                        changed |= self.switch_account(&account.id)?;
+                        self.refresh_access(&account.id)?;
                     }
+                    restored = true;
                 }
                 Ok(if restored {
                     CatalogReply::Account(changed)
                 } else {
-                    CatalogReply::Unchanged
+                    CatalogReply::Providers
                 })
             }
             Command::SyncCollections => {
@@ -3673,19 +3751,21 @@ impl Catalog {
                 }
                 Ok(page)
             }
-            Command::Login(token) => {
-                // Until the command names its provider, sign-in goes to the first token provider.
+            Command::Login { provider, token } => {
                 let provider = self
                     .providers
-                    .all()
-                    .iter()
-                    .find(|p| matches!(p.info().auth, AuthMethod::Token { .. }))
-                    .ok_or("провайдер недоступен")?;
-                let account = provider.login(token.clone())?;
-                crate::music::remember_token(provider.as_ref(), &token)?;
-                self.providers
-                    .set_account(provider.info().id, Some(account.clone()));
-                Ok(CatalogReply::Account(self.switch_account(&account.id)?))
+                    .get(&provider)
+                    .ok_or("провайдер недоступен")?
+                    .clone();
+                if !matches!(provider.info().auth, AuthMethod::Token { .. }) {
+                    return Err("этот провайдер не требует входа токеном".into());
+                }
+                let account = self.providers.sign_in(provider.as_ref(), token)?;
+                Ok(if self.account_id() == Some(provider.info().id) {
+                    CatalogReply::Account(self.switch_account(&account.id)?)
+                } else {
+                    CatalogReply::Providers
+                })
             }
             Command::Like(id) => {
                 let liked = !self.store.read()?.query_row(
@@ -5104,6 +5184,7 @@ mod stale_engine_tests {
 #[cfg(test)]
 mod sync_tests {
     use super::*;
+    use crate::tokens::TokenStore;
     use eagle_core::*;
     struct EditFixture {
         snapshot: PlaylistSnapshot,
@@ -5974,7 +6055,10 @@ mod sync_tests {
             .unwrap();
         tx.send(CatalogRequest::Command(
             11,
-            Command::Login(Token::new("new".into())),
+            Command::Login {
+                provider: "yandex".into(),
+                token: Token::new("new".into()),
+            },
         ))
         .unwrap();
         gate.1.wait();
@@ -6165,5 +6249,191 @@ mod sync_tests {
                 assert_eq!(ids, ["yandex:1", "yandex:2"]);
             }
         }
+    }
+    fn token_providers() -> (
+        Arc<Providers>,
+        Arc<crate::tokens::MemoryTokens>,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+    ) {
+        use eagle_provider_sdk::testkit::FakeProvider;
+        let tokens = Arc::new(crate::tokens::MemoryTokens::default());
+        let fakea = Arc::new(FakeProvider::new("fakea").signed_out());
+        let fakeb = Arc::new(FakeProvider::new("fakeb").signed_out());
+        let all: Vec<Arc<dyn Provider>> = vec![fakea.clone(), fakeb.clone()];
+        let providers = Arc::new(Providers::new(all, &[]).with_tokens(tokens.clone()));
+        (providers, tokens, fakea, fakeb)
+    }
+    #[test]
+    fn login_signs_in_one_provider_and_only_the_account_provider_sets_the_account() {
+        let (providers, tokens, _, _) = token_providers();
+        let c = catalog_with(providers.clone());
+        let login = |provider: &str, token: &str| {
+            c.command(Command::Login {
+                provider: provider.into(),
+                token: Token::new(token.into()),
+            })
+        };
+        assert!(matches!(
+            login("fakeb", "b").unwrap(),
+            CatalogReply::Providers
+        ));
+        assert!(tokens.load("fakeb").unwrap().is_some());
+        assert!(c.store.setting(&account_key("fakeb")).unwrap().is_none());
+        assert!(c.store.setting(&account_key("fakea")).unwrap().is_none());
+        assert!(!providers.statuses()[0].signed_in && providers.statuses()[1].signed_in);
+
+        assert!(matches!(
+            login("fakea", "a").unwrap(),
+            CatalogReply::Account(true)
+        ));
+        assert_eq!(
+            c.store.setting(&account_key("fakea")).unwrap().as_deref(),
+            Some("fake-uid")
+        );
+        // A rejected token is not saved, and an unknown provider is an error.
+        assert!(login("fakea", "").is_err());
+        assert!(login("nope", "x").is_err());
+    }
+    #[test]
+    fn restore_checks_every_saved_token_and_a_bad_one_does_not_block_the_rest() {
+        let (providers, tokens, _, _) = token_providers();
+        tokens.save("fakeb", &Token::new(String::new())).unwrap();
+        tokens.save("fakea", &Token::new("a".into())).unwrap();
+        let c = catalog_with(providers.clone());
+        assert!(matches!(
+            c.command(Command::Restore).unwrap(),
+            CatalogReply::Account(true)
+        ));
+        let status = providers.statuses();
+        assert!(status[0].signed_in && !status[1].signed_in);
+        assert!(status[0].capabilities.likes && !status[1].capabilities.likes);
+        // Nothing saved anywhere: no account change, but the UI still gets the state.
+        let (providers, _, _, _) = token_providers();
+        let c = catalog_with(providers);
+        assert!(matches!(
+            c.command(Command::Restore).unwrap(),
+            CatalogReply::Providers
+        ));
+    }
+    fn logout_worker(
+        tag: &str,
+    ) -> (
+        Worker,
+        Arc<crate::tokens::MemoryTokens>,
+        Arc<std::sync::Mutex<Vec<Vec<(String, bool)>>>>,
+    ) {
+        use eagle_provider_sdk::testkit::fake_track;
+        let root = std::env::temp_dir().join(format!("eg-logout-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (_, tokens, fakea, fakeb) = token_providers();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let emit: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(move |event| {
+            if let Event::Providers(all) = event {
+                sink.lock()
+                    .unwrap()
+                    .push(all.into_iter().map(|p| (p.id, p.signed_in)).collect());
+            }
+        });
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new_with_providers(
+            root,
+            emit,
+            tx,
+            Some(vec![fakea.clone(), fakeb.clone()]),
+            tokens.clone(),
+        )
+        .unwrap();
+        for (provider, token) in [(&fakea, "a"), (&fakeb, "b")] {
+            worker
+                .providers
+                .sign_in(provider.as_ref(), Token::new(token.into()))
+                .unwrap();
+        }
+        worker.account = "fake-uid".into();
+        worker.downloads.account("fake-uid".into());
+        worker
+            .store
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO settings VALUES('account:fakea','fake-uid')",
+                    [],
+                )?;
+                c.execute("INSERT INTO likes VALUES('fakea:1'),('fakeb:2')", [])?;
+                Ok(())
+            })
+            .unwrap();
+        for (provider, id) in [("fakea", "1"), ("fakeb", "2")] {
+            let track = fake_track(provider, id, "Song", "Artist", 1000);
+            worker.store.put_track(&track).unwrap();
+            worker
+                .store
+                .enqueue_download("fake-uid", &track.id, Quality::High)
+                .unwrap();
+            let job = worker.store.claim_download("fake-uid").unwrap().unwrap();
+            assert!(worker.store.finish_saved_download(&job).unwrap());
+        }
+        (worker, tokens, seen)
+    }
+    fn saved(worker: &Worker) -> Vec<String> {
+        worker
+            .store
+            .downloads("fake-uid")
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.state == DownloadState::Saved)
+            .map(|job| job.track.to_string())
+            .collect()
+    }
+    #[test]
+    fn logout_forgets_one_provider_and_keeps_likes_and_the_others_data() {
+        let (mut worker, tokens, seen) = logout_worker("forget");
+        assert_eq!(saved(&worker), ["fakea:1", "fakeb:2"]);
+        worker
+            .command(Command::Logout {
+                provider: "fakea".into(),
+                keep_saved: false,
+            })
+            .unwrap();
+        assert!(tokens.load("fakea").unwrap().is_none());
+        assert!(tokens.load("fakeb").unwrap().is_some());
+        assert!(worker.store.setting("account:fakea").unwrap().is_none());
+        assert!(worker.account.is_empty());
+        assert_eq!(saved(&worker), ["fakeb:2"]);
+        let likes: Vec<String> = {
+            let c = worker.store.read().unwrap();
+            let mut stmt = c.prepare("SELECT id FROM likes ORDER BY id").unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(likes, ["fakea:1", "fakeb:2"]);
+        let last = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            last,
+            [("fakea".to_owned(), false), ("fakeb".to_owned(), true)]
+        );
+        assert!(
+            worker
+                .command(Command::Logout {
+                    provider: "nope".into(),
+                    keep_saved: false
+                })
+                .is_err()
+        );
+    }
+    #[test]
+    fn logout_with_keep_saved_leaves_offline_copies() {
+        let (mut worker, tokens, _) = logout_worker("keep");
+        worker
+            .command(Command::Logout {
+                provider: "fakea".into(),
+                keep_saved: true,
+            })
+            .unwrap();
+        assert!(tokens.load("fakea").unwrap().is_none());
+        assert_eq!(saved(&worker), ["fakea:1", "fakeb:2"]);
     }
 }

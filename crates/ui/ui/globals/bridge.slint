@@ -8,6 +8,8 @@ export struct CardItem { id: string, key: string, title: string, subtitle: strin
 export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color }
 export struct QueueItem { id: string, title: string, artist: string, current: bool }
 export struct DownloadItem { id: string, track: string, quality: string, status: string, error: string, pausable: bool, retryable: bool, cancellable: bool, saved: bool }
+// One connectable service. `token-auth` providers get a token field; `hint` is its placeholder.
+export struct ProviderItem { id: string, name: string, hint: string, help-url: string, token-auth: bool, signed-in: bool }
 export global Storage {
     in property <string> cache-usage;
     in property <string> staging-usage;
@@ -71,6 +73,7 @@ export global Ui {
     in property <bool> autostart;
     in-out property <string> error;
     in property <bool> signed-in;
+    in property <[ProviderItem]> providers;
     in property <bool> busy;
     in property <bool> playlist-busy;
     in property <bool> radio-ready;
@@ -119,7 +122,8 @@ export global Actions {
     callback refresh-playlist(string);
     callback radio-start();
     callback radio-more();
-    callback login(string);
+    callback login(string, string);
+    callback logout(string);
     callback like-collection();
     // On-screen ranges (first index, count) so artwork loads only for what is visible.
     callback visible-rows(int, int);

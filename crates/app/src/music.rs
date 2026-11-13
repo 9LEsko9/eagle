@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::providers::Providers;
-use eagle_core::{
-    Account, Encryption, Provider, ProviderError, Quality, SignedUrl, Stream, Token, TrackId,
-};
+use eagle_core::{Encryption, Provider, Quality, SignedUrl, Stream, Token, TrackId};
 use eagle_net::{Client, Priority, Request};
 use eagle_store::{Cache, RangeMap, Store};
 use std::{
@@ -247,37 +245,6 @@ pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<(
     store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
-/// Signs in with the token saved in the keyring, or with the provider's current session.
-pub fn restore_saved(provider: &dyn Provider) -> std::result::Result<Account, ProviderError> {
-    // Tests never read the user's keychain; they keep the fixture's own account.
-    #[cfg(test)]
-    {
-        provider.account()
-    }
-    #[cfg(not(test))]
-    {
-        match eagle_platform::tokens::load(provider.info().id) {
-            Ok(Some(token)) => provider.restore(token),
-            // Without a saved token the provider keeps what it already holds, as before.
-            _ => provider.account(),
-        }
-    }
-}
-/// Saves a token the provider has just accepted. Tests never write to the keychain.
-pub fn remember_token(
-    provider: &dyn Provider,
-    token: &Token,
-) -> std::result::Result<(), ProviderError> {
-    #[cfg(test)]
-    {
-        let _ = (provider, token);
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        eagle_platform::tokens::save(provider.info().id, token)
-    }
-}
 /// Asks for the Yandex token without echoing it.
 fn prompt_token() -> std::io::Result<Token> {
     rpassword::prompt_password("Токен Яндекс Музыки: ").map(Token::new)
@@ -293,7 +260,8 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
     if args[0] == "play" {
         return crate::playback::run(&args[1..], root, net);
     }
-    let providers = Providers::new(crate::providers::builtin(net.clone()), &[]);
+    let providers = Providers::new(crate::providers::builtin(net.clone()), &[])
+        .with_tokens(Arc::new(crate::tokens::Keyring));
     // Without a provider id the command goes to the first provider by priority.
     let (provider, words) = match providers.get(&args[0]) {
         Some(provider) => (provider, &args[1..]),
@@ -308,14 +276,13 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
     }
     if command == "login" {
         let token = prompt_token()?;
-        let account = provider.login(token.clone())?;
-        remember_token(provider.as_ref(), &token)?;
+        let account = providers.sign_in(provider.as_ref(), token)?;
         println!("Вход выполнен: {}", account.id);
         sync(&Store::open(root)?, provider.as_ref())?;
         return Ok(());
     }
     if command == "status" {
-        let a = restore_saved(provider.as_ref())?;
+        let a = providers.restore(provider.as_ref())?;
         println!("Аккаунт: {}, Plus: {}", a.id, a.subscription);
         return Ok(());
     }
@@ -323,7 +290,7 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         return crate::playback::run(tail, root, net);
     }
     // Other commands work only with the saved token; a missing one fails with `Auth` below.
-    let _ = restore_saved(provider.as_ref());
+    let _ = providers.restore(provider.as_ref());
     let store = Store::open(root)?;
     let tid =
         || -> Result<TrackId> { Ok(tail.first().ok_or("укажите provider:id")?.parse()?) };

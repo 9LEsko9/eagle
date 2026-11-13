@@ -3,7 +3,8 @@
 
 //! Registry of the providers built into eagle. The order is the user's priority.
 
-use eagle_core::{Account, AuthMethod, Capabilities, Provider, TrackId};
+use crate::tokens::{MemoryTokens, TokenStore};
+use eagle_core::{Account, AuthMethod, Capabilities, Provider, ProviderError, Token, TrackId};
 use eagle_net::Client;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 
@@ -12,11 +13,23 @@ pub fn builtin(net: Arc<Client>) -> Vec<Arc<dyn Provider>> {
     vec![Arc::new(eagle_yandex::Yandex::new(net))]
 }
 
+/// What the UI needs to show one provider: whether to offer sign-in and what works.
+#[derive(Clone, Debug)]
+pub struct ProviderStatus {
+    pub id: String,
+    pub name: String,
+    pub auth: AuthMethod,
+    pub signed_in: bool,
+    /// Effective capabilities; all off while signed out.
+    pub capabilities: Capabilities,
+}
+
 pub struct Providers {
     /// Priority order: the first entry wins.
     all: Vec<Arc<dyn Provider>>,
     /// Accounts of signed-in providers, by provider id.
     accounts: RwLock<HashMap<String, Account>>,
+    tokens: Arc<dyn TokenStore>,
 }
 
 impl Providers {
@@ -38,7 +51,60 @@ impl Providers {
         Self {
             all: sorted,
             accounts: RwLock::new(HashMap::new()),
+            tokens: Arc::new(MemoryTokens::default()),
         }
+    }
+    /// Replaces the in-memory token store (the default) with a persistent one.
+    pub fn with_tokens(mut self, tokens: Arc<dyn TokenStore>) -> Self {
+        self.tokens = tokens;
+        self
+    }
+    pub fn tokens(&self) -> &Arc<dyn TokenStore> {
+        &self.tokens
+    }
+    /// Signs in with the saved token, or with whatever session the provider already holds,
+    /// and records the account. A failure marks the provider signed out.
+    pub fn restore(&self, provider: &dyn Provider) -> Result<Account, ProviderError> {
+        let id = provider.info().id;
+        let result = match self.tokens.load(id) {
+            Ok(Some(token)) => provider.restore(token),
+            _ => provider.account(),
+        };
+        self.set_account(id, result.as_ref().ok().cloned());
+        result
+    }
+    /// Signs in with a token the user typed; it is saved only after the provider accepts it.
+    pub fn sign_in(&self, provider: &dyn Provider, token: Token) -> Result<Account, ProviderError> {
+        let account = provider.login(token.clone())?;
+        self.tokens.save(provider.info().id, &token)?;
+        self.set_account(provider.info().id, Some(account.clone()));
+        Ok(account)
+    }
+    /// Forgets the provider's session and its saved token.
+    pub fn sign_out(&self, provider: &dyn Provider) -> Result<(), ProviderError> {
+        provider.logout();
+        self.set_account(provider.info().id, None);
+        self.tokens.delete(provider.info().id)
+    }
+    /// Every provider in priority order with its current state.
+    pub fn statuses(&self) -> Vec<ProviderStatus> {
+        self.all
+            .iter()
+            .map(|p| {
+                let signed_in = self.is_signed_in(p.as_ref());
+                ProviderStatus {
+                    id: p.info().id.to_owned(),
+                    name: p.info().name.to_owned(),
+                    auth: p.info().auth.clone(),
+                    signed_in,
+                    capabilities: if signed_in {
+                        self.effective(p.as_ref())
+                    } else {
+                        Capabilities::none()
+                    },
+                }
+            })
+            .collect()
     }
     pub fn all(&self) -> &[Arc<dyn Provider>] {
         &self.all

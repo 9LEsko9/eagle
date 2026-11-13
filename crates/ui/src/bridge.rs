@@ -2,7 +2,7 @@
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
     Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
+    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
 };
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
@@ -677,6 +677,29 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             }
         }
         Event::Account => ui.global::<Ui>().set_signed_in(true),
+        Event::Providers(all) => {
+            let items: Vec<ProviderItem> = all
+                .into_iter()
+                .map(|p| {
+                    let (token_auth, hint, help_url) = match &p.auth {
+                        eagle_core::AuthMethod::Token { hint, help_url } => {
+                            (true, *hint, help_url.unwrap_or_default())
+                        }
+                        _ => (false, "", ""),
+                    };
+                    ProviderItem {
+                        id: p.id.into(),
+                        name: p.name.into(),
+                        hint: hint.into(),
+                        help_url: help_url.into(),
+                        token_auth,
+                        signed_in: p.signed_in,
+                    }
+                })
+                .collect();
+            ui.global::<Ui>()
+                .set_providers(Rc::new(VecModel::from(items)).into());
+        }
     }
 }
 
@@ -999,10 +1022,18 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         }
     });
     let tx = sender.clone();
-    actions.on_login(move |token| {
-        let _ = tx.send(Command::Login(eagle_app::session::Token::new(
-            token.to_string(),
-        )));
+    actions.on_login(move |provider, token| {
+        let _ = tx.send(Command::Login {
+            provider: provider.to_string(),
+            token: eagle_app::session::Token::new(token.to_string()),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_logout(move |provider| {
+        let _ = tx.send(Command::Logout {
+            provider: provider.to_string(),
+            keep_saved: false,
+        });
     });
     let tx = sender.clone();
     let weak = ui.as_weak();

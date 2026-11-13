@@ -227,7 +227,7 @@ impl SourceContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eagle_core::{Account, Capabilities, Provider};
+    use eagle_core::{Account, Provider};
     use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
     use std::sync::Arc;
 
