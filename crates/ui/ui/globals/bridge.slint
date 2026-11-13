@@ -84,6 +84,10 @@ export global Ui {
     in property <string> radio-notice;
     in-out property <string> search-query;
     in-out property <int> search-kind;
+    in-out property <string> search-provider;
+    in-out property <bool> search-pending;
+    in-out property <bool> search-valid;
+    in property <[ProviderItem]> searchable-providers;
     in-out property <bool> create-playlist;
     in-out property <string> playlist-name;
     in-out property <bool> confirm-delete;
@@ -116,6 +120,8 @@ export global Actions {
     callback open(Route);
     callback collection(Route, string);
     callback search(string);
+    callback search-changed(string);
+    callback search-provider-changed();
     pure callback valid-playlist-name(string) -> bool;
     callback create-playlist(string);
     callback delete-playlist();
