@@ -22,8 +22,10 @@ use std::{
 };
 
 /// Rewrites one recording before it is written: `path` is the request path without the query,
-/// `body` the JSON answer. Binary answers pass `Value::Null` and are not rewritten.
-pub type Scrub = fn(&mut String, &mut Value);
+/// `query` the canonical query (see [`split_url`]) and `body` the JSON answer. A binary answer
+/// arrives as `Value::Null`; if the scrub sets it to a string, that string's bytes are stored
+/// instead of the real ones. A JSON answer must not be replaced by a string.
+pub type Scrub = fn(&mut String, &mut String, &mut Value);
 
 const WRITE_FAILED: &str = "не удалось записать ответ в каталог записей";
 const REDACTED: &str = "[REDACTED]";
@@ -56,16 +58,19 @@ impl RecordingHttp {
         secret: Option<&str>,
     ) -> Result<(), HttpError> {
         let mut path = path;
-        let mut record = match serde_json::from_slice::<Value>(bytes) {
-            Ok(mut body) => {
-                (self.scrub)(&mut path, &mut body);
-                json!({"method": method, "path": path, "query": query, "status": status, "body": body})
-            }
-            Err(_) => {
-                (self.scrub)(&mut path, &mut Value::Null);
-                let encoded = base64_encode(bytes);
-                json!({"method": method, "path": path, "query": query, "status": status, "body_base64": encoded})
-            }
+        let mut query = query;
+        let parsed = serde_json::from_slice::<Value>(bytes).ok();
+        let is_json = parsed.is_some();
+        let mut body = parsed.unwrap_or(Value::Null);
+        (self.scrub)(&mut path, &mut query, &mut body);
+        let mut record = if is_json {
+            json!({"method": method, "path": path, "query": query, "status": status, "body": body})
+        } else {
+            let encoded = match &body {
+                Value::String(text) => base64_encode(text.as_bytes()),
+                _ => base64_encode(bytes),
+            };
+            json!({"method": method, "path": path, "query": query, "status": status, "body_base64": encoded})
         };
         if let Some(secret) = secret {
             redact(&mut record, secret);
@@ -383,7 +388,16 @@ mod tests {
         }
     }
 
-    fn keep(_path: &mut String, _body: &mut Value) {}
+    fn keep(_path: &mut String, _query: &mut String, _body: &mut Value) {}
+
+    /// Replaces a binary answer by a text and changes the query, as the Yandex scrub does.
+    fn stub_binary(path: &mut String, query: &mut String, body: &mut Value) {
+        if path.contains("/binary") {
+            *path = "/binary/stub".into();
+            *query = "ts=0".into();
+            *body = Value::String("stub-text".into());
+        }
+    }
 
     fn get(url: &str) -> Request {
         Request::get(SignedUrl::new(url.into()))
@@ -431,6 +445,29 @@ mod tests {
         assert_eq!(replayed_json, recorded_json);
         // The second answer came from the file, not from the inner client.
         assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn scrub_can_replace_binary_answer_and_query() {
+        let dir = temp_dir("stub-binary");
+        let recorder = RecordingHttp::new(Arc::new(FakeHttp::default()), dir.clone(), stub_binary);
+        recorder
+            .request(
+                Priority::Metadata,
+                get("https://api.example.test/binary?sign=abc&ts=12"),
+                None,
+            )
+            .unwrap();
+
+        let replay = ReplayHttp::open(&dir).unwrap();
+        let replayed = replay
+            .request(
+                Priority::Metadata,
+                get("https://api.example.test/binary/stub?sign=other&ts=0"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(replayed.bytes, b"stub-text");
     }
 
     #[test]
@@ -496,7 +533,7 @@ mod tests {
 
     #[test]
     fn scrub_rewrites_path_and_body_before_writing() {
-        fn scrub(path: &mut String, body: &mut Value) {
+        fn scrub(path: &mut String, _query: &mut String, body: &mut Value) {
             *path = path.replace("/users/42/", "/users/1/");
             body["result"]["call"] = Value::from(0);
         }

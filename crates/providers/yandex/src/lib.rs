@@ -3,7 +3,7 @@
 pub mod contracts;
 
 use eagle_provider_sdk::*;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime},
@@ -155,8 +155,22 @@ fn encode(s: &str) -> String {
 }
 /// Stands in for the account's user id, in paths and bodies alike.
 pub const STUB_UID: &str = "1";
-/// Likes and playlists keep this many items in a recording.
-const STUB_LIST_LIMIT: usize = 3;
+/// Stands in for every like, playlist and account date in a recording.
+const STUB_TIME: &str = "2000-01-01T00:00:00+00:00";
+/// Stands in for avatars and playlist covers.
+const STUB_AVATAR: &str = "avatars.yandex.net/stub/%%";
+/// Stands in for a signed download link; `ts` is the only parameter a recording keeps.
+const STUB_DOWNLOAD_URL: &str = "https://api.music.yandex.net/get-mp3/stub?sign=stub&ts=0";
+/// Stands in for the XML of a download answer. `direct_link` must still parse it.
+const STUB_DOWNLOAD_XML: &str = "<download-info><host>stub.invalid</host><path>/stub</path><ts>0</ts><region>-1</region><s>stub</s></download-info>";
+/// Likes keep this many items in a recording.
+const LIKES_LIMIT: usize = 3;
+/// Playlists keep this many items in a recording.
+const PLAYLISTS_LIMIT: usize = 2;
+/// A batch lookup of tracks keeps this many items in a recording.
+const TRACKS_LIMIT: usize = 3;
+/// Each kind of search result keeps this many items in a recording.
+const SEARCH_LIMIT: usize = 5;
 /// Account fields and the stand-ins that replace them in recordings.
 const ACCOUNT_FIELDS: &[(&str, &str)] = &[
     ("uid", STUB_UID),
@@ -166,15 +180,34 @@ const ACCOUNT_FIELDS: &[(&str, &str)] = &[
     ("fullName", "Stub User"),
     ("firstName", "Stub"),
     ("lastName", "User"),
+    ("secondName", "User"),
+    ("birthday", "2000-01-01"),
+    ("defaultEmail", "stub@example.invalid"),
+    ("userhash", "stub-hash"),
+    ("orderId", "stub-order"),
     ("phone", "+70000000000"),
     ("phones", "+70000000000"),
     ("phoneNumber", "+70000000000"),
+    ("playlistUuid", "stub-uuid"),
+    ("timestamp", STUB_TIME),
+    ("created", STUB_TIME),
+    ("modified", STUB_TIME),
 ];
 
 /// Removes account data from one recorded answer before it is written: the user id in the path
-/// and the body, login, e-mail, names and phones. Likes and playlists keep a few items only.
-/// Applying it twice changes nothing.
-pub fn scrub_recording(path: &mut String, body: &mut Value) {
+/// and the body, login, e-mail, names, phones, dates, avatars and signed download links. Likes,
+/// playlists, search results and batch lookups keep a few items only. Applying it twice changes
+/// nothing.
+///
+/// A download answer (`/get-mp3/`) is XML: its body arrives as `Value::Null`, and the scrub replaces
+/// it with a string holding the stub XML, which the recorder stores in place of the real bytes.
+pub fn scrub_recording(path: &mut String, query: &mut String, body: &mut Value) {
+    if path.contains("/get-mp3/") {
+        *path = "/get-mp3/stub".to_owned();
+        *query = "ts=0".to_owned();
+        *body = Value::String(STUB_DOWNLOAD_XML.to_owned());
+        return;
+    }
     let mut previous = "";
     let segments: Vec<String> = path
         .split('/')
@@ -189,32 +222,102 @@ pub fn scrub_recording(path: &mut String, body: &mut Value) {
         })
         .collect();
     *path = segments.join("/");
-    let trim = path.contains("/likes") || path.contains("/playlists");
-    scrub_value(body, trim);
+    if path.contains("/playlists")
+        && let Some(items) = body.get_mut("result").and_then(Value::as_array_mut)
+    {
+        items.truncate(PLAYLISTS_LIMIT);
+        items.iter_mut().for_each(scrub_playlist);
+    }
+    if path == "/tracks"
+        && let Some(items) = body.get_mut("result").and_then(Value::as_array_mut)
+    {
+        items.truncate(TRACKS_LIMIT);
+    }
+    if path == "/search"
+        && let Some(kinds) = body.get_mut("result").and_then(Value::as_object_mut)
+    {
+        for kind in kinds.values_mut() {
+            if let Some(items) = kind.as_array_mut() {
+                items.truncate(SEARCH_LIMIT);
+            } else if let Some(items) = kind.get_mut("results").and_then(Value::as_array_mut) {
+                items.truncate(SEARCH_LIMIT);
+            }
+        }
+    }
+    let limit = if path.contains("/likes") {
+        Some(LIKES_LIMIT)
+    } else if path.contains("/playlists") {
+        Some(PLAYLISTS_LIMIT)
+    } else {
+        None
+    };
+    scrub_value(body, limit);
 }
 
 fn is_digits(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn scrub_value(value: &mut Value, trim: bool) {
+/// Playlist titles, covers, custom waves and owners are the user's own content; the generic
+/// rules below only catch account fields and avatars.
+fn scrub_playlist(playlist: &mut Value) {
+    let Some(map) = playlist.as_object_mut() else {
+        return;
+    };
+    replace_field(map, "title", "Stub playlist");
+    replace_field(map, "description", "stub");
+    replace_field(map, "ogImage", STUB_AVATAR);
+    if let Some(Value::Object(owner)) = map.get_mut("owner") {
+        replace_field(owner, "name", "Stub User");
+    }
+    if let Some(Value::Object(cover)) = map.get_mut("cover")
+        && cover.contains_key("itemsUri")
+    {
+        cover.insert("itemsUri".to_owned(), json!([STUB_AVATAR]));
+    }
+    if let Some(Value::Object(wave)) = map.get_mut("customWave") {
+        for item in wave.values_mut() {
+            if item.is_string() {
+                *item = json!("stub");
+            }
+        }
+    }
+}
+
+fn replace_field(map: &mut Map<String, Value>, field: &str, stub: &str) {
+    if let Some(item) = map.get_mut(field) {
+        *item = json!(stub);
+    }
+}
+
+fn scrub_value(value: &mut Value, limit: Option<usize>) {
     match value {
         Value::Object(map) => {
             for (key, item) in map.iter_mut() {
-                match ACCOUNT_FIELDS
+                if let Some((_, stub)) = ACCOUNT_FIELDS
                     .iter()
                     .find(|(field, _)| *field == key.as_str())
                 {
-                    Some((_, stub)) => *item = Value::String((*stub).to_owned()),
-                    None => scrub_value(item, trim),
+                    *item = json!(stub);
+                } else if key.starts_with("avatar") && item.is_string() {
+                    *item = json!(STUB_AVATAR);
+                } else {
+                    scrub_value(item, limit);
                 }
             }
         }
         Value::Array(items) => {
-            if trim {
-                items.truncate(STUB_LIST_LIMIT);
+            if let Some(max) = limit {
+                items.truncate(max);
             }
-            items.iter_mut().for_each(|item| scrub_value(item, trim));
+            items.iter_mut().for_each(|item| scrub_value(item, limit));
+        }
+        Value::String(text) => {
+            if text.contains("avatars.yandex.net/get-music-content/") {
+                *text = STUB_AVATAR.to_owned();
+            } else if text.contains("/get-mp3/") {
+                *text = STUB_DOWNLOAD_URL.to_owned();
+            }
         }
         _ => {}
     }
@@ -859,11 +962,13 @@ fn direct_link(xml: &[u8]) -> Result<String, ProviderError> {
 #[cfg(test)]
 mod tests {
     use eagle_net::Client;
+    use eagle_provider_sdk::Quality;
     use serde_json::{Value, json};
 
     #[test]
     fn scrub_recording_replaces_account_data_and_trims_likes() {
         let mut path = "/users/12345/likes/tracks".to_owned();
+        let mut query = String::new();
         let mut body = json!({"result": {
             "uid": 12345,
             "login": "real.login",
@@ -872,11 +977,15 @@ mod tests {
             "phones": ["+7 999 000-00-00"],
             "library": {
                 "uid": 12345,
-                "tracks": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}]
+                "playlistUuid": "lk.9f1c-real",
+                "tracks": [
+                    {"id": 1, "timestamp": "2026-11-13T09:48:12+00:00"},
+                    {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}
+                ]
             },
             "title": "Keep me"
         }});
-        super::scrub_recording(&mut path, &mut body);
+        super::scrub_recording(&mut path, &mut query, &mut body);
         assert_eq!(path, "/users/1/likes/tracks");
         assert_eq!(body["result"]["uid"], "1");
         assert_eq!(body["result"]["login"], "stub-login");
@@ -884,6 +993,11 @@ mod tests {
         assert_eq!(body["result"]["displayName"], "Stub User");
         assert_eq!(body["result"]["phones"], "+70000000000");
         assert_eq!(body["result"]["library"]["uid"], "1");
+        assert_eq!(body["result"]["library"]["playlistUuid"], "stub-uuid");
+        assert_eq!(
+            body["result"]["library"]["tracks"][0]["timestamp"],
+            "2000-01-01T00:00:00+00:00"
+        );
         assert_eq!(
             body["result"]["library"]["tracks"]
                 .as_array()
@@ -895,11 +1009,158 @@ mod tests {
     }
 
     #[test]
-    fn scrub_recording_keeps_lists_outside_likes_and_playlists() {
+    fn scrub_recording_replaces_signed_download_link() {
+        let mut path = "/tracks/128582477/download-info".to_owned();
+        let mut query = String::new();
+        let mut body = json!({"result": [{
+            "bitrateInKbps": 192,
+            "codec": "mp3",
+            "direct": false,
+            "preview": false,
+            "downloadInfoUrl": "https://api.music.yandex.net/get-mp3/U2FsdGVkX1_LZLuOMnEq?sign=N2L8Zn-SFhgE&ts=1a1d5af7d83"
+        }]});
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(path, "/tracks/128582477/download-info");
+        assert_eq!(
+            body["result"][0]["downloadInfoUrl"],
+            "https://api.music.yandex.net/get-mp3/stub?sign=stub&ts=0"
+        );
+        // The provider must still choose the variant from the scrubbed answer.
+        let variant = super::select_variant(&body["result"], Quality::Standard).unwrap();
+        assert_eq!(variant["bitrateInKbps"], 192);
+    }
+
+    #[test]
+    fn scrub_recording_replaces_binary_download_with_stub_xml() {
+        let mut path =
+            "/get-mp3/U2FsdGVkX1_LZLuOMnEq_EZDKs2aBH_Eucy865Qi135Tfisxx6V77aRBjYyqQzh".to_owned();
+        let mut query = "ts=1a1d5af7d83".to_owned();
+        let mut body = Value::Null;
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(path, "/get-mp3/stub");
+        assert_eq!(query, "ts=0");
+        assert_eq!(body, Value::String(super::STUB_DOWNLOAD_XML.to_owned()));
+        // The stub must still parse as a download answer.
+        let link = super::direct_link(super::STUB_DOWNLOAD_XML.as_bytes()).unwrap();
+        assert!(link.starts_with("https://stub.invalid/get-mp3/"), "{link}");
+    }
+
+    #[test]
+    fn scrub_recording_neutralises_playlists_and_keeps_two() {
+        let mut path = "/users/42/playlists/list".to_owned();
+        let mut query = String::new();
+        let playlist = json!({
+            "title": "Мой плейлист",
+            "description": "личное описание",
+            "created": "2026-09-23T21:16:04+00:00",
+            "modified": "2026-09-23T21:57:45+00:00",
+            "playlistUuid": "f2a7c1d0-1111-2222-3333-444455556666",
+            "ogImage": "avatars.yandex.net/get-music-content/9838169/16d29f89.a.28095380-2/%%",
+            "uid": 42,
+            "owner": {"uid": 42, "login": "real.login", "name": "Оскорбин Олег", "sex": "male"},
+            "cover": {
+                "type": "mosaic",
+                "custom": false,
+                "itemsUri": [
+                    "avatars.yandex.net/get-music-content/2411511/c5152d03.a.4849007-4/%%",
+                    "avatars.yandex.net/get-music-content/20305588/a5e64df5.a.36229847-1/%%"
+                ]
+            },
+            "customWave": {
+                "title": "ew?",
+                "header": "Моя волна по плейлисту",
+                "animationUrl": "https://music-custom-wave-media.s3.yandex.net/base.json",
+                "backgroundImageUrl": "avatars.mds.yandex.net/get-music-misc/28052/bg/%%"
+            },
+            "trackCount": 12
+        });
+        let mut body = json!({"result": [playlist.clone(), playlist.clone(), playlist]});
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        let items = body["result"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let first = &items[0];
+        assert_eq!(first["title"], "Stub playlist");
+        assert_eq!(first["description"], "stub");
+        assert_eq!(first["created"], "2000-01-01T00:00:00+00:00");
+        assert_eq!(first["modified"], "2000-01-01T00:00:00+00:00");
+        assert_eq!(first["playlistUuid"], "stub-uuid");
+        assert_eq!(first["ogImage"], "avatars.yandex.net/stub/%%");
+        assert_eq!(first["uid"], "1");
+        assert_eq!(first["owner"]["name"], "Stub User");
+        assert_eq!(first["owner"]["login"], "stub-login");
+        assert_eq!(first["owner"]["uid"], "1");
+        assert_eq!(first["cover"]["type"], "mosaic");
+        assert_eq!(
+            first["cover"]["itemsUri"],
+            json!(["avatars.yandex.net/stub/%%"])
+        );
+        assert_eq!(first["customWave"]["title"], "stub");
+        assert_eq!(first["customWave"]["header"], "stub");
+        assert_eq!(first["customWave"]["animationUrl"], "stub");
+        assert_eq!(first["customWave"]["backgroundImageUrl"], "stub");
+        assert_eq!(first["trackCount"], 12);
+    }
+
+    #[test]
+    fn scrub_recording_replaces_avatar_urls() {
+        let mut path = "/users/42/likes/tracks".to_owned();
+        let mut query = String::new();
+        let mut body = json!({"result": {
+            "avatarUri": "https://avatars.yandex.net/get-music-content/1/abc/%%",
+            "avatarsUrl": "avatars.yandex.net/get-music-content/9/x"
+        }});
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(body["result"]["avatarUri"], "avatars.yandex.net/stub/%%");
+        assert_eq!(body["result"]["avatarsUrl"], "avatars.yandex.net/stub/%%");
+    }
+
+    #[test]
+    fn scrub_recording_replaces_profile_fields_of_account_status() {
+        let mut path = "/account/status".to_owned();
+        let mut query = String::new();
+        let mut body = json!({
+            "account": {
+                "uid": 12345,
+                "login": "real.login",
+                "displayName": "Real Name",
+                "secondName": "Настоящая",
+                "birthday": "2006-10-23",
+                "region": 225
+            },
+            "defaultEmail": "real.login@yandex.ru",
+            "userhash": "b0f3c1a9d2e4",
+            "subscription": {"autoRenewable": [{"orderId": 42, "productId": "plus"}]}
+        });
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(body["account"]["secondName"], "User");
+        assert_eq!(body["account"]["birthday"], "2000-01-01");
+        assert_eq!(body["defaultEmail"], "stub@example.invalid");
+        assert_eq!(body["userhash"], "stub-hash");
+        assert_eq!(
+            body["subscription"]["autoRenewable"][0]["orderId"],
+            "stub-order"
+        );
+        assert_eq!(
+            body["subscription"]["autoRenewable"][0]["productId"],
+            "plus"
+        );
+        assert_eq!(body["account"]["region"], 225);
+    }
+
+    #[test]
+    fn scrub_recording_keeps_five_search_results_per_kind() {
         let mut path = "/search".to_owned();
-        let mut body = json!({"result": {"tracks": {"results": [1, 2, 3, 4, 5]}}});
-        super::scrub_recording(&mut path, &mut body);
+        let mut query = "nocorrect=true&page=0&text=Queen&type=track".to_owned();
+        let mut body = json!({"result": {
+            "tracks": {"results": [1, 2, 3, 4, 5, 6, 7], "total": 7},
+            "artists": {"results": [1, 2, 3, 4, 5, 6]},
+            "albums": {"results": [1]},
+            "playlists": {"results": [1, 2, 3, 4, 5, 6, 7, 8]},
+            "text": "Queen"
+        }});
+        super::scrub_recording(&mut path, &mut query, &mut body);
         assert_eq!(path, "/search");
+        assert_eq!(query, "nocorrect=true&page=0&text=Queen&type=track");
         assert_eq!(
             body["result"]["tracks"]["results"]
                 .as_array()
@@ -907,17 +1168,96 @@ mod tests {
                 .len(),
             5
         );
+        assert_eq!(
+            body["result"]["artists"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(
+            body["result"]["albums"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            body["result"]["playlists"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(body["result"]["text"], "Queen");
+    }
+
+    #[test]
+    fn scrub_recording_keeps_three_tracks_from_batch_lookup() {
+        let mut path = "/tracks".to_owned();
+        let mut query = String::new();
+        let mut body = json!({"result": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]});
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(body["result"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn scrub_recording_leaves_query_of_other_requests_alone() {
+        let mut path = "/search".to_owned();
+        let mut query = "text=Queen&type=track".to_owned();
+        let mut body = json!({"result": {}});
+        super::scrub_recording(&mut path, &mut query, &mut body);
+        assert_eq!(query, "text=Queen&type=track");
     }
 
     #[test]
     fn scrub_recording_is_idempotent() {
-        let mut path = "/users/42/playlists/list".to_owned();
-        let mut body: Value = json!({"result": {"owner": {"uid": 42, "login": "x"},
-            "playlists": [1, 2, 3, 4]}});
-        super::scrub_recording(&mut path, &mut body);
-        let (scrubbed_path, scrubbed_body) = (path.clone(), body.clone());
-        super::scrub_recording(&mut path, &mut body);
-        assert_eq!((path, body), (scrubbed_path, scrubbed_body));
+        let cases = vec![
+            (
+                "/users/42/playlists/list".to_owned(),
+                String::new(),
+                json!({"result": [
+                    {"title": "a", "owner": {"uid": 42, "name": "x"},
+                     "customWave": {"title": "t"},
+                     "cover": {"itemsUri": ["avatars.yandex.net/get-music-content/1/x/%%"]}},
+                    {}, {}
+                ]}),
+            ),
+            (
+                "/users/42/likes/tracks".to_owned(),
+                String::new(),
+                json!({"result": {"library": {"uid": 42, "tracks": [
+                    {"timestamp": "2026-11-13T09:48:12+00:00"}, {}, {}, {}
+                ]}}}),
+            ),
+            (
+                "/search".to_owned(),
+                "text=Queen".to_owned(),
+                json!({"result": {"tracks": {"results": [1, 2, 3, 4, 5, 6]}}}),
+            ),
+            (
+                "/tracks".to_owned(),
+                String::new(),
+                json!({"result": [1, 2, 3, 4]}),
+            ),
+            (
+                "/tracks/1/download-info".to_owned(),
+                String::new(),
+                json!({"result": [{"downloadInfoUrl":
+                    "https://api.music.yandex.net/get-mp3/U2FsdGVkX1abc?sign=q&ts=1a"}]}),
+            ),
+            (
+                "/get-mp3/U2FsdGVkX1abc".to_owned(),
+                "ts=1a".to_owned(),
+                Value::Null,
+            ),
+        ];
+        for (mut path, mut query, mut body) in cases {
+            super::scrub_recording(&mut path, &mut query, &mut body);
+            let once = (path.clone(), query.clone(), body.clone());
+            super::scrub_recording(&mut path, &mut query, &mut body);
+            assert_eq!((path, query, body), once);
+        }
     }
 
     #[test]
