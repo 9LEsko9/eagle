@@ -695,11 +695,19 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             if ui.global::<Ui>().get_route() == Route::Search {
                 let mut items = bridge.search_rows.borrow_mut();
                 for change in delta {
+                    let len = items.len();
+                    // The session indexes its own list, which can differ from the one shown
+                    // here; a stale index must never abort the UI thread.
                     match change {
-                        LibraryDelta::Insert { index, item } => items.insert(index, item),
-                        LibraryDelta::Update { index, item } => items[index] = item,
-                        LibraryDelta::Remove { index } => {
+                        LibraryDelta::Insert { index, item } if index <= len => {
+                            items.insert(index, item)
+                        }
+                        LibraryDelta::Update { index, item } if index < len => items[index] = item,
+                        LibraryDelta::Remove { index } if index < len => {
                             items.remove(index);
+                        }
+                        _ => {
+                            log::warn!("search list change ignored: index out of range, len={len}")
                         }
                     }
                 }
@@ -1524,6 +1532,70 @@ pub(super) mod tests {
         ui.global::<Ui>().set_search_provider("".into());
         bridge.filter_search(&ui);
         assert_eq!(bridge.cards.row_count(), 3);
+    }
+    #[test]
+    fn search_deltas_outside_the_result_list_are_ignored() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = DesktopWindow::new().unwrap();
+        ui.global::<Ui>().set_route(Route::Search);
+        let root =
+            std::env::temp_dir().join(format!("eagle-ui-search-delta-{}", std::process::id()));
+        let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
+        let bridge = Bridge {
+            rows: Rc::new(VecModel::default()),
+            search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
+            search_id: Cell::new(1),
+            cards: Rc::new(VecModel::default()),
+            anchor: Arc::new(Mutex::new(None)),
+            sender: session.sender(),
+            row_window: Cell::new((0, 0)),
+            card_window: Cell::new((0, 0)),
+            images: RefCell::new(HashMap::new()),
+            queue_ids: RefCell::new(Vec::new()),
+            queue_current: Cell::new(None),
+        };
+        let item = |id: &str| LibraryItem {
+            sources: Vec::new(),
+            blocked_reason: None,
+            track: Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "title": id, "artists": [], "album": null, "album_title": null,
+                    "duration_ms": 0, "cover": null, "availability": "Available"
+                }))
+                .unwrap(),
+            ),
+            liked: false,
+        };
+        // Indexes of a list the search view never showed must not abort the process.
+        apply(
+            &ui,
+            Event::Library(vec![
+                LibraryDelta::Remove { index: 7 },
+                LibraryDelta::Update {
+                    index: 3,
+                    item: item("fakea:3"),
+                },
+                LibraryDelta::Insert {
+                    index: 5,
+                    item: item("fakea:5"),
+                },
+            ]),
+            &bridge,
+        );
+        assert_eq!(bridge.search_rows.borrow().len(), 0);
+        assert_eq!(bridge.rows.row_count(), 0);
+        // Valid deltas still apply.
+        apply(
+            &ui,
+            Event::Library(vec![LibraryDelta::Insert {
+                index: 0,
+                item: item("fakea:0"),
+            }]),
+            &bridge,
+        );
+        assert_eq!(bridge.rows.row_count(), 1);
+        drop(session);
     }
     #[test]
     fn search_old_visible_row_never_plays_new_row_before_reply_delivery() {
