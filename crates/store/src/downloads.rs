@@ -376,7 +376,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

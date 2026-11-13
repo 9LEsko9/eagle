@@ -66,7 +66,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 12 {
+    if version > 13 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -144,6 +144,14 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     }
     if version < 12 {
         likes::migrate_likes(&mut c)?;
+    }
+    if version < 13 {
+        // Databases that reached v12 before `likes_unresolved` existed.
+        c.execute_batch(
+            "BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS likes_unresolved(track TEXT PRIMARY KEY, at INTEGER NOT NULL);
+            PRAGMA user_version=13; COMMIT;",
+        )?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -332,6 +340,8 @@ impl Store {
             for track in &owned {
                 groups::assign(&tx, track)?;
             }
+            let ids: Vec<String> = owned.iter().map(|t| t.id.to_string()).collect();
+            likes::resolve_likes_in(&tx, &ids)?;
             tx.commit()?;
             Ok(())
         })

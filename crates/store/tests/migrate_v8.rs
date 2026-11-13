@@ -46,7 +46,7 @@ fn v8_database_migrates_to_latest_without_losing_user_data() {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     let playlists: i64 = c
         .query_row("SELECT count(*) FROM playlists", [], |r| r.get(0))
         .unwrap();

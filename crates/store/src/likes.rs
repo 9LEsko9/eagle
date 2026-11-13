@@ -70,7 +70,50 @@ fn set_liked_in(tx: &Transaction, track: &str, liked: bool) -> Result<i64, Error
     Ok(grp)
 }
 
+/// Likes stored without their track's metadata: the list is kept until the track arrives.
+/// Resolves the ones among `tracks` (just stored, in the same transaction) and returns how many.
+pub(crate) fn resolve_likes_in(tx: &Transaction, tracks: &[String]) -> Result<usize, Error> {
+    let mut resolved = 0;
+    for track in tracks {
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM likes_unresolved WHERE track=?1)",
+            [track],
+            |r| r.get(0),
+        )?;
+        if !pending {
+            continue;
+        }
+        set_liked_in(tx, track, true)?;
+        tx.execute("DELETE FROM likes_unresolved WHERE track=?1", [track])?;
+        resolved += 1;
+    }
+    Ok(resolved)
+}
+
 impl Store {
+    /// Likes of `provider` whose track metadata is not stored yet, oldest like first.
+    pub fn unresolved_likes(&self, provider: &str, limit: usize) -> Result<Vec<TrackId>, Error> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let c = self.read()?;
+        let mut stmt = c.prepare(
+            "SELECT track FROM likes_unresolved WHERE substr(track,1,length(?1)+1)=?1||':' ORDER BY at LIMIT ?2",
+        )?;
+        let tracks: Vec<String> = stmt
+            .query_map(params![provider, limit], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        tracks
+            .iter()
+            .map(|t| t.parse().map_err(|_| Error::Corrupt))
+            .collect()
+    }
+
+    pub fn unresolved_likes_count(&self) -> Result<usize, Error> {
+        let count: i64 =
+            self.read()?
+                .query_row("SELECT COUNT(*) FROM likes_unresolved", [], |r| r.get(0))?;
+        usize::try_from(count).map_err(|_| Error::Corrupt)
+    }
+
     /// Likes or unlikes a track in the profile: the journal op, `liked`, and one outbox job per
     /// provider in `targets` that has a track in the group, all in one transaction.
     pub fn like(&self, id: &TrackId, liked: bool, targets: &[String]) -> Result<(), Error> {
@@ -282,21 +325,30 @@ pub(crate) fn migrate_likes(c: &mut Connection) -> Result<(), Error> {
         tx.execute_batch("PRAGMA user_version=12;")?;
         return Ok(tx.commit()?);
     }
-    let ids: Vec<String> = {
-        let mut stmt = tx.prepare("SELECT id FROM likes ORDER BY rowid")?;
-        stmt.query_map([], |r| r.get(0))?
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS likes_unresolved(track TEXT PRIMARY KEY, at INTEGER NOT NULL);",
+    )?;
+    let likes: Vec<(String, i64)> = {
+        let mut stmt = tx.prepare("SELECT id, rowid FROM likes ORDER BY rowid")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?
     };
-    let mut lost = 0;
-    for id in &ids {
+    let mut unresolved = 0;
+    for (id, at) in &likes {
         match set_liked_in(&tx, id, true) {
             Ok(_) => {}
-            Err(Error::UnknownTrack) => lost += 1,
+            // Kept, not dropped: the like applies once the track's metadata arrives.
+            Err(Error::UnknownTrack) => {
+                unresolved += tx.execute(
+                    "INSERT OR IGNORE INTO likes_unresolved VALUES(?1,?2)",
+                    params![id, at],
+                )?;
+            }
             Err(error) => return Err(error),
         }
     }
-    if lost > 0 {
-        log::warn!(count = lost; "v12 migration dropped likes of tracks without metadata");
+    if unresolved > 0 {
+        log::info!(count = unresolved; "v12 migration kept likes without track metadata");
     }
     tx.execute_batch("DROP TABLE likes; PRAGMA user_version=12;")?;
     tx.commit()?;
@@ -684,6 +736,132 @@ mod tests {
             .unwrap();
         assert!(!has_old);
         drop((c, store));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn table_exists(store: &Store, name: &str) -> bool {
+        store
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn user_version(store: &Store) -> i64 {
+        store
+            .read()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn like_ops_for(store: &Store, track: &str) -> usize {
+        let count: i64 = store
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM profile_ops WHERE kind='like' AND key=?1",
+                [track],
+                |r| r.get(0),
+            )
+            .unwrap();
+        usize::try_from(count).unwrap()
+    }
+
+    /// A store with `tracks`, closed and then rewound to an older schema by `raw` SQL.
+    fn rewound(name: &str, tracks: &[Track], raw: &str) -> std::path::PathBuf {
+        let dir = root(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let store = Store::open(&dir).unwrap();
+            store.put_tracks(tracks).unwrap();
+        }
+        Connection::open(dir.join("metadata.sqlite"))
+            .unwrap()
+            .execute_batch(raw)
+            .unwrap();
+        dir
+    }
+
+    /// The v11 schema: `likes` still holds the list and `liked` is empty.
+    fn v11_with_likes(likes: &str) -> String {
+        format!(
+            "DROP TABLE IF EXISTS likes_unresolved;
+             CREATE TABLE likes(id TEXT PRIMARY KEY);
+             INSERT INTO likes VALUES {likes};
+             PRAGMA user_version=11;"
+        )
+    }
+
+    #[test]
+    fn migration_moves_likes_without_metadata_to_unresolved() {
+        let dir = rewound(
+            "migrate-unresolved",
+            &[track("yandex:1", "One", 1000)],
+            &v11_with_likes("('yandex:1'),('yandex:2')"),
+        );
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(liked_ids(&store), ["yandex:1"]);
+        assert_eq!(
+            store.unresolved_likes("yandex", 10).unwrap(),
+            [id("yandex:2")]
+        );
+        assert!(!table_exists(&store, "likes"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migration_keeps_likes_of_unknown_providers() {
+        let dir = rewound("migrate-unknown", &[], &v11_with_likes("('vk:7')"));
+        let store = Store::open(&dir).unwrap();
+        assert!(liked_ids(&store).is_empty());
+        assert_eq!(store.unresolved_likes("vk", 10).unwrap(), [id("vk:7")]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn storing_the_track_resolves_its_like_with_a_journal_op() {
+        let dir = rewound("resolve", &[], &v11_with_likes("('yandex:2')"));
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(
+            store.unresolved_likes("yandex", 10).unwrap(),
+            [id("yandex:2")]
+        );
+        store.put_tracks(&[track("yandex:2", "Two", 1000)]).unwrap();
+        assert!(store.is_liked(&id("yandex:2")).unwrap());
+        assert!(store.unresolved_likes("yandex", 10).unwrap().is_empty());
+        assert_eq!(store.unresolved_likes_count().unwrap(), 0);
+        assert_eq!(like_ops_for(&store, "yandex:2"), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v12_database_gets_the_unresolved_table() {
+        let dir = root("v12");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let store = Store::open(&dir).unwrap();
+            store.put_tracks(&[track("yandex:1", "One", 1000)]).unwrap();
+            store.like(&id("yandex:1"), true, &[]).unwrap();
+        }
+        // The schema of v12: no `likes_unresolved` yet.
+        Connection::open(dir.join("metadata.sqlite"))
+            .unwrap()
+            .execute_batch("DROP TABLE IF EXISTS likes_unresolved; PRAGMA user_version=12;")
+            .unwrap();
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(user_version(&store), 13);
+        assert!(table_exists(&store, "likes_unresolved"));
+        assert_eq!(liked_ids(&store), ["yandex:1"]);
+        assert_eq!(store.unresolved_likes_count().unwrap(), 0);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
