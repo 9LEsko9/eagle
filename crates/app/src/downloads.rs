@@ -693,6 +693,84 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn legacy_pinned_audio_requires_authorization_once_and_survives_restart() {
+        let (root, store, cache, job) = fixture();
+        let mut map = RangeMap::new(1);
+        cache
+            .write_chunk(&store, &job.track, job.quality, &mut map, 0, b"x")
+            .unwrap();
+        cache.pin(&store, &job.track, job.quality, true).unwrap();
+        let path = cache.path(&job.track, job.quality);
+        let net = Arc::new(Client::new().unwrap());
+        for error in [
+            eagle_net::Error::Network,
+            eagle_net::Error::Source("denied"),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            assert!(
+                audio_with_resolver(
+                    &root,
+                    &store,
+                    &cache,
+                    net.clone(),
+                    &job,
+                    &Attempt::default(),
+                    Arc::new(move || {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        Err(match error {
+                            eagle_net::Error::Network => eagle_net::Error::Network,
+                            _ => eagle_net::Error::Source("denied"),
+                        })
+                    })
+                )
+                .is_err()
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert!(!store.owns_audio("a", &job.track.to_string()).unwrap());
+            assert_eq!(fs::read(&path).unwrap(), b"x");
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        audio_with_resolver(
+            &root,
+            &store,
+            &cache,
+            net.clone(),
+            &job,
+            &Attempt::default(),
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(SignedUrl::new("https://example.invalid/audio".into()).into())
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(net.stats().requests, 0);
+        drop(cache);
+        drop(store);
+        let store = Store::open(&root).unwrap();
+        let cache = Cache::open(&root.join("audio"), 1, &store).unwrap();
+        assert!(
+            store
+                .allows_local_playback("a", &job.track.to_string())
+                .unwrap()
+        );
+        assert_eq!(
+            fs::read(
+                cache
+                    .lookup(&store, &job.track, job.quality)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            b"x"
+        );
+        drop(cache);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn complete_cache_pins_in_place_without_resolving_or_copying() {
         let (root, store, cache, job) = fixture();
         // A complete unpinned file may be larger than the current limit after a settings change.

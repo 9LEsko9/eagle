@@ -6,23 +6,49 @@ use rusqlite::params;
 
 impl Store {
     pub fn record_play(&self, account: &str, track: &Track) -> Result<(), Error> {
+        self.record_play_with_radio(account, track, None)
+    }
+    pub fn record_play_with_radio(
+        &self,
+        account: &str,
+        track: &Track,
+        radio: Option<(u64, &crate::RadioContext)>,
+    ) -> Result<(), Error> {
         if account.is_empty() {
+            if radio.is_some() {
+                return Err(Error::Corrupt);
+            }
             return Ok(());
         }
+        let radio = radio
+            .map(|(occurrence, context)| {
+                if context.account != account || context.session_id.is_empty() || occurrence == 0 {
+                    return Err(Error::Corrupt);
+                }
+                Ok((
+                    i64::try_from(occurrence).map_err(|_| Error::Corrupt)?,
+                    context.clone(),
+                ))
+            })
+            .transpose()?;
         let account = account.to_owned();
         let json = serde_json::to_string(track).map_err(|_| Error::Corrupt)?;
         let track = track.id.to_string();
         self.write(move |c| {
             let transaction = c.transaction()?;
             let played_at = now();
+            let event_id: String = transaction.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
             transaction.execute(
                 "INSERT INTO history(account,played_at,json) VALUES(?1,?2,?3)",
                 params![account, played_at, json],
             )?;
             transaction.execute(
-                "INSERT INTO play_outbox(id,account,track,played_at,state) VALUES(lower(hex(randomblob(16))),?1,?2,?3,'pending')",
-                params![account, track, played_at],
+                "INSERT INTO play_outbox(id,account,track,played_at,state) VALUES(?1,?2,?3,?4,'pending')",
+                params![event_id, account, track, played_at],
             )?;
+            if let Some((occurrence, context)) = radio {
+                transaction.execute("INSERT INTO radio_play_intents(event_id,account,session_id,batch_id,occurrence_id) VALUES(?1,?2,?3,?4,?5)", params![event_id, account, context.session_id, context.batch_id, occurrence])?;
+            }
             transaction.commit()?;
             Ok(())
         })
@@ -53,6 +79,53 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id":"yandex:1", "title":"local", "artists":[], "album":null, "album_title":null, "duration_ms":10000, "cover":null, "availability":"Available"})).unwrap()
     }
     #[test]
+    fn radio_intent_is_atomic_and_migrates_existing_v7_outbox() {
+        let root = std::env::temp_dir().join(format!("eg-radio-history-{}", std::process::id()));
+        let store = Store::open(&root).unwrap();
+        store.record_play("a", &track()).unwrap();
+        drop(store);
+        let db = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+        db.execute_batch("DROP TABLE radio_play_intents; PRAGMA user_version=7;")
+            .unwrap();
+        drop(db);
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.play_events("a").unwrap().len(), 1);
+        let context = crate::RadioContext {
+            account: "a".into(),
+            session_id: "session".into(),
+            batch_id: Some("batch".into()),
+        };
+        store
+            .record_play_with_radio("a", &track(), Some((7, &context)))
+            .unwrap();
+        let stored: (String, String, i64) = store
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT account,session_id,occurrence_id FROM radio_play_intents",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("a".into(), "session".into(), 7));
+        assert!(
+            store
+                .record_play_with_radio("b", &track(), Some((8, &context)))
+                .is_err()
+        );
+        store.write(|db| { db.execute_batch("CREATE TRIGGER fail_radio BEFORE INSERT ON radio_play_intents BEGIN SELECT RAISE(ABORT, 'test failure'); END;")?; Ok(()) }).unwrap();
+        assert!(
+            store
+                .record_play_with_radio("a", &track(), Some((8, &context)))
+                .is_err()
+        );
+        assert_eq!(store.history("a").unwrap().len(), 2);
+        assert_eq!(store.play_events("a").unwrap().len(), 2);
+        assert!(store.history("b").unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn upgrades_complete_v4_without_losing_data() {
         let root = std::env::temp_dir().join(format!("eg-history-v4-{}", std::process::id()));
         let store = Store::open(&root).unwrap();
@@ -65,7 +138,7 @@ mod tests {
             .unwrap();
         drop(store);
         let db = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
-        db.execute_batch("DROP TABLE access; DROP TABLE play_outbox; DROP TABLE offline_owners; PRAGMA user_version=4;")
+        db.execute_batch("DROP TABLE radio_play_intents; DROP TABLE access; DROP TABLE play_outbox; DROP TABLE offline_owners; PRAGMA user_version=4;")
             .unwrap();
         drop(db);
         let store = Store::open(&root).unwrap();
@@ -85,7 +158,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

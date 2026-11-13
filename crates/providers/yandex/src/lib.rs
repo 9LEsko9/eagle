@@ -130,6 +130,23 @@ fn tracks(v: &Value) -> Result<Vec<Track>, ProviderError> {
         .map(|t| parse_track(t.get("track").unwrap_or(t)))
         .collect()
 }
+fn valid_session(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+fn radio_batch(value: &Value) -> Result<RadioBatch, RadioError> {
+    let id = match value.get("batchId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        _ => return Err(RadioError::Uncertain),
+    };
+    Ok(RadioBatch {
+        id,
+        tracks: tracks(&value["sequence"]).map_err(|_| RadioError::Uncertain)?,
+    })
+}
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| {
@@ -162,6 +179,33 @@ impl Yandex {
     }
     fn api(&self, path: &str, form: Option<Vec<(String, String)>>) -> Result<Value, ProviderError> {
         self.api_at(path, form, Priority::Metadata)
+    }
+    fn radio_post(&self, path: &str, body: Value) -> Result<Value, RadioError> {
+        #[cfg(test)]
+        let base = self.api_base.as_deref().unwrap_or(API);
+        #[cfg(not(test))]
+        let base = API;
+        let mut request = Request::get(SignedUrl::new(format!("{base}{path}")));
+        request.token = Some(self.token()?);
+        request.method = "POST";
+        request
+            .headers
+            .push(("Content-Type".into(), "application/json".into()));
+        request.headers.push((
+            "X-Yandex-Music-Client".into(),
+            "YandexMusicAndroid/24023621".into(),
+        ));
+        request.body = Some(serde_json::to_vec(&body).map_err(|_| RadioError::Uncertain)?);
+        let response = self
+            .net
+            .request(Priority::Metadata, request, None)
+            .map_err(|_| RadioError::Uncertain)?;
+        let value: Value =
+            serde_json::from_slice(&response.bytes).map_err(|_| RadioError::Uncertain)?;
+        if value.get("error").is_some() {
+            return Err(RadioError::Uncertain);
+        }
+        value.get("result").cloned().ok_or(RadioError::Uncertain)
     }
     fn api_at(
         &self,
@@ -286,8 +330,31 @@ impl Yandex {
                 .or_else(|| v["coverUri"].as_str())
                 .or_else(|| v["ogImage"].as_str())
                 .map(str::to_owned),
-            tracks: if v["tracks"].is_array() {
-                tracks(&v["tracks"])?
+            tracks: if let Some(entries) = v["tracks"].as_array() {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        let mut track = parse_track(entry.get("track").unwrap_or(entry))?;
+                        if entry.get("track").is_some() {
+                            track.album = entry
+                                .get("albumId")
+                                .filter(|v| !v.is_null())
+                                .map(id)
+                                .transpose()?;
+                            track.album_title = track.album.as_ref().and_then(|album| {
+                                entry["track"]["albums"]
+                                    .as_array()?
+                                    .iter()
+                                    .find_map(|value| {
+                                        (id(&value["id"]).ok().as_ref() == Some(album))
+                                            .then(|| value["title"].as_str().map(str::to_owned))
+                                            .flatten()
+                                    })
+                            });
+                        }
+                        Ok(track)
+                    })
+                    .collect::<Result<Vec<_>, ProviderError>>()?
             } else {
                 vec![]
             },
@@ -295,6 +362,64 @@ impl Yandex {
     }
 }
 impl Provider for Yandex {
+    fn radio_start(&self) -> Result<RadioSession, RadioError> {
+        let value = self.radio_post("/rotor/session/new", serde_json::json!({"seeds":["user:onyourwave"], "includeTracksInResponse":true, "incognito":true}))?;
+        let id = value["radioSessionId"]
+            .as_str()
+            .filter(|s| valid_session(s))
+            .ok_or(RadioError::Uncertain)?
+            .to_owned();
+        Ok(RadioSession {
+            id,
+            batch: radio_batch(&value)?,
+        })
+    }
+    fn radio_next(
+        &self,
+        session: &RadioSession,
+        queue: &[RadioQueueItem],
+    ) -> Result<RadioBatch, RadioError> {
+        if !valid_session(&session.id) {
+            return Err(ProviderError::InvalidId.into());
+        }
+        let queue = queue
+            .iter()
+            .map(|item| {
+                let track = self.local(&item.track)?;
+                if !track.bytes().all(|b| b.is_ascii_digit()) || track.is_empty() {
+                    return Err(ProviderError::InvalidId);
+                }
+                match &item.album {
+                    Some(album) => {
+                        let album = self.local(album)?;
+                        if album.is_empty() || !album.bytes().all(|b| b.is_ascii_digit()) {
+                            return Err(ProviderError::InvalidId);
+                        }
+                        Ok(format!("{track}:{album}"))
+                    }
+                    None => Ok(track.to_owned()),
+                }
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?;
+        let value = self.radio_post(
+            &format!("/rotor/session/{}/tracks", session.id),
+            serde_json::json!({"queue":queue}),
+        )?;
+        if value["unknownSession"].as_bool() == Some(true) {
+            return Err(RadioError::UnknownSession);
+        }
+        radio_batch(&value)
+    }
+    fn playlist_snapshot(&self, id: &TrackId) -> Result<PlaylistSnapshot, ProviderError> {
+        self.playlist_snapshot_unverified(id)
+    }
+    fn edit_playlist(
+        &self,
+        snapshot: &PlaylistSnapshot,
+        edit: PlaylistEdit,
+    ) -> Result<PlaylistSnapshot, PlaylistEditError> {
+        self.edit_playlist_unverified(snapshot, edit)
+    }
     fn name(&self) -> &str {
         "yandex"
     }
@@ -767,6 +892,177 @@ mod tests {
         );
     }
     #[test]
+    fn radio_start_next_and_unknown_session_use_json_without_feedback() {
+        let start = r#"{"result":{"radioSessionId":"fixture-session","batchId":"batch-1","sequence":[{"track":{"id":"7","title":"A","artists":[]}}]}}"#;
+        let next = r#"{"result":{"batchId":"batch-2","unknownSession":false,"sequence":[{"track":{"id":"7","title":"A","artists":[]}}]}}"#;
+        let unknown = r#"{"result":{"unknownSession":true}}"#;
+        let (provider, server) = mock_api(vec![start, next, unknown]);
+        let session = provider.radio_start().unwrap();
+        let queue = [RadioQueueItem {
+            track: "yandex:7".parse().unwrap(),
+            album: Some("yandex:8".parse().unwrap()),
+        }];
+        assert_eq!(
+            provider.radio_next(&session, &queue).unwrap().tracks.len(),
+            1
+        );
+        assert!(matches!(
+            provider.radio_next(&session, &[]),
+            Err(RadioError::UnknownSession)
+        ));
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("POST /rotor/session/new "));
+        assert!(requests[0].contains("application/json"));
+        assert!(requests[1].starts_with("POST /rotor/session/fixture-session/tracks "));
+        assert!(requests[1].contains("7:8"));
+        assert!(!requests.iter().any(|r| r.contains("feedback")));
+        let invalid = RadioSession {
+            id: "bad/path?x".into(),
+            batch: session.batch,
+        };
+        assert!(matches!(
+            provider.radio_next(&invalid, &[]),
+            Err(RadioError::Provider(ProviderError::InvalidId))
+        ));
+    }
+    #[test]
+    fn playlist_entry_album_identity_overrides_track_album() {
+        let value: Value = serde_json::from_str(r#"{"owner":{"uid":42},"kind":3,"title":"Fixture","tracks":[{"albumId":"8","track":{"id":"7","title":"A","artists":[],"albums":[{"id":"99","title":"Other"},{"id":8,"title":"Matching"}]}},{"albumId":"10","track":{"id":"7","title":"A","artists":[],"albums":[{"id":"99","title":"Other"}]}},{"track":{"id":"7","title":"A","artists":[],"albums":[{"id":"99","title":"Other"}]}}]}"#).unwrap();
+        let provider = Yandex::new(Arc::new(Client::new().unwrap()));
+        let playlist = provider.parse_playlist(&value).unwrap();
+        assert_eq!(playlist.tracks[0].album.as_ref().unwrap().local(), "8");
+        assert_eq!(playlist.tracks[0].album_title.as_deref(), Some("Matching"));
+        assert_eq!(playlist.tracks[1].album.as_ref().unwrap().local(), "10");
+        assert!(playlist.tracks[1].album_title.is_none());
+        assert!(playlist.tracks[2].album.is_none());
+        assert!(playlist.tracks[2].album_title.is_none());
+    }
+    #[test]
+    fn radio_sequence_fixture_preserves_duplicate_occurrences() {
+        let response: Value = serde_json::from_str(r#"{"result":{"radioSessionId":"fixture-session","batchId":"fixture-batch","terminated":false,"sequence":[{"type":"track","liked":false,"track":{"id":"7","title":"A","artists":[]}},{"type":"track","liked":false,"track":{"id":"7","title":"A","artists":[]}}]}}"#).unwrap();
+        let result = &response["result"];
+        assert!(result["radioSessionId"].is_string());
+        assert!(result["batchId"].is_string());
+        let parsed = tracks(&result["sequence"]).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, parsed[1].id);
+    }
+    #[test]
+    fn playlist_snapshot_rejects_missing_or_partial_tracks() {
+        let (provider, server) = mock_api(vec![
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"trackCount":2,"tracks":[]}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"trackCount":0}}"#,
+        ]);
+        let id = "yandex:42_3".parse().unwrap();
+        assert!(matches!(
+            provider.playlist_snapshot(&id),
+            Err(ProviderError::ApiChanged)
+        ));
+        assert!(matches!(
+            provider.playlist_snapshot(&id),
+            Err(ProviderError::ApiChanged)
+        ));
+        assert!(
+            provider
+                .playlist_snapshot(&id)
+                .unwrap()
+                .playlist
+                .tracks
+                .is_empty()
+        );
+        server.join().unwrap();
+    }
+    #[test]
+    fn playlist_edit_reports_uncertain_when_post_read_differs() {
+        let before = r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[]}}"#;
+        let after = r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[]}}"#;
+        let (provider, server) = mock_api(vec![before, before, after, after]);
+        let snapshot = provider
+            .playlist_snapshot(&"yandex:42_3".parse().unwrap())
+            .unwrap();
+        let edit = PlaylistEdit::Insert {
+            at: 0,
+            tracks: vec![PlaylistTrack {
+                track_id: "yandex:7".parse().unwrap(),
+                album_id: "yandex:8".parse().unwrap(),
+            }],
+        };
+        assert!(matches!(
+            provider.edit_playlist(&snapshot, edit),
+            Err(PlaylistEditError::Uncertain)
+        ));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("POST ")).count(),
+            1
+        );
+    }
+    #[test]
+    fn playlist_move_sends_delete_and_insert_for_exact_occurrence() {
+        use crate::contracts::PlaylistEdit;
+        let before = r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[{"albumId":"8","track":{"id":"7","title":"A","artists":[],"albums":[{"id":"8"}]}},{"albumId":"10","track":{"id":"9","title":"B","artists":[],"albums":[{"id":"10"}]}}]}}"#;
+        let after = r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[{"albumId":"10","track":{"id":"9","title":"B","artists":[],"albums":[{"id":"10"}]}},{"albumId":"8","track":{"id":"7","title":"A","artists":[],"albums":[{"id":"8"}]}}]}}"#;
+        for (from, to) in [(0, 1), (1, 0)] {
+            let (provider, server) = mock_api(vec![before, before, after, after]);
+            let snapshot = provider
+                .playlist_snapshot(&"yandex:42_3".parse().unwrap())
+                .unwrap();
+            let moved = provider
+                .edit_playlist(&snapshot, PlaylistEdit::Move { from, to })
+                .unwrap();
+            assert_eq!(moved.playlist.tracks[0].id.local(), "9");
+            let requests = server.join().unwrap();
+            let request = &requests[2];
+            let encoded = request.split("\r\n\r\n").nth(1).unwrap();
+            let diff = encoded
+                .split('&')
+                .find_map(|part| part.strip_prefix("diff="))
+                .unwrap();
+            let bytes = diff.as_bytes();
+            let mut decoded = Vec::new();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == b'%' {
+                    decoded.push(u8::from_str_radix(&diff[index + 1..index + 3], 16).unwrap());
+                    index += 3;
+                } else {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            let diff: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+            assert_eq!(
+                diff[0],
+                serde_json::json!({"op":"delete", "from":from, "to":from + 1})
+            );
+            assert_eq!(
+                diff[1],
+                serde_json::json!({"op":"insert", "at":to, "tracks":[{"id":if from == 0 { "7" } else { "9" }, "albumId":if from == 0 { "8" } else { "10" }}]})
+            );
+        }
+    }
+    #[test]
+    fn playlist_snapshot_preserves_duplicate_track_order() {
+        let (provider, server) = mock_api(vec![
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[{"id":"7","track":{"id":"7","title":"A","artists":[]}},{"id":"9","track":{"id":"9","title":"B","artists":[]}},{"id":"7","track":{"id":"7","title":"A","artists":[]}}]}}"#,
+        ]);
+        let snapshot = provider
+            .playlist_snapshot_unverified(&"yandex:42_3".parse().unwrap())
+            .unwrap();
+        let ids: Vec<_> = snapshot
+            .playlist
+            .tracks
+            .iter()
+            .map(|track| track.id.local())
+            .collect();
+        assert_eq!(ids, ["7", "9", "7"]);
+        assert_eq!(snapshot.revision, 2);
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /users/42/playlists/3 "));
+    }
+    #[test]
     fn experimental_playlist_edit_checks_revision_and_sends_positional_diff() {
         use crate::contracts::{PlaylistEdit, PlaylistEditError, PlaylistTrack};
         let (provider, server) = mock_api(vec![
@@ -774,6 +1070,7 @@ mod tests {
             r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[]}}"#,
             r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":1,"tracks":[]}}"#,
             r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[]}}"#,
+            r#"{"result":{"owner":{"uid":42},"kind":3,"title":"Fixture","revision":2,"tracks":[{"albumId":"8","track":{"id":"7","title":"A","artists":[]}}]}}"#,
         ]);
         let snapshot = provider
             .playlist_snapshot_unverified(&"yandex:42_3".parse().unwrap())
@@ -794,7 +1091,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.revision, 2);
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
         assert!(requests[3].starts_with("POST /users/42/playlists/3/change "));
         assert!(requests[3].contains("revision=1"));
         assert!(requests[3].contains("albumId"));

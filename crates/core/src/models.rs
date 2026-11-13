@@ -88,6 +88,65 @@ pub struct Playlist {
     #[serde(default)]
     pub cover: Option<String>,
 }
+#[derive(Clone, Debug)]
+pub struct PlaylistSnapshot {
+    pub playlist: Playlist,
+    pub revision: u64,
+}
+#[derive(Clone, Debug)]
+pub struct PlaylistTrack {
+    pub track_id: TrackId,
+    pub album_id: TrackId,
+}
+#[derive(Clone, Debug)]
+pub enum PlaylistEdit {
+    Insert {
+        at: usize,
+        tracks: Vec<PlaylistTrack>,
+    },
+    Delete {
+        from: usize,
+        to: usize,
+    },
+    /// `to` is the final index after removing the source occurrence.
+    Move {
+        from: usize,
+        to: usize,
+    },
+}
+#[derive(Debug, thiserror::Error)]
+pub enum PlaylistEditError {
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error("плейлист изменился; обновите список и повторите действие")]
+    Conflict,
+    #[error("результат изменения неизвестен; обновите список перед повтором")]
+    Uncertain,
+}
+#[derive(Clone, Debug)]
+pub struct RadioSession {
+    pub id: String,
+    pub batch: RadioBatch,
+}
+#[derive(Clone, Debug)]
+pub struct RadioBatch {
+    pub id: Option<String>,
+    pub tracks: Vec<Track>,
+}
+#[derive(Clone, Debug)]
+pub struct RadioQueueItem {
+    pub track: TrackId,
+    pub album: Option<TrackId>,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum RadioError {
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error("радиосессия завершена; начните новую")]
+    UnknownSession,
+    #[error("результат запроса радио неизвестен; автоматический повтор отключён")]
+    Uncertain,
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Availability {
     Available,
@@ -177,6 +236,16 @@ pub enum AccessCheck {
     Revoked,
 }
 pub trait Provider: Send + Sync {
+    fn radio_start(&self) -> Result<RadioSession, RadioError> {
+        Err(ProviderError::Unavailable.into())
+    }
+    fn radio_next(
+        &self,
+        _session: &RadioSession,
+        _queue: &[RadioQueueItem],
+    ) -> Result<RadioBatch, RadioError> {
+        Err(ProviderError::Unavailable.into())
+    }
     fn check_access(&self, _id: &TrackId) -> Result<AccessCheck, ProviderError> {
         Ok(AccessCheck::Unknown)
     }
@@ -199,6 +268,16 @@ pub trait Provider: Send + Sync {
     }
     fn delete_playlist(&self, _id: &TrackId) -> Result<(), ProviderError> {
         Err(ProviderError::Unavailable)
+    }
+    fn playlist_snapshot(&self, _id: &TrackId) -> Result<PlaylistSnapshot, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    fn edit_playlist(
+        &self,
+        _snapshot: &PlaylistSnapshot,
+        _edit: PlaylistEdit,
+    ) -> Result<PlaylistSnapshot, PlaylistEditError> {
+        Err(ProviderError::Unavailable.into())
     }
     fn track(&self, id: &TrackId) -> Result<Track, ProviderError>;
     fn album(&self, id: &TrackId) -> Result<Album, ProviderError>;

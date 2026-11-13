@@ -89,6 +89,7 @@ fn route(view: View) -> Route {
         View::Albums => Route::Albums,
         View::Artists => Route::Artists,
         View::Artist => Route::Artist,
+        View::Radio => Route::Radio,
     }
 }
 
@@ -255,6 +256,11 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
     let anchor = &bridge.anchor;
     match event {
         Event::Snapshot(snapshot) => {
+            let playlist_busy = snapshot.playlist_mutation_busy;
+            let playlist_notice = snapshot.playlist_mutation_notice.clone();
+            let radio_ready = snapshot.radio_ready;
+            let radio_busy = snapshot.radio_busy;
+            let radio_notice = snapshot.radio_notice.clone();
             ui.global::<Ui>().set_signed_in(snapshot.signed_in);
             apply(ui, Event::View(snapshot.view), bridge);
             apply(ui, Event::Collections(snapshot.collections), bridge);
@@ -302,6 +308,14 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             if let Some(position) = snapshot.position {
                 apply(ui, Event::Position(position), bridge);
             }
+            ui.global::<Ui>().set_playlist_busy(playlist_busy);
+            if let Some(notice) = playlist_notice {
+                ui.global::<Ui>().set_error(notice.into());
+            }
+            ui.global::<Ui>().set_radio_ready(radio_ready);
+            ui.global::<Ui>().set_radio_busy(radio_busy);
+            ui.global::<Ui>()
+                .set_radio_notice(radio_notice.unwrap_or_default().into());
         }
         Event::Collections(collections) => {
             let model = ui.global::<Library>().get_playlists();
@@ -337,6 +351,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 liked,
                 likeable,
                 deletable,
+                editable,
+                playlist_revision,
             } = header;
             let library = ui.global::<Library>();
             library.set_header_id(id.into());
@@ -345,6 +361,13 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             library.set_liked(liked);
             library.set_likeable(likeable);
             library.set_deletable(deletable);
+            library.set_editable(editable);
+            library.set_playlist_revision(
+                playlist_revision
+                    .map(|r| r.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            );
         }
         Event::CollectionLiked(id, liked) => {
             if ui.global::<Library>().get_header_id().as_str() == id.to_string() {
@@ -408,6 +431,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             library.set_subtitle_id("".into());
             library.set_likeable(false);
             library.set_deletable(false);
+            library.set_editable(false);
+            library.set_playlist_revision("".into());
             ui.global::<Ui>().set_confirm_delete(false);
             bridge.cards.set_vec(Vec::new());
             ui.global::<Ui>().set_route(route(view));
@@ -420,6 +445,16 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
         Event::PlaylistDeleted(_) => ui.global::<Ui>().set_confirm_delete(false),
         Event::PlaylistMutationBusy(busy) => ui.global::<Ui>().set_playlist_busy(busy),
         Event::PlaylistMutationFailed(message) => ui.global::<Ui>().set_error(message.into()),
+        Event::RadioState {
+            ready,
+            busy,
+            notice,
+        } => {
+            ui.global::<Ui>().set_radio_ready(ready);
+            ui.global::<Ui>().set_radio_busy(busy);
+            ui.global::<Ui>()
+                .set_radio_notice(notice.unwrap_or_default().into());
+        }
         Event::Busy(busy) => ui.global::<Ui>().set_busy(busy),
         Event::Player(state) => {
             let player = ui.global::<Player>();
@@ -692,6 +727,48 @@ fn like_optimistically(ui: &DesktopWindow, rows: &VecModel<TrackItem>, id: &str)
 pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     let actions = ui.global::<Actions>();
     let tx = sender.clone();
+    actions.on_refresh_playlist(move |id| {
+        if let Ok(id) = id.parse::<eagle_core::TrackId>() {
+            let _ = tx.send(Command::ClearPlaylistMutationNotice(id.clone()));
+            let _ = tx.send(Command::Playlist(id));
+        }
+    });
+    let tx = sender.clone();
+    actions.on_edit_playlist(move |id, revision, from, action| {
+        let (Ok(id), Ok(revision), Ok(from)) =
+            (id.parse(), revision.parse(), usize::try_from(from))
+        else {
+            return;
+        };
+        let edit = match action {
+            0 => from
+                .checked_add(1)
+                .map(|to| eagle_core::PlaylistEdit::Delete { from, to }),
+            1 => from
+                .checked_sub(1)
+                .map(|to| eagle_core::PlaylistEdit::Move { from, to }),
+            2 => from
+                .checked_add(1)
+                .map(|to| eagle_core::PlaylistEdit::Move { from, to }),
+            _ => None,
+        };
+        if let Some(edit) = edit {
+            let _ = tx.send(Command::EditPlaylist { id, revision, edit });
+        }
+    });
+    let tx = sender.clone();
+    actions.on_add_track_to_playlist(move |id, revision, track, album| {
+        if let (Ok(id), Ok(revision), Ok(track_id), Ok(album_id)) =
+            (id.parse(), revision.parse(), track.parse(), album.parse())
+        {
+            let _ = tx.send(Command::AddTrackToPlaylist {
+                id,
+                revision,
+                entry: Box::new(eagle_core::PlaylistTrack { track_id, album_id }),
+            });
+        }
+    });
+    let tx = sender.clone();
     let weak = ui.as_weak();
     actions.on_save(move |id| {
         if let (Ok(id), Some(ui)) = (id.parse(), weak.upgrade()) {
@@ -792,6 +869,8 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     simple!(on_toggle_shuffle, Command::ToggleShuffle);
     simple!(on_cycle_repeat, Command::CycleRepeat);
     simple!(on_prev, Command::Previous);
+    simple!(on_radio_start, Command::RadioStart);
+    simple!(on_radio_more, Command::RadioMore);
     let tx = sender.clone();
     actions.on_play(move |id| {
         if let Ok(id) = id.parse() {
@@ -953,6 +1032,7 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             Route::Albums => View::Albums,
             Route::Artists => View::Artists,
             Route::Artist => View::Artist,
+            Route::Radio => View::Radio,
         };
         if route == Route::Settings {
             let _ = sender.send(Command::Downloads);
@@ -1099,8 +1179,17 @@ pub(super) mod tests {
             collections: vec![],
             title: "Local".into(),
             length: Duration::from_secs(20),
-            header: Header::default(),
+            header: Header {
+                editable: true,
+                playlist_revision: Some(u64::MAX),
+                ..Header::default()
+            },
             busy: false,
+            playlist_mutation_busy: true,
+            playlist_mutation_notice: Some("Результат изменения неизвестен".into()),
+            radio_ready: true,
+            radio_busy: false,
+            radio_notice: Some("Нет сети; очередь сохранена".into()),
             signed_in: true,
             player: Arc::new(eagle_app::session::PlayerState {
                 track: Some(track.clone()),
@@ -1118,6 +1207,21 @@ pub(super) mod tests {
             }),
         };
         apply(&ui, Event::Snapshot(Box::new(snapshot)), &bridge);
+        assert!(ui.global::<Ui>().get_playlist_busy());
+        assert_eq!(
+            ui.global::<Ui>().get_error().as_str(),
+            "Результат изменения неизвестен"
+        );
+        assert!(ui.global::<Ui>().get_radio_ready());
+        assert_eq!(
+            ui.global::<Ui>().get_radio_notice().as_str(),
+            "Нет сети; очередь сохранена"
+        );
+        assert!(ui.global::<Library>().get_editable());
+        assert_eq!(
+            ui.global::<Library>().get_playlist_revision().as_str(),
+            u64::MAX.to_string()
+        );
         assert_eq!(ui.global::<Player>().get_quality().as_str(), "128 кбит/с");
         let queue = ui.global::<Library>().get_queue_order();
         assert_eq!(queue.row_count(), 2);

@@ -2,6 +2,8 @@
 
 This record separates implemented behavior, automated evidence, and hardware acceptance. It does not declare the full desktop beta accepted.
 
+Completion states remain separate: **code and all required automatic checks ready — not yet** (rename/feedback contracts and cross-platform CI remain open); **full desktop beta accepted — no** (resource budget and hardware gates remain open). Passing local checks of the implemented subset does not change either full-plan status.
+
 The incoming working tree was preserved in local commit `9735e02` (parent `4824682`). Its provenance is the incoming uncommitted work, not newly authored changes from this run. The original patch, `instance.rs` patch and first test logs are kept locally in `.review/desktop-beta-start/`. No changes were pushed.
 
 The measured implementation is local commit `b7037d2`. Its normal release binary has SHA-256 `c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97`.
@@ -20,13 +22,23 @@ The measured implementation is local commit `b7037d2`. Its normal release binary
 | History | Local history and account-scoped pending outbox events are created in one SQLite transaction. Ambiguous events have an explicit uncertain state. | Transaction rollback and isolation tests. No real history or radio events are submitted automatically. |
 | UI | Compact rows share the virtualization pitch; queue movement follows occurrence IDs. Download names and AudioReady actions are displayed. | Current UI tests and wide/narrow screenshots; hardware keyboard/drag checks remain required. |
 
-Schema upgrades are sequential: v5 access, v6 outbox, v7 durable audio ownership. The v4 fixture includes existing history, downloads and settings. A complete download fixture does not demonstrate the provider's current live contract.
+Schema upgrades are sequential: v5 access, v6 outbox, v7 durable audio ownership, v8 local radio context for play intents. History, the outbox item and its radio context commit together. The v4 fixture includes existing history, downloads and settings; a v7 fixture verifies the subsequent upgrade. A complete download fixture does not demonstrate the provider's current live contract.
+
+Legacy pinned audio without a Saved/AudioReady download job has no trustworthy account ownership in the old schema. Migration retains the file and its pin but does not assign it to the currently stored UID. Offline playback of that file is denied until online authorization establishes an owner. This confirmed compatibility gap remains open; assigning every old pin to the current account would transfer rights between accounts.
+
+The 100-track test kills a separate child process and restarts the same test executable. It resumes synthetic HTTP objects, then decodes the saved audio and pre-seeded artwork. It does not establish application-version upgrade recovery, cancellation during the crash scenario, 100 complete audible plays, real Yandex downloads, or network artwork retrieval. Relocation fault injections exercise journal boundaries, not hardware power-loss durability.
 
 ## Yandex contract gate
 
-See [yandex-contracts.md](yandex-contracts.md). Experimental revision-aware playlist methods are explicitly named `*_unverified` and are not connected to production UI. A failed response after a playlist write is uncertain and must not be blindly retried.
+See [yandex-contracts.md](yandex-contracts.md). Live tests on disposable private playlists confirmed insert/delete, duplicate ordering, one direction of move and rejection of a stale revision. Provider and UI now connect revision-aware positional edits, independently read the result, and reject incomplete snapshots. Mutation busy state and uncertain notices survive window recreation. Rename was exercised live but remains disconnected because its revision semantics were not recorded. A failed response after a playlist write is uncertain and must not be blindly retried.
 
-Live radio sessions, feedback/history delivery, revision conflict behavior and explicit access revocation/restoration still require provider evidence. Their absence blocks the full beta; a local fixture or an unofficial client implementation does not confirm live-server behavior. Existing playlists, likes and real listening events were not changed by this work.
+With explicit user permission, a radio session and its next batch were fetched without playback or feedback. Both returned five tracks; overlap between batches is allowed. The radio screen fetches only on explicit action, preserves per-occurrence account/session/batch context in the playback checkpoint, and manually extends a matching active radio queue. After application restart the saved queue retains context, but fetching more requires a new radio session. Feedback/history delivery and explicit access revocation/restoration still lack provider evidence; server conflict error classification and rename revision semantics remain incomplete. These gaps block the full beta. Existing playlists, likes and real listening events were not changed by this work; disposable test playlists were removed and their absence checked.
+
+The user reported successful sign-in and ordinary playback. This is a useful macOS smoke result, not acceptance of media keys, background playback, restart recovery or other platforms. No credential, signed URL or personal response was added to the repository.
+
+An independent review reproduced an audible-position race: a position for the next engine track could previously record the earlier track's radio batch. History now follows the audible engine index and occurrence; late/missing `TrackChanged` and repeated tracks have regression coverage.
+
+UI fixtures include wide/narrow playlist editing, conflict, and empty/populated/offline radio states. The native screenshot runner stalled during this run, so layout checks use `cargo run -p eagle-ui --example screenshots -- /tmp/eagle-preview --headless`, backed by Slint's actual software renderer. This does not establish native focus, popup interaction, GPU behavior or hardware rendering. The preview now returns an error for repeated capture failure instead of silently looping on it.
 
 ## Reproduction
 
@@ -72,6 +84,8 @@ The **30 MiB requirement failed in both backends**, including after repeated reo
 
 Heap stacks identify approximately 7.17 MiB of retained ColorSync transfer curves, a roughly 3.4 MiB live audio ring buffer, and approximately 1.69 MiB of Skia allocations. This does not prove a safe way to reclaim them. The audio buffer was not shortened to improve a UI metric. `vmmap` still reported IOAccelerator memory; full GPU release remains open.
 
+Two additional isolated diagnostics did not resolve the limit. macOS `malloc_zone_pressure_relief` reported 0 reclaimed bytes, with footprint unchanged at 40,584,200 bytes. A same-binary Skia global-cache control/treatment pair measured closed-playing 38.89/37.42 MiB and closed-again 37.66/37.95 MiB. The global font cache was only 80,357 bytes and the resource cache was empty; neither run met 30 MiB. These temporary probes and their direct Skia dependency were removed. The measured revision above predates the subsequent playlist/radio integration; its numbers remain evidence of an unmet gate, not measurements of the later feature build.
+
 Package/interrupt wakeups in the JSON belong to the whole process. They cannot prove zero UI wakeups or separate audio activity. Other development workloads and foreground/occlusion state were not controlled, so the short CPU samples are diagnostic observations, not a stable performance benchmark. The fixture markers label commands/stages; they do not independently prove audible output. Slint 1.17's public graphics notifier does not expose native Metal identity; selecting Skia alone does not establish the actual API or successful fallback.
 
 To repeat the current isolated macOS measurement after a normal release build:
@@ -83,4 +97,4 @@ python3 bench/desktop.py --binary target/release/eagle-desktop \
   --fixture-root /tmp/eagle-desktop-new-software --output /tmp/eagle-software.json --software
 ```
 
-Use new fixture directories and avoid concurrent profiling/builds. The script rejects failed, incomplete or stage-overlapping runs and records the binary hash. The evidence currently records 163 passing workspace tests, clippy with `-D warnings`, formatting, seven Python checks and a workspace/all-target check with Rust 1.92. These checks do not substitute for the outstanding platform, contract and resource gates.
+Use new fixture directories and avoid concurrent profiling/builds. The script rejects failed, incomplete or stage-overlapping runs and records the binary hash. The integrated playlist/radio subset has 183 passing workspace tests, clippy with `-D warnings`, formatting, seven Python checks and a workspace/all-target check with Rust 1.92. The final album-title adjustment also has a focused provider regression test. These checks do not substitute for the outstanding platform, contract and resource gates.

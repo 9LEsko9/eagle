@@ -43,10 +43,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     use slint::{ComponentHandle, VecModel};
     use std::{rc::Rc, time::Duration};
-    slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name("software".into())
-        .select()?;
+    let headless = std::env::args().any(|arg| arg == "--headless");
+    if headless {
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl slint::platform::Platform for PreviewPlatform {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        slint::platform::set_platform(Box::new(PreviewPlatform(MinimalSoftwareWindow::new(
+            RepaintBufferType::NewBuffer,
+        ))))?;
+    } else {
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name("software".into())
+            .select()?;
+    }
     let ui = DesktopWindow::new()?;
     slint::select_bundled_translation("ru")?;
     ui.global::<Library>().set_playlists(
@@ -199,6 +215,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&folder)?;
     // (file name, theme, route, panel open, drawer open, window width)
     let shots = [
+        (
+            "radio-empty-wide",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "radio-empty-narrow",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "radio-filled-wide",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "radio-filled-narrow",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "radio-error-narrow",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "playlist-edit-wide",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "playlist-edit-narrow",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "playlist-conflict-narrow",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            760.,
+        ),
         (
             "saved-empty-wide",
             ThemeMode::Graphite,
@@ -418,6 +498,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
     let index = Rc::new(std::cell::Cell::new(0));
+    let capture_failures = Rc::new(std::cell::Cell::new(0));
+    let progress = index.clone();
+    let failures = capture_failures.clone();
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
     timer.start(
@@ -427,9 +510,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             let n = index.get();
             if n > 0 {
-                let Ok(image) = ui.window().take_snapshot() else {
-                    return;
+                let image = match ui.window().take_snapshot() {
+                    Ok(image) => image,
+                    Err(error) => {
+                        eprintln!("snapshot {}: {error}", shots[n - 1].0);
+                        capture_failures.set(capture_failures.get() + 1);
+                        if capture_failures.get() >= 3 {
+                            let _ = slint::quit_event_loop();
+                        }
+                        return;
+                    }
                 };
+                capture_failures.set(0);
                 let saved = image::save_buffer(
                     format!("{folder}/{}.png", shots[n - 1].0),
                     image.as_bytes(),
@@ -439,15 +531,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 if let Err(error) = saved {
                     eprintln!("screenshot: {error}");
+                    capture_failures.set(3);
+                    let _ = slint::quit_event_loop();
+                    return;
                 }
             }
             if n == shots.len() {
+                index.set(n + 1);
                 let _ = slint::quit_event_loop();
                 return;
             }
             let (name, mode, route, panel, drawer, width) = shots[n];
             let mut shown = tracks.clone();
-            if name.starts_with("saved-empty") {
+            if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
                 shown.clear();
             }
             ui.global::<Player>()
@@ -463,8 +559,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Library>()
                 .set_tracks(Rc::new(VecModel::from(shown)).into());
             ui.global::<Ui>().set_compact(name.starts_with("compact"));
+            ui.global::<Ui>().set_radio_ready(
+                name.starts_with("radio-filled") || name.starts_with("radio-error"),
+            );
+            ui.global::<Ui>().set_radio_busy(false);
             ui.global::<Ui>()
-                .set_error(if name.starts_with("saved-error") {
+                .set_radio_notice(if name.starts_with("radio-error") {
+                    "Нет сети. Очередь воспроизведения сохранена.".into()
+                } else {
+                    "".into()
+                });
+            ui.global::<Ui>()
+                .set_error(if name.starts_with("playlist-conflict") {
+                    "Плейлист изменился. Список обновлён; повторите действие.".into()
+                } else if name.starts_with("saved-error") {
                     "Сеть недоступна. Сохранённая музыка остаётся на устройстве.".into()
                 } else {
                     "".into()
@@ -479,7 +587,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>()
                 .set_confirm_delete(name == "delete-playlist");
             ui.global::<Library>()
-                .set_deletable(name == "delete-playlist");
+                .set_deletable(name == "delete-playlist" || name.starts_with("playlist-"));
+            ui.global::<Library>()
+                .set_editable(name.starts_with("playlist-"));
+            ui.global::<Library>().set_playlist_revision("3".into());
+            ui.global::<Player>().set_album_id("yandex:10".into());
             ui.window().set_size(slint::LogicalSize::new(
                 width,
                 if width > 1600. { 1080. } else { 880. },
@@ -488,6 +600,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>().set_route(route);
             let library = ui.global::<Library>();
             match route {
+                Route::Radio => {
+                    library.set_title("Моя волна".into());
+                    library.set_subtitle("".into());
+                }
                 Route::Saved => {
                     library.set_title("Сохранённое".into());
                     library.set_cards(Rc::new(VecModel::<CardItem>::default()).into());
@@ -534,7 +650,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             index.set(n + 1);
         },
     );
-    ui.run()?;
+    if headless {
+        ui.show()?;
+        let started = std::time::Instant::now();
+        while progress.get() <= shots.len()
+            && failures.get() < 3
+            && started.elapsed() < Duration::from_secs(120)
+        {
+            slint::platform::update_timers_and_animations();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if progress.get() <= shots.len() {
+            return Err("preview did not capture every state".into());
+        }
+    } else {
+        ui.run()?;
+    }
+    if failures.get() >= 3 {
+        return Err("preview capture failed".into());
+    }
     Ok(())
 }
 #[cfg(any(target_os = "android", target_os = "ios"))]

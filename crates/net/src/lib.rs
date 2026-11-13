@@ -42,6 +42,7 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     pub token: Option<Token>,
     pub form: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
     pub range: Option<(u64, u64)>,
     pub limit: usize,
 }
@@ -53,6 +54,7 @@ impl Request {
             headers: vec![],
             token: None,
             form: vec![],
+            body: None,
             range: None,
             limit: 16 * 1024 * 1024,
         }
@@ -181,6 +183,9 @@ impl Client {
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
         sink: Option<Arc<dyn BodySink>>,
     ) -> Result<Response, Error> {
+        if request.body.is_some() && (request.method != "POST" || !request.form.is_empty()) {
+            return Err(Error::Source("тело запроса требует POST без form"));
+        }
         for attempt in 0..4 {
             // Refresh happens outside workers to avoid deadlock if the hook uses this client.
             let (tx, rx) = mpsc::sync_channel(1);
@@ -188,6 +193,7 @@ impl Client {
             let token = request.token.clone();
             let headers = request.headers.clone();
             let form = request.form.clone();
+            let body = request.body.clone();
             let method = request.method;
             let range = request.range;
             let limit = request.limit;
@@ -229,12 +235,16 @@ impl Client {
                                 req = req.set("Range", &format!("bytes={start}-{end}"));
                             }
                             let response = if method == "POST" {
-                                req.send_form(
-                                    &form
-                                        .iter()
-                                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                                        .collect::<Vec<_>>(),
-                                )
+                                if let Some(body) = &body {
+                                    req.send_bytes(body)
+                                } else {
+                                    req.send_form(
+                                        &form
+                                            .iter()
+                                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                                            .collect::<Vec<_>>(),
+                                    )
+                                }
                             } else {
                                 req.call()
                             };
@@ -397,6 +407,60 @@ mod tests {
             job(&agent);
         }
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    }
+    #[test]
+    fn post_body_is_sent_once_even_when_server_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = br#"{"seeds":["user:onyourwave"]}"#;
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let n = socket.read(&mut chunk).unwrap();
+                assert_ne!(n, 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                assert!(bytes.len() < 8192);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n")
+                    && bytes.len() >= end + 4 + body.len()
+                {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    assert!(headers.starts_with("post /radio "));
+                    assert!(headers.contains("content-type: application/json"));
+                    assert_eq!(&bytes[end + 4..], body);
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let client = Client::new().unwrap();
+        let mut request = Request::get(SignedUrl::new(format!("http://{addr}/radio")));
+        request.method = "POST";
+        request
+            .headers
+            .push(("Content-Type".into(), "application/json".into()));
+        request.body = Some(body.to_vec());
+        assert!(matches!(
+            client.request(Priority::Metadata, request, None),
+            Err(Error::Status(503))
+        ));
+        assert_eq!(client.stats().requests, 1);
+        server.join().unwrap();
+        let mut invalid = Request::get(SignedUrl::new(format!("http://{addr}/radio")));
+        invalid.body = Some(Vec::new());
+        assert!(matches!(
+            client.request(Priority::Metadata, invalid, None),
+            Err(Error::Source(_))
+        ));
+        assert_eq!(client.stats().requests, 1);
     }
     #[test]
     fn authenticated_request_does_not_follow_redirect() {

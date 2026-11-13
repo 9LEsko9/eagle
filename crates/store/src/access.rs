@@ -146,6 +146,43 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_pinned_file_without_download_owner_remains_unowned_after_upgrade() {
+        let root =
+            std::env::temp_dir().join(format!("eg-access-legacy-pin-{}", std::process::id()));
+        let store = Store::open(&root).unwrap();
+        store.put_setting("account_uid:yandex", "a".into()).unwrap();
+        let cache = crate::Cache::open(&root.join("audio"), 100, &store).unwrap();
+        let track = "yandex:1".parse().unwrap();
+        let mut map = crate::RangeMap::new(1);
+        cache
+            .write_chunk(&store, &track, eagle_core::Quality::High, &mut map, 0, b"x")
+            .unwrap();
+        cache
+            .pin(&store, &track, eagle_core::Quality::High, true)
+            .unwrap();
+        drop(cache);
+        drop(store);
+        let db = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+        db.execute_batch(
+            "DROP TABLE radio_play_intents; DROP TABLE offline_owners; PRAGMA user_version=6;",
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open(&root).unwrap();
+        let cache = crate::Cache::open(&root.join("audio"), 100, &store).unwrap();
+        assert!(
+            cache
+                .map(&track, eagle_core::Quality::High)
+                .unwrap()
+                .unwrap()
+                .pinned
+        );
+        assert!(!store.allows_local_playback("a", "yandex:1").unwrap());
+        drop(cache);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn v6_upgrade_imports_only_completed_and_audio_ready_owners() {
         let root = std::env::temp_dir().join(format!("eg-access-v6-{}", std::process::id()));
         let store = Store::open(&root).unwrap();
@@ -167,8 +204,10 @@ mod tests {
         }
         drop(store);
         let db = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
-        db.execute_batch("DROP TABLE offline_owners; PRAGMA user_version=6;")
-            .unwrap();
+        db.execute_batch(
+            "DROP TABLE radio_play_intents; DROP TABLE offline_owners; PRAGMA user_version=6;",
+        )
+        .unwrap();
         drop(db);
         let store = Store::open(&root).unwrap();
         assert!(store.owns_audio("saved", "yandex:1").unwrap());

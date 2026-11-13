@@ -10,6 +10,15 @@ use std::collections::HashSet;
 pub struct PlaybackEntry {
     pub id: u64,
     pub track: Track,
+    #[serde(default)]
+    pub radio: Option<RadioContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioContext {
+    pub account: String,
+    pub session_id: String,
+    pub batch_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -33,6 +42,11 @@ impl PlaybackState {
             || self.order.len() != self.entries.len()
             || self.current.is_none() != self.entries.is_empty()
             || self.current.is_some_and(|id| !ids.contains(&id))
+            || self.entries.iter().any(|entry| {
+                entry.radio.as_ref().is_some_and(|context| {
+                    context.account.is_empty() || context.session_id.is_empty()
+                })
+            })
         {
             return Err(Error::Corrupt);
         }
@@ -85,7 +99,11 @@ mod tests {
             cover: None,
             availability: eagle_core::Availability::Available,
         };
-        let entry = PlaybackEntry { id: 1, track };
+        let entry = PlaybackEntry {
+            id: 1,
+            track,
+            radio: None,
+        };
         let mut state = PlaybackState {
             entries: vec![entry.clone()],
             order: vec![1],

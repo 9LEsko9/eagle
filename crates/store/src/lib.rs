@@ -38,7 +38,7 @@ mod downloads;
 mod history;
 pub use downloads::{DownloadJob, DownloadState};
 mod playback;
-pub use playback::{PlaybackEntry, PlaybackState};
+pub use playback::{PlaybackEntry, PlaybackState, RadioContext};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
@@ -57,7 +57,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 7 {
+    if version > 8 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -117,6 +117,12 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
             CREATE TABLE offline_owners(account TEXT NOT NULL,track TEXT NOT NULL,PRIMARY KEY(account,track));
             INSERT INTO offline_owners SELECT DISTINCT account,track FROM downloads WHERE state IN ('saved','audio_ready') AND account != '';
             PRAGMA user_version=7; COMMIT;")?;
+    }
+    if version < 8 {
+        c.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE radio_play_intents(event_id TEXT PRIMARY KEY REFERENCES play_outbox(id), account TEXT NOT NULL, session_id TEXT NOT NULL, batch_id TEXT, occurrence_id INTEGER NOT NULL CHECK(occurrence_id > 0));
+            CREATE INDEX radio_play_intents_account ON radio_play_intents(account,event_id);
+            PRAGMA user_version=8; COMMIT;")?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
