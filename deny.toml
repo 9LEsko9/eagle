@@ -23,6 +23,10 @@ allow = ["BSL-1.0"]
 [[licenses.exceptions]]
 name = "libfuzzer-sys"
 allow = ["NCSA"]
+# Public-domain dedication; a build-time dependency of naga (wgpu, used by the FemtoVG renderer).
+[[licenses.exceptions]]
+name = "hexf-parse"
+allow = ["CC0-1.0"]
 [[licenses.exceptions]]
 name = "ksni"
 allow = ["Unlicense"]

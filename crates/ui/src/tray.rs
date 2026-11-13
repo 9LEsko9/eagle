@@ -65,7 +65,8 @@ impl Tray {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             action(&sender, event.id.as_ref())
         }));
-        let icon = tray_icon::Icon::from_rgba(icon(), 16, 16)?;
+        let (pixels, width, height) = icon()?;
+        let icon = tray_icon::Icon::from_rgba(pixels, width, height)?;
         let tray = tray_icon::TrayIconBuilder::new()
             .with_tooltip("eagle")
             .with_menu_on_left_click(false)
@@ -113,13 +114,15 @@ impl ksni::Tray for LinuxTray {
         self.title.clone()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        let mut pixels = icon();
+        let Ok((mut pixels, width, height)) = icon() else {
+            return Vec::new();
+        };
         for pixel in pixels.chunks_exact_mut(4) {
             pixel.rotate_right(1);
         }
         vec![ksni::Icon {
-            width: 16,
-            height: 16,
+            width: width as i32,
+            height: height as i32,
             data: pixels,
         }]
     }
@@ -182,20 +185,27 @@ impl Tray {
     }
 }
 
-fn icon() -> Vec<u8> {
-    let mut pixels = vec![0; 16 * 16 * 4];
-    // Monochrome E mark, suitable for macOS template rendering.
-    for y in 2..14 {
-        for x in 3..13 {
-            if x < 5 || y < 4 || ((7..9).contains(&y) && x < 11) || y >= 12 {
-                let i = (y * 16 + x) * 4;
-                #[cfg(target_os = "macos")]
-                let color = [0, 0, 0, 255];
-                #[cfg(not(target_os = "macos"))]
-                let color = [255, 255, 255, 255];
-                pixels[i..i + 4].copy_from_slice(&color);
-            }
-        }
+/// The tray glyph from the brand assets: a black template on macOS, white elsewhere.
+#[cfg(target_os = "macos")]
+const GLYPH: &[u8] = include_bytes!("../assets/brand/tray-macos.png");
+#[cfg(not(target_os = "macos"))]
+const GLYPH: &[u8] = include_bytes!("../assets/brand/tray-white.png");
+
+/// RGBA pixels of the glyph with its width and height.
+fn icon() -> Result<(Vec<u8>, u32, u32), image::ImageError> {
+    let glyph = image::load_from_memory_with_format(GLYPH, image::ImageFormat::Png)?.to_rgba8();
+    let (width, height) = glyph.dimensions();
+    Ok((glyph.into_raw(), width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn glyph_decodes_to_visible_pixels() {
+        let (pixels, width, height) = super::icon().unwrap();
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        assert!(width >= 16 && width == height);
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 200));
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
     }
-    pixels
 }
