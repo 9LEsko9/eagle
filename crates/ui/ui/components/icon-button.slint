@@ -15,6 +15,8 @@ export component IconButton inherits Rectangle {
     in property <bool> reveal: true;
     in property <length> size: 32px;
     in property <length> icon-size: 16px;
+    // Optical correction for asymmetric glyphs such as the play triangle.
+    in property <length> icon-offset-x: 0px;
     out property <bool> hovered: touch.has-hover;
     out property <bool> focused: focus.has-focus;
     callback clicked();
@@ -23,8 +25,8 @@ export component IconButton inherits Rectangle {
     private property <bool> popping;
     private property <bool> reduced: Motion.reduced;
     changed reduced => { if root.reduced { root.popping = false; } }
-    private property <float> scale: touch.pressed ? 0.86 : root.popping ? 1.28 : 1;
-    animate scale { duration: root.pulse ? Motion.heart : Motion.fast; easing: cubic-bezier(0.2, 0.9, 0.25, 1.3); }
+    private property <float> scale: touch.pressed ? 0.96 : root.popping ? 1.28 : 1;
+    animate scale { duration: root.pulse ? Motion.heart : Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
     changed active => {
         if root.armed && root.active && root.pulse && !Motion.reduced {
             root.popping = true;
@@ -57,7 +59,7 @@ export component IconButton inherits Rectangle {
         colorize: root.active ? root.active-fg : root.fg;
         width: root.icon-size;
         height: root.icon-size;
-        x: (parent.width - self.width) / 2;
+        x: (parent.width - self.width) / 2 + root.icon-offset-x;
         y: (parent.height - self.height) / 2;
         opacity: root.reveal || root.focused || root.hovered ? 1 : 0;
         transform-scale-x: root.scale * 100%;
@@ -69,13 +71,16 @@ export component IconButton inherits Rectangle {
         height: 4px;
         border-radius: 2px;
         x: (parent.width - self.width) / 2;
-        y: parent.height - 3px;
+        y: parent.height - 7px;
         background: root.active-fg;
     }
     focus := FocusScope {
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.activate(); return accept; } return reject; }
     }
+    // 4 px taller than the circle for a 40 px hit area; neighbours are only side by side.
     touch := TouchArea {
+        y: -4px;
+        height: parent.height + 8px;
         mouse-cursor: pointer;
         clicked => { root.activate(); }
     }

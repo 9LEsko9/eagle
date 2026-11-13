@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Type, Motion } from "../globals/theme.slint";
 import { CardItem, Actions, Route } from "../globals/bridge.slint";
+import { Artwork } from "cover.slint";
 
 // Filter chips; the chosen one is filled with the text colour (mockup «Медиатека»).
 export component Chips inherits HorizontalLayout {
@@ -16,7 +17,11 @@ export component Chips inherits HorizontalLayout {
         background: index == root.selected ? Theme.t.tx : touch.has-hover ? Theme.hover : transparent;
         border-width: index == root.selected ? 0px : 1px;
         border-color: Theme.t.ln;
+        private property <float> scale: touch.pressed ? 0.96 : 1;
         animate background { duration: Motion.fast; }
+        animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
+        transform-scale-x: self.scale * 100%;
+        transform-scale-y: self.scale * 100%;
         accessible-role: button;
         accessible-label: option;
         accessible-checked: index == root.selected;
@@ -39,25 +44,23 @@ export component Chips inherits HorizontalLayout {
 component Tile inherits Rectangle {
     in property <CardItem> card;
     in property <length> art;
-    private property <float> scale: touch.pressed ? 0.97 : 1;
-    animate scale { duration: Motion.fast; }
+    private property <float> scale: touch.pressed ? 0.96 : 1;
+    animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
     accessible-role: button;
     accessible-label: card.title;
     accessible-action-default => { root.open(); }
     function open() {
         Actions.collection(root.card.route, root.card.id);
     }
-    Rectangle {
+    Artwork {
         x: 0;
         y: 0;
         width: root.art;
         height: root.art;
-        border-radius: root.card.round ? root.art / 2 : 8px;
-        clip: true;
-        background: Theme.t.surf;
+        radius: root.card.round ? root.art / 2 : 8px;
+        image: root.card.cover;
         transform-scale-x: root.scale * 100%;
         transform-scale-y: root.scale * 100%;
-        Image { source: root.card.cover; width: parent.width; height: parent.height; image-fit: cover; }
         // A light wash on hover instead of a translucent overlay layer.
         Rectangle { background: touch.has-hover ? #ffffff14 : transparent; animate background { duration: Motion.fast; } }
     }

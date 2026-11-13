@@ -82,6 +82,11 @@ export component DesktopWindow inherits Window {
             Actions.panel-content(Ui.panel-open);
         }
     }
+    // The drawer slides in 24 px and fades; it leaves the tree once the exit has finished.
+    private property <float> drawer-lifetime: Ui.drawer-open ? 1 : 0;
+    animate drawer-lifetime { duration: Motion.base; }
+    private property <length> drawer-offset: Ui.drawer-open ? 0px : -24px;
+    animate drawer-offset { duration: Motion.base; easing: cubic-bezier(0.2, 0, 0, 1); }
     private property <length> bar-height: 80px;
     keys := FocusScope {
         VerticalLayout {
@@ -152,11 +157,12 @@ export component DesktopWindow inherits Window {
             y: 0;
             clicked => { Ui.drawer-open = false; }
         }
-        if Layout.compact && Ui.drawer-open : Rectangle {
-            x: 0;
+        if Layout.compact && (Ui.drawer-open || root.drawer-lifetime > 0) : Rectangle {
+            x: root.drawer-offset;
             y: 0;
             width: 224px;
             height: parent.height - root.bar-height;
+            opacity: root.drawer-lifetime;
             background: Theme.t.bg;
             border-width: 0px;
             drop-shadow-blur: 24px;

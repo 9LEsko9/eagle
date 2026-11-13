@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme } from "../globals/theme.slint";
 
-// Rounded artwork. A neutral wash stands in while the image loads.
+// Rounded artwork with a 1 px outline. A neutral wash stands in while the image loads.
+// On tinted surfaces pass `placeholder` and `outline` derived from the player ink.
 export component Artwork inherits Rectangle {
     in property <image> image;
     in property <length> radius: 6px;
+    in property <color> placeholder: Theme.t.surf;
+    in property <color> outline: Theme.image-outline;
     border-radius: radius;
     clip: true;
-    background: Theme.t.surf;
+    background: placeholder;
     Image { source: root.image; width: parent.width; height: parent.height; image-fit: cover; }
+    @children
+    Rectangle { border-radius: root.radius; border-width: 1px; border-color: root.outline; }
 }
 
 // Clickable bottom-bar cover: toggles the «Сейчас играет» panel.
@@ -23,7 +28,7 @@ export component Cover inherits Rectangle {
     accessible-label: @tr("Сейчас играет");
     accessible-action-default => { root.clicked(); }
     forward-focus: focus;
-    Artwork { image: root.image; radius: 6px; }
+    Artwork { image: root.image; radius: 6px; outline: root.fg.with-alpha(0.1); }
     Rectangle { border-radius: 6px; border-width: focus.has-focus ? 2px : 0px; border-color: root.fg; }
     focus := FocusScope { key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; } }
     TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }

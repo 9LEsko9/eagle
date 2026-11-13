@@ -4,6 +4,7 @@ import { Theme, Type, Motion } from "../globals/theme.slint";
 import { Player, Library, Ui, Actions, Status } from "../globals/bridge.slint";
 import { TextButton } from "../components/button.slint";
 import { IconButton } from "../components/icon-button.slint";
+import { Artwork } from "../components/cover.slint";
 
 export global Source {
     // The bridge already puts the provider's name here; only local files have no provider.
@@ -22,7 +23,7 @@ export component NowPlayingCard inherits Rectangle {
     private property <string> drag-id;
     private property <length> art: self.width - 40px;
     private property <length> offset: Ui.panel-open ? 0px : 24px;
-    animate offset { duration: Motion.base; easing: cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+    animate offset { duration: Motion.base; easing: cubic-bezier(0.2, 0, 0, 1); }
     width: 320px;
     Rectangle {
         x: root.offset;
@@ -57,16 +58,16 @@ export component NowPlayingCard inherits Rectangle {
                 height: root.art;
                 // Artwork settles back slightly while paused.
                 private property <float> s: Player.status == Status.paused ? 0.88 : 1;
-                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.15); }
-                Rectangle {
+                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+                Artwork {
                     width: parent.width * parent.s;
                     height: self.width;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    border-radius: 12px;
-                    clip: true;
-                    background: Player.colors.tx.with-alpha(0.08);
-                    Image { source: Player.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                    radius: 12px;
+                    image: Player.cover;
+                    placeholder: Player.colors.tx.with-alpha(0.08);
+                    outline: Player.colors.tx.with-alpha(0.1);
                 }
             }
             Rectangle { height: 18px; }
@@ -172,13 +173,13 @@ export component NowPlayingCard inherits Rectangle {
                     spacing: 10px;
                     if Ui.list-covers : VerticalLayout {
                         alignment: center;
-                        Rectangle {
+                        Artwork {
                             width: 36px;
                             height: 36px;
-                            border-radius: 5px;
-                            clip: true;
-                            background: Player.colors.tx.with-alpha(0.08);
-                            Image { source: item.cover; width: parent.width; height: parent.height; image-fit: cover; }
+                            radius: 5px;
+                            image: item.cover;
+                            placeholder: Player.colors.tx.with-alpha(0.08);
+                            outline: Player.colors.tx.with-alpha(0.1);
                         }
                     }
                     VerticalLayout {

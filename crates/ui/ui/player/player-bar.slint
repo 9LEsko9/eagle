@@ -47,6 +47,7 @@ export component PlayerBar inherits Rectangle {
                         font-weight: 600;
                         overflow: elide;
                         opacity: title-touch.has-hover ? 0.75 : 1;
+                        animate opacity { duration: Motion.fast; }
                     }
                     title-touch := TouchArea {
                         enabled: Player.album-id != "";
@@ -64,6 +65,7 @@ export component PlayerBar inherits Rectangle {
                         color: artist-touch.has-hover ? Player.colors.tx : Player.colors.tx2;
                         font-size: Type.meta;
                         overflow: elide;
+                        animate color { duration: Motion.fast; }
                     }
                     artist-touch := TouchArea {
                         enabled: Player.artist-id != "";
@@ -93,7 +95,7 @@ export component PlayerBar inherits Rectangle {
             min-width: Layout.tight ? 200px : 300px;
             max-width: 600px;
             alignment: center;
-            spacing: 2px;
+            spacing: 0px;
             HorizontalLayout {
                 alignment: center;
                 spacing: 14px;

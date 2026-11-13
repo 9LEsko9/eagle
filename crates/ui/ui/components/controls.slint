@@ -72,7 +72,8 @@ export component Switch inherits Rectangle {
     focus := FocusScope {
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.toggled(); return accept; } return reject; }
     }
-    TouchArea { clicked => { root.toggled(); } }
+    // 46×34 hit area around the 38×22 switch; settings rows are 60 px, so nothing overlaps.
+    TouchArea { x: -4px; y: -6px; width: parent.width + 8px; height: parent.height + 12px; mouse-cursor: pointer; clicked => { root.toggled(); } }
 }
 
 // Single-line text field in theme colours.

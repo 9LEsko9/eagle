@@ -11,6 +11,10 @@ export component TextButton inherits Rectangle {
     out property <bool> hovered: touch.has-hover;
     callback clicked();
     private property <color> fg: primary ? Theme.t.bg : Theme.t.tx;
+    private property <float> scale: touch.pressed ? 0.96 : 1;
+    animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
+    transform-scale-x: root.scale * 100%;
+    transform-scale-y: root.scale * 100%;
     height: 36px;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
@@ -25,13 +29,13 @@ export component TextButton inherits Rectangle {
     border-color: focus.has-focus ? (primary ? Theme.t.tx2 : Theme.t.tx) : Theme.t.ln;
     animate background { duration: Motion.fast; }
     HorizontalLayout {
-        padding-left: root.icon.width > 0 ? 14px : 16px;
+        padding-left: root.icon.width > 0 ? 12px : 16px;
         padding-right: root.icon.width > 0 ? 18px : 16px;
         spacing: 8px;
         alignment: center;
         if root.icon.width > 0 : VerticalLayout {
             alignment: center;
-            Image { source: root.icon; colorize: root.fg; width: 14px; height: 14px; }
+            Image { source: root.icon; colorize: root.fg; width: 16px; height: 16px; }
         }
         Text { text: root.text; color: root.fg; font-size: Type.meta; font-weight: 600; vertical-alignment: center; }
     }
@@ -80,7 +84,8 @@ export component MenuItem inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
     height: 34px;
-    border-radius: 6px;
+    // Concentric with the menu card: its 10 px radius minus 5 px padding.
+    border-radius: 5px;
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { if root.enabled { root.clicked(); } }
@@ -89,6 +94,7 @@ export component MenuItem inherits Rectangle {
     border-width: focus.has-focus ? 2px : 0px;
     border-color: Theme.t.tx;
     background: touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: Motion.fast; }
     focus := FocusScope {
         enabled: root.enabled;
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }

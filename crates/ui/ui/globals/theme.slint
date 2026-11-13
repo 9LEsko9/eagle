@@ -12,14 +12,17 @@ export global Theme {
     private property <Tokens> graphite: { bg: #121214, surf: #1a1a1d, tx: #f2f2f4, tx2: #9d9da4, ln: #26262a };
     private property <Tokens> paper: { bg: #fafaf7, surf: #f1f1ec, tx: #151517, tx2: #5c5c61, ln: #e4e4de };
     private property <Tokens> oled: { bg: #000, surf: #0e0e10, tx: #fff, tx2: #9c9ca3, ln: #1a1a1d };
+    out property <bool> dark: mode == ThemeMode.graphite || mode == ThemeMode.oled || (mode == ThemeMode.auto && system-dark);
     out property <Tokens> t: mode == ThemeMode.graphite ? graphite : mode == ThemeMode.paper ? paper : mode == ThemeMode.oled ? oled : system-dark ? graphite : paper;
     // Hover and pressed washes derive from the text colour, so they read on every theme and on tinted player surfaces.
     out property <color> hover: t.tx.with-alpha(0.06);
     out property <color> press: t.tx.with-alpha(0.1);
+    // Pure black or white: a tinted outline picks up the surface colour and reads as dirt on the cover edge.
+    out property <color> image-outline: dark ? #ffffff1a : #0000001a;
 }
 export global Motion {
     in-out property <bool> reduced;
-    out property <duration> fast: reduced ? 0ms : 180ms;
+    out property <duration> fast: reduced ? 0ms : 150ms;
     out property <duration> base: reduced ? 0ms : 250ms;
     out property <duration> slow: reduced ? 0ms : 350ms;
     out property <duration> play: reduced ? 0ms : 200ms;
