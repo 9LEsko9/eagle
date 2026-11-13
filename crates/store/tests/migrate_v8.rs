@@ -74,5 +74,7 @@ fn v8_database_migrates_to_latest_without_losing_user_data() {
         .query_row("SELECT count(*) FROM playlists", [], |r| r.get(0))
         .unwrap();
     assert_eq!(playlists, 1);
+    // Windows cannot delete a database that is still open.
+    drop(c);
     std::fs::remove_dir_all(dir).unwrap();
 }
