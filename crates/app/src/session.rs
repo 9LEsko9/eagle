@@ -2351,6 +2351,7 @@ impl Worker {
                     let previous = self.current;
                     self.current = index;
                     if let Err(error) = self.play_current() {
+                        self.stop_engine();
                         self.select_paused(previous);
                         return Err(error);
                     }
@@ -5199,7 +5200,10 @@ mod delta_tests {
         worker.select_paused(0);
         worker.engine = Some(Engine::new(Config::default()).unwrap());
         let target = worker.occurrence_id(&worker.queue[1]);
+        let generation = worker.engine_generation;
         assert!(worker.command(Command::JumpTo(target)).is_err());
+        assert!(worker.engine_generation.wrapping_sub(generation) >= 2);
+        assert!(worker.engine_events.is_none());
         assert_eq!(worker.current, 0);
         assert!(worker.engine.is_none());
         assert_eq!(worker.player.status, State::Paused);
@@ -5207,6 +5211,25 @@ mod delta_tests {
             worker.player.track.as_ref().unwrap(),
             &worker.queue[0]
         ));
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stopping_installed_engine_joins_events_and_invalidates_generation() {
+        let root = std::env::temp_dir().join(format!("eagle-jump-stop-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let mut engine = Engine::new(Config::default()).unwrap();
+        let events = engine.take_events();
+        worker.engine_events = Some(thread::spawn(move || for _ in events {}));
+        worker.engine = Some(engine);
+        let generation = worker.engine_generation;
+        worker.stop_engine();
+        assert_ne!(worker.engine_generation, generation);
+        assert!(worker.engine.is_none());
+        assert!(worker.engine_events.is_none());
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
