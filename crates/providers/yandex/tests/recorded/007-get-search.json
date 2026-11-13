@@ -1,0 +1,200 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": "180",
+      "hostname": "hostname",
+      "req-id": "1794588727712763-1370151677605814023"
+    },
+    "result": {
+      "artists": {
+        "order": 0,
+        "perPage": 10,
+        "results": [
+          {
+            "available": true,
+            "composer": false,
+            "counts": {
+              "alsoAlbums": 192,
+              "alsoTracks": 48,
+              "directAlbums": 45,
+              "tracks": 318
+            },
+            "cover": {
+              "prefix": "007e9eed.p.79215/",
+              "type": "from-artist-photos",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [
+              "rock",
+              "hardrock",
+              "films"
+            ],
+            "id": 79215,
+            "links": [
+              {
+                "href": "http://www.queenonline.com/",
+                "title": "queenonline.com",
+                "type": "official"
+              },
+              {
+                "href": "https://twitter.com/queenwillrock",
+                "socialNetwork": "twitter",
+                "title": "queenwillrock",
+                "type": "social"
+              },
+              {
+                "href": "http://www.youtube.com/user/queenofficial",
+                "socialNetwork": "youtube",
+                "title": "user/queenofficial",
+                "type": "social"
+              }
+            ],
+            "name": "Queen",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "ratings": {
+              "day": 438,
+              "month": 406,
+              "week": 406
+            },
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "ticketsAvailable": false,
+            "various": false
+          },
+          {
+            "available": true,
+            "composer": false,
+            "counts": {
+              "alsoAlbums": 7,
+              "alsoTracks": 8,
+              "directAlbums": 5,
+              "tracks": 33
+            },
+            "cover": {
+              "prefix": "b8c5a47d.a.28444157-1",
+              "type": "from-album-cover",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [
+              "rap",
+              "soul"
+            ],
+            "id": 2443128,
+            "links": [],
+            "name": "Queen",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "ticketsAvailable": false,
+            "various": false
+          },
+          {
+            "available": true,
+            "composer": false,
+            "counts": {
+              "alsoAlbums": 2,
+              "alsoTracks": 2,
+              "directAlbums": 5,
+              "tracks": 7
+            },
+            "cover": {
+              "prefix": "4c9d0729.a.41661684-1",
+              "type": "from-album-cover",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [
+              "techno",
+              "pop",
+              "ambientgenre"
+            ],
+            "id": 3018452,
+            "links": [],
+            "name": "Queen",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "ticketsAvailable": false,
+            "various": false
+          },
+          {
+            "available": true,
+            "composer": false,
+            "counts": {
+              "alsoAlbums": 7,
+              "alsoTracks": 7,
+              "directAlbums": 4,
+              "tracks": 6
+            },
+            "cover": {
+              "prefix": "3f8f3740.a.44707319-1",
+              "type": "from-album-cover",
+              "uri": "avatars.yandex.net/stub/%%"
+            },
+            "disclaimers": [],
+            "genres": [
+              "african",
+              "folk"
+            ],
+            "id": 1479765,
+            "links": [],
+            "name": "Queen",
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "ticketsAvailable": false,
+            "various": false
+          },
+          {
+            "available": true,
+            "composer": false,
+            "counts": {
+              "alsoAlbums": 1,
+              "alsoTracks": 1,
+              "directAlbums": 0,
+              "tracks": 1
+            },
+            "disclaimers": [],
+            "genres": [],
+            "id": 4769390,
+            "links": [
+              {
+                "href": "https://www.queenreigns.com",
+                "title": "queenreigns.com",
+                "type": "official"
+              }
+            ],
+            "name": "Queen",
+            "ogImage": "",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "ticketsAvailable": false,
+            "various": false
+          }
+        ],
+        "total": 2809
+      },
+      "page": 0,
+      "perPage": 10,
+      "searchRequestId": "music-web-mobile-production-music-37.mow.yp-c.yandex.net-1794588727712763-1370151677605814023-1794588727741",
+      "text": "Queen",
+      "type": "artist"
+    }
+  },
+  "method": "GET",
+  "path": "/search",
+  "query": "nocorrect=true&page=0&text=Queen&type=artist",
+  "status": 200
+}

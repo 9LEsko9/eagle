@@ -1,0 +1,908 @@
+{
+  "body": {
+    "invocationInfo": {
+      "app-name": "music-wave",
+      "exec-duration-millis": 521,
+      "hostname": "hostname",
+      "req-id": "1794588728944773-2621460212438960488"
+    },
+    "result": {
+      "acceptedSeeds": [
+        {
+          "tag": "onyourwave",
+          "type": "user",
+          "value": "onyourwave"
+        }
+      ],
+      "batchId": "1794588728944773-2621460212438960488.8mPn",
+      "descriptionSeed": {
+        "tag": "onyourwave",
+        "type": "user",
+        "value": "onyourwave"
+      },
+      "interactive": true,
+      "offlineRecommenderData": [
+        1,
+        0,
+        0
+      ],
+      "pumpkin": false,
+      "radioSessionId": "7t3c-xk5RUrllPr12Xd-e3r2",
+      "sequence": [
+        {
+          "liked": false,
+          "track": {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "679ac155.p.10946087/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [
+                      "alternative",
+                      "rusrap",
+                      "rusrock"
+                    ],
+                    "id": 10946087,
+                    "name": "CUPSIZE",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "bests": [
+                  117711801
+                ],
+                "childContent": false,
+                "contentWarning": "explicit",
+                "cover": {
+                  "derivedColors": {
+                    "accent": "#958ca5",
+                    "average": "#615972",
+                    "miniPlayer": "#b5aec0",
+                    "waveText": "#d7c1ff"
+                  },
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "derivedColors": {
+                  "accent": "#958ca5",
+                  "average": "#615972",
+                  "miniPlayer": "#b5aec0",
+                  "waveText": "#d7c1ff"
+                },
+                "disclaimers": [
+                  "explicit",
+                  "exclamationIcon:671a23afcec5646906723a52",
+                  "descriptionText:67370c8e13b92b0a60256675"
+                ],
+                "genre": "alternative",
+                "id": 27525585,
+                "labels": [
+                  {
+                    "id": 4866885,
+                    "name": "VK Records"
+                  }
+                ],
+                "likesCount": 22405,
+                "metaTagId": "58e3c0796ebb3476087d1902",
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "releaseDate": "2023-09-29T00:00:00+03:00",
+                "title": "дели на два",
+                "trackCount": 4,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "veryImportant": false,
+                "year": 2023
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "679ac155.p.10946087/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "alternative",
+                  "rusrap",
+                  "rusrock"
+                ],
+                "id": 10946087,
+                "name": "CUPSIZE",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "best": true,
+            "contentWarning": "explicit",
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#808080",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [
+              "explicit",
+              "exclamationIcon:671a23afcec5646906723a52",
+              "descriptionText:67370c8e13b92b0a60256675"
+            ],
+            "durationMs": 145940,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 140.9,
+              "outStop": 143.3
+            },
+            "fileSize": 0,
+            "id": "117711801",
+            "lyricsAvailable": true,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "mixFade": {
+              "inStart": 18.024,
+              "inStop": 26.52,
+              "outStart": 118.771,
+              "outStop": 127.266
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -8.71,
+              "importantSecs": 145,
+              "tp": -0.09
+            },
+            "realId": "117711801",
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "",
+            "title": "ты любишь танцевать",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          "trackParameters": {
+            "bpm": 113,
+            "energy": 0.8873969,
+            "hue": 73.0,
+            "mixFade": {
+              "inStart": 18.024,
+              "inStop": 26.52,
+              "outStart": 118.771,
+              "outStop": 127.266
+            },
+            "userCollectionHue": 24
+          },
+          "type": "track"
+        },
+        {
+          "liked": false,
+          "track": {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "06c8350f.p.1536005/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [
+                      "rusrap"
+                    ],
+                    "id": 1536005,
+                    "name": "Восточный округ",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "bests": [
+                  38077233,
+                  38077235,
+                  38077234
+                ],
+                "childContent": false,
+                "contentWarning": "explicit",
+                "cover": {
+                  "derivedColors": {
+                    "accent": "#b1809f",
+                    "average": "#ab7798",
+                    "miniPlayer": "#c8a6bc",
+                    "waveText": "#ffc1e8"
+                  },
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "derivedColors": {
+                  "accent": "#b1809f",
+                  "average": "#ab7798",
+                  "miniPlayer": "#c8a6bc",
+                  "waveText": "#ffc1e8"
+                },
+                "disclaimers": [
+                  "explicit",
+                  "exclamationIcon:671a23afcec5646906723a52",
+                  "descriptionText:67370c8e13b92b0a60256675"
+                ],
+                "genre": "rusrap",
+                "id": 4849007,
+                "labels": [
+                  {
+                    "id": 773886,
+                    "name": "A+"
+                  },
+                  {
+                    "id": 561988,
+                    "name": "Студия СОЮЗ"
+                  }
+                ],
+                "likesCount": 2768,
+                "metaTagId": "58e3c0796ebb3476087d191e",
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "releaseDate": "2017-11-09T00:00:00+03:00",
+                "title": "Не про любовь",
+                "trackCount": 11,
+                "trackPosition": {
+                  "index": 4,
+                  "volume": 1
+                },
+                "veryImportant": false,
+                "year": 2017
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "06c8350f.p.1536005/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "rusrap"
+                ],
+                "id": 1536005,
+                "name": "Восточный округ",
+                "various": false
+              },
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "c7c0bcdc.p.11237973/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "rusrap"
+                ],
+                "id": 11237973,
+                "name": "John",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "best": true,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#999999",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 203570,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 200.6,
+              "outStop": 203.1
+            },
+            "fileSize": 0,
+            "id": "38077233",
+            "lyricsAvailable": false,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "mixFade": {
+              "inStart": 2.792,
+              "inStop": 9.066,
+              "outStart": 188.258,
+              "outStop": 194.533
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -12.18,
+              "importantSecs": 203,
+              "tp": 0.66
+            },
+            "realId": "38077233",
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview",
+              "karaoke"
+            ],
+            "storageDir": "",
+            "title": "Давай со мной за звёздами",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          "trackParameters": {
+            "bpm": 153,
+            "energy": 0.20786718,
+            "hue": 272.0,
+            "mixFade": {
+              "inStart": 2.792,
+              "inStop": 9.066,
+              "outStart": 188.258,
+              "outStop": 194.533
+            },
+            "userCollectionHue": 24
+          },
+          "type": "track"
+        },
+        {
+          "liked": false,
+          "track": {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "978a6665.p.42607/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "cutoutCover": {
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [
+                      "shanson"
+                    ],
+                    "id": 42607,
+                    "name": "Михаил Круг",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "bests": [
+                  34685575,
+                  34685577,
+                  34685580
+                ],
+                "childContent": false,
+                "contentWarning": "explicit",
+                "cover": {
+                  "derivedColors": {
+                    "accent": "#999999",
+                    "average": "#1e1e1e",
+                    "miniPlayer": "#b7b7b7",
+                    "waveText": "#e0e0e0"
+                  },
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "derivedColors": {
+                  "accent": "#999999",
+                  "average": "#1e1e1e",
+                  "miniPlayer": "#b7b7b7",
+                  "waveText": "#e0e0e0"
+                },
+                "disclaimers": [
+                  "explicit",
+                  "exclamationIcon:671a23afcec5646906723a52",
+                  "descriptionText:67370c8e13b92b0a60256675"
+                ],
+                "genre": "shanson",
+                "id": 3245221,
+                "labels": [
+                  {
+                    "id": 903282,
+                    "name": "United Music Group"
+                  }
+                ],
+                "likesCount": 9945,
+                "metaTagId": "58e3c0796ebb3476087d1946",
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "releaseDate": "2003-04-07T00:00:00+04:00",
+                "title": "Исповедь",
+                "trackCount": 12,
+                "trackPosition": {
+                  "index": 6,
+                  "volume": 1
+                },
+                "veryImportant": false,
+                "year": 2003
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "978a6665.p.42607/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "cutoutCover": {
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "shanson"
+                ],
+                "id": 42607,
+                "name": "Михаил Круг",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "best": true,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#1e1e1e",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 320160,
+            "fade": {
+              "inStart": 1.3,
+              "inStop": 6.3,
+              "outStart": 309.8,
+              "outStop": 314.6
+            },
+            "fileSize": 0,
+            "id": "34685580",
+            "lyricsAvailable": false,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "mixFade": {
+              "inStart": 9.937,
+              "inStop": 16.253,
+              "outStart": 297.324,
+              "outStop": 303.64
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -11.35,
+              "importantSecs": 320,
+              "tp": 0.78
+            },
+            "realId": "34685580",
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview",
+              "karaoke"
+            ],
+            "storageDir": "",
+            "title": "Исповедь",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          "trackParameters": {
+            "bpm": 152,
+            "energy": 0.114740506,
+            "hue": 311.0,
+            "mixFade": {
+              "inStart": 9.937,
+              "inStop": 16.253,
+              "outStart": 297.324,
+              "outStop": 303.64
+            },
+            "userCollectionHue": 24
+          },
+          "type": "track"
+        },
+        {
+          "liked": false,
+          "track": {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "35db4a67.p.26246344/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [
+                      "rap",
+                      "electronics"
+                    ],
+                    "id": 26246344,
+                    "name": "ЭЛЕВЕН ЭЙТ",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "bests": [],
+                "childContent": false,
+                "contentWarning": "explicit",
+                "cover": {
+                  "derivedColors": {
+                    "accent": "#7b99b6",
+                    "average": "#7b99b6",
+                    "miniPlayer": "#a2b8cc",
+                    "waveText": "#c1e1ff"
+                  },
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "derivedColors": {
+                  "accent": "#7b99b6",
+                  "average": "#7b99b6",
+                  "miniPlayer": "#a2b8cc",
+                  "waveText": "#c1e1ff"
+                },
+                "disclaimers": [
+                  "explicit",
+                  "exclamationIcon:671a23afcec5646906723a52",
+                  "descriptionText:67370c8e13b92b0a60256675"
+                ],
+                "genre": "rap",
+                "id": 42934051,
+                "labels": [
+                  {
+                    "id": 3873850,
+                    "name": "d0 y0u l0ve"
+                  },
+                  {
+                    "id": 4576927,
+                    "name": "0to8"
+                  }
+                ],
+                "likesCount": 2751,
+                "metaTagId": "58e3c0796ebb3476087d18fa",
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "releaseDate": "2026-07-03T00:00:00+03:00",
+                "title": "ФРУКТОВЫЙ",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "veryImportant": false,
+                "year": 2026
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "35db4a67.p.26246344/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "rap",
+                  "electronics"
+                ],
+                "id": 26246344,
+                "name": "ЭЛЕВЕН ЭЙТ",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "best": false,
+            "contentWarning": "explicit",
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#b2b27f",
+              "average": "#7f7f4c",
+              "miniPlayer": "#c9c9a5",
+              "waveText": "#ffffc1"
+            },
+            "disclaimers": [
+              "explicit",
+              "exclamationIcon:671a23afcec5646906723a52",
+              "descriptionText:67370c8e13b92b0a60256675"
+            ],
+            "durationMs": 124060,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 121.7,
+              "outStop": 123.9
+            },
+            "fileSize": 0,
+            "id": "153345658",
+            "lyricsAvailable": false,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -7.21,
+              "importantSecs": 124,
+              "tp": 1.93
+            },
+            "realId": "153345658",
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "",
+            "title": "ФРУКТОВЫЙ",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          "trackParameters": {
+            "bpm": 120,
+            "energy": 0.5,
+            "hue": 23.0,
+            "userCollectionHue": 24
+          },
+          "type": "track"
+        },
+        {
+          "liked": false,
+          "track": {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "a1ec8589.a.40845678-1",
+                      "type": "from-album-cover",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [
+                      "alternative"
+                    ],
+                    "id": 25536769,
+                    "name": "Ghelt",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "bests": [],
+                "childContent": false,
+                "cover": {
+                  "derivedColors": {
+                    "accent": "#999999",
+                    "average": "#1e1e1e",
+                    "miniPlayer": "#b7b7b7",
+                    "waveText": "#e0e0e0"
+                  },
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "derivedColors": {
+                  "accent": "#999999",
+                  "average": "#1e1e1e",
+                  "miniPlayer": "#b7b7b7",
+                  "waveText": "#e0e0e0"
+                },
+                "disclaimers": [],
+                "genre": "alternative",
+                "id": 40845678,
+                "labels": [
+                  {
+                    "id": 6453620,
+                    "name": "Ghelt"
+                  }
+                ],
+                "likesCount": 17,
+                "metaTagId": "58e3c0796ebb3476087d1902",
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "releaseDate": "2026-02-12T00:00:00+03:00",
+                "title": "Stitches",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "version": "Intro",
+                "veryImportant": false,
+                "year": 2026
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "a1ec8589.a.40845678-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [
+                  "alternative"
+                ],
+                "id": 25536769,
+                "name": "Ghelt",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "best": false,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#1e1e1e",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 289510,
+            "fade": {
+              "inStart": 0.1,
+              "inStop": 1.5,
+              "outStart": 285.2,
+              "outStop": 285.8
+            },
+            "fileSize": 0,
+            "id": "148610209",
+            "lyricsAvailable": false,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": false,
+              "hasAvailableTextLyrics": false
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -11.67,
+              "importantSecs": 289,
+              "tp": -0.2
+            },
+            "realId": "148610209",
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "",
+            "title": "Stitches",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music",
+            "version": "Intro"
+          },
+          "trackParameters": {
+            "bpm": 120,
+            "energy": 0.5,
+            "hue": 23.0,
+            "userCollectionHue": 24
+          },
+          "type": "track"
+        }
+      ],
+      "terminated": false
+    }
+  },
+  "method": "POST",
+  "path": "/rotor/session/new",
+  "query": "",
+  "status": 200
+}

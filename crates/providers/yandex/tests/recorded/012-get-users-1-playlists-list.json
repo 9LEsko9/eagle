@@ -1,0 +1,62 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": 26,
+      "hostname": "hostname",
+      "req-id": "1794588728839953-6029774585707956481"
+    },
+    "result": [
+      {
+        "available": true,
+        "collective": false,
+        "cover": {
+          "custom": false,
+          "itemsUri": [
+            "avatars.yandex.net/stub/%%"
+          ],
+          "type": "mosaic"
+        },
+        "created": "2000-01-01T00:00:00+00:00",
+        "customWave": {
+          "animationUrl": "stub",
+          "backgroundImageUrl": "stub",
+          "header": "stub",
+          "position": "stub",
+          "squareAgentAnimation": "stub",
+          "title": "stub"
+        },
+        "derivedColors": {
+          "accent": "#b1809f",
+          "average": "#ab7798",
+          "miniPlayer": "#c8a6bc",
+          "waveText": "#ffc1e8"
+        },
+        "durationMs": 1217030,
+        "isBanner": false,
+        "isPremiere": false,
+        "kind": 1018,
+        "modified": "2000-01-01T00:00:00+00:00",
+        "ogImage": "avatars.yandex.net/stub/%%",
+        "owner": {
+          "login": "stub-login",
+          "name": "Stub User",
+          "sex": "male",
+          "uid": "1",
+          "verified": false
+        },
+        "playlistUuid": "stub-uuid",
+        "revision": 9,
+        "snapshot": 11,
+        "tags": [],
+        "title": "Stub playlist",
+        "trackCount": 8,
+        "uid": "1",
+        "visibility": "private"
+      }
+    ]
+  },
+  "method": "GET",
+  "path": "/users/1/playlists/list",
+  "query": "",
+  "status": 200
+}

@@ -1,0 +1,14 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": "17",
+      "hostname": "hostname",
+      "req-id": "1794588729548392-14391842359940156001"
+    },
+    "result": "text-is-empty"
+  },
+  "method": "GET",
+  "path": "/search",
+  "query": "nocorrect=true&page=0&text=&type=track",
+  "status": 200
+}

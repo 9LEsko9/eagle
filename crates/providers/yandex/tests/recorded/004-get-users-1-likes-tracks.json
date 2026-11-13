@@ -1,0 +1,37 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": 1,
+      "hostname": "hostname",
+      "req-id": "1794588727205432-9603395624419818815"
+    },
+    "result": {
+      "library": {
+        "playlistUuid": "stub-uuid",
+        "revision": 1454,
+        "tracks": [
+          {
+            "albumId": "22259811",
+            "id": "103839798",
+            "timestamp": "2000-01-01T00:00:00+00:00"
+          },
+          {
+            "albumId": "18131694",
+            "id": "79362491",
+            "timestamp": "2000-01-01T00:00:00+00:00"
+          },
+          {
+            "albumId": "24775197",
+            "id": "111096363",
+            "timestamp": "2000-01-01T00:00:00+00:00"
+          }
+        ],
+        "uid": "1"
+      }
+    }
+  },
+  "method": "GET",
+  "path": "/users/1/likes/tracks",
+  "query": "",
+  "status": 200
+}

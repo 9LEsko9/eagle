@@ -1,0 +1,692 @@
+{
+  "body": {
+    "invocationInfo": {
+      "exec-duration-millis": "237",
+      "hostname": "hostname",
+      "req-id": "1794588727383952-3605636929748881319"
+    },
+    "result": {
+      "page": 0,
+      "perPage": 20,
+      "searchRequestId": "music-web-mobile-production-music-70.mow.yp-c.yandex.net-1794588727383952-3605636929748881319-1794588727414",
+      "text": "Queen",
+      "tracks": {
+        "order": 0,
+        "perPage": 20,
+        "results": [
+          {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "592e0e82.p.5801667/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "cutoutCover": {
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [],
+                    "id": 5801667,
+                    "name": "KVPV",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "availableRegions": [],
+                "bests": [],
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "disclaimers": [],
+                "genre": "dance",
+                "id": 16916643,
+                "labels": [
+                  "KVPV"
+                ],
+                "likesCount": 851,
+                "listeningFinished": false,
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "regions": [
+                  "RUSSIA",
+                  "RUSSIA_PREMIUM"
+                ],
+                "releaseDate": "2021-07-21T00:00:00+03:00",
+                "storageDir": "18a7b164.a.16916643-2",
+                "title": "Queen",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "veryImportant": false,
+                "year": 2021
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "592e0e82.p.5801667/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "cutoutCover": {
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 5801667,
+                "name": "KVPV",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableAsRbt": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#1e1e1e",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 157710,
+            "explicit": false,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 156.2,
+              "outStop": 157.7
+            },
+            "fileSize": 0,
+            "id": 87491164,
+            "lyricsAvailable": true,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -6.41,
+              "tp": 3.12
+            },
+            "realId": "87491164",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "51327_109b74ca.36526310.1.609676",
+            "title": "Queen",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "d8a84d3d.p.360102/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "cutoutCover": {
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [],
+                    "id": 360102,
+                    "name": "Jessie J",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "availableRegions": [],
+                "bests": [],
+                "contentWarning": "explicit",
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "disclaimers": [
+                  "explicit",
+                  "exclamationIcon:671a23afcec5646906723a52",
+                  "descriptionText:67370c8e13b92b0a60256675"
+                ],
+                "genre": "rnb",
+                "id": 4988025,
+                "labels": [
+                  "UMG Recordings Inc & Lava",
+                  "Republic"
+                ],
+                "likesCount": 675,
+                "listeningFinished": false,
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "regions": [
+                  "RUSSIA",
+                  "RUSSIA_PREMIUM"
+                ],
+                "releaseDate": "2018-01-26T00:00:00+03:00",
+                "storageDir": "0279b9ac.a.4988025-3",
+                "title": "Queen",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "version": "Acoustic",
+                "veryImportant": false,
+                "year": 2018
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "d8a84d3d.p.360102/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "cutoutCover": {
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 360102,
+                "name": "Jessie J",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableAsRbt": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "contentWarning": "explicit",
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#1e1e1e",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [
+              "explicit",
+              "exclamationIcon:671a23afcec5646906723a52",
+              "descriptionText:67370c8e13b92b0a60256675"
+            ],
+            "durationMs": 317780,
+            "explicit": true,
+            "fade": {
+              "inStart": 0.1,
+              "inStop": 1.5,
+              "outStart": 314.3,
+              "outStop": 315.3
+            },
+            "fileSize": 0,
+            "id": 38831880,
+            "lyricsAvailable": true,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -12.39,
+              "tp": 0.15
+            },
+            "realId": "38831880",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "51327_109b74ca.36526310.1.609676",
+            "title": "Queen",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music",
+            "version": "Acoustic"
+          },
+          {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "7857b175.a.40769528-1",
+                      "type": "from-album-cover",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [],
+                    "id": 17465062,
+                    "name": "2HXRD",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "availableRegions": [],
+                "bests": [],
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "disclaimers": [],
+                "genre": "dance",
+                "id": 40769528,
+                "labels": [
+                  "Starix Production"
+                ],
+                "likesCount": 53,
+                "listeningFinished": false,
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "regions": [
+                  "RUSSIA",
+                  "RUSSIA_PREMIUM"
+                ],
+                "releaseDate": "2026-03-06T00:00:00+03:00",
+                "storageDir": "7857b175.a.40769528-1",
+                "title": "Queen",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "veryImportant": false,
+                "year": 2026
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "7857b175.a.40769528-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 17465062,
+                "name": "2HXRD",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableAsRbt": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#999999",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 193590,
+            "explicit": false,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 192.0,
+              "outStop": 193.4
+            },
+            "fileSize": 0,
+            "id": 148452175,
+            "lyricsAvailable": false,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": false,
+              "hasAvailableTextLyrics": false
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -9.25,
+              "tp": 0.79
+            },
+            "realId": "148452175",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "51327_109b74ca.36526310.1.609676",
+            "title": "Queen",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "727b4b27.p.2901845/",
+                      "type": "from-artist-photos",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [],
+                    "id": 2901845,
+                    "name": "Loren Gray",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "availableRegions": [],
+                "bests": [],
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "disclaimers": [],
+                "genre": "pop",
+                "id": 6350001,
+                "labels": [
+                  "Virgin Records;"
+                ],
+                "likesCount": 164,
+                "listeningFinished": false,
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "regions": [
+                  "RUSSIA",
+                  "RUSSIA_PREMIUM"
+                ],
+                "releaseDate": "2018-12-21T00:00:00+03:00",
+                "storageDir": "892c01cd.a.6350001-1",
+                "title": "Queen",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "veryImportant": false,
+                "year": 2018
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "727b4b27.p.2901845/",
+                  "type": "from-artist-photos",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 2901845,
+                "name": "Loren Gray",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableAsRbt": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#999999",
+              "average": "#606060",
+              "miniPlayer": "#b7b7b7",
+              "waveText": "#e0e0e0"
+            },
+            "disclaimers": [],
+            "durationMs": 160440,
+            "explicit": false,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 5.0,
+              "outStart": 158.7,
+              "outStop": 158.9
+            },
+            "fileSize": 0,
+            "id": 46979278,
+            "lyricsAvailable": true,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": true,
+              "hasAvailableTextLyrics": true
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -8.92,
+              "tp": 1.75
+            },
+            "realId": "46979278",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "51327_109b74ca.36526310.1.609676",
+            "title": "Queen",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          },
+          {
+            "albums": [
+              {
+                "artists": [
+                  {
+                    "available": true,
+                    "composer": false,
+                    "cover": {
+                      "prefix": "98398b12.a.40512013-1",
+                      "type": "from-album-cover",
+                      "uri": "avatars.yandex.net/stub/%%"
+                    },
+                    "disclaimers": [],
+                    "genres": [],
+                    "id": 25416006,
+                    "name": "twenty3ee",
+                    "various": false
+                  }
+                ],
+                "available": true,
+                "availableForMobile": true,
+                "availableForOptions": [
+                  "bookmate"
+                ],
+                "availableForPremiumUsers": true,
+                "availablePartially": false,
+                "availableRegions": [],
+                "bests": [],
+                "coverUri": "avatars.yandex.net/stub/%%",
+                "disclaimers": [],
+                "genre": "electronics",
+                "id": 40512013,
+                "labels": [
+                  "twenty3ee"
+                ],
+                "likesCount": 653,
+                "listeningFinished": false,
+                "metaType": "music",
+                "ogImage": "avatars.yandex.net/stub/%%",
+                "recent": false,
+                "regions": [
+                  "RUSSIA",
+                  "RUSSIA_PREMIUM"
+                ],
+                "releaseDate": "2025-11-12T00:00:00+03:00",
+                "storageDir": "98398b12.a.40512013-1",
+                "title": "Queen St",
+                "trackCount": 1,
+                "trackPosition": {
+                  "index": 1,
+                  "volume": 1
+                },
+                "type": "single",
+                "veryImportant": false,
+                "year": 2025
+              }
+            ],
+            "artists": [
+              {
+                "available": true,
+                "composer": false,
+                "cover": {
+                  "prefix": "98398b12.a.40512013-1",
+                  "type": "from-album-cover",
+                  "uri": "avatars.yandex.net/stub/%%"
+                },
+                "disclaimers": [],
+                "genres": [],
+                "id": 25416006,
+                "name": "twenty3ee",
+                "various": false
+              }
+            ],
+            "available": true,
+            "availableAsRbt": true,
+            "availableForOptions": [
+              "bookmate"
+            ],
+            "availableForPremiumUsers": true,
+            "availableFullWithoutPermission": false,
+            "coverUri": "avatars.yandex.net/stub/%%",
+            "derivedColors": {
+              "accent": "#80b19e",
+              "average": "#172520",
+              "miniPlayer": "#a6c8bb",
+              "waveText": "#c1ffe7"
+            },
+            "disclaimers": [],
+            "durationMs": 128660,
+            "explicit": false,
+            "fade": {
+              "inStart": 0.0,
+              "inStop": 1.5,
+              "outStart": 127.1,
+              "outStop": 128.5
+            },
+            "fileSize": 0,
+            "id": 147872699,
+            "lyricsAvailable": true,
+            "lyricsInfo": {
+              "hasAvailableSyncLyrics": false,
+              "hasAvailableTextLyrics": false
+            },
+            "major": {
+              "id": 0,
+              "name": "-"
+            },
+            "ogImage": "avatars.yandex.net/stub/%%",
+            "previewDurationMs": 30000,
+            "r128": {
+              "i": -7.11,
+              "tp": 2.82
+            },
+            "realId": "147872699",
+            "regions": [
+              "RUSSIA",
+              "RUSSIA_PREMIUM"
+            ],
+            "rememberPosition": false,
+            "specialAudioResources": [
+              "smart_preview"
+            ],
+            "storageDir": "51327_109b74ca.36526310.1.609676",
+            "title": "Queen St",
+            "trackSharingFlag": "COVER_ONLY",
+            "trackSource": "OWN",
+            "type": "music"
+          }
+        ],
+        "total": 199072
+      },
+      "type": "track"
+    }
+  },
+  "method": "GET",
+  "path": "/search",
+  "query": "nocorrect=true&page=0&text=Queen&type=track",
+  "status": 200
+}
