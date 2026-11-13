@@ -114,7 +114,7 @@ export component DesktopWindow inherits Window {
                         if Ui.route == Route.login : LoginScreen { }
                         if Ui.route == Route.settings : SettingsScreen { }
                     }
-                    if Ui.error != "" : Rectangle {
+                    if Ui.error != "" && !Ui.create-playlist : Rectangle {
                         border-radius: 10px;
                         background: Theme.t.surf;
                         border-width: 1px;

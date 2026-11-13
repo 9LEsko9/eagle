@@ -14,6 +14,25 @@ export component CreatePlaylistDialog inherits Rectangle {
         background: #00000059;
         opacity: root.lifetime;
         TouchArea { clicked => { Ui.create-playlist = false; } }
+        focus := FocusScope {
+            private property <bool> open: Ui.create-playlist;
+            changed open => { if self.open { field.focus-input(); } }
+        key-pressed(e) => {
+            if Ui.create-playlist && (e.text == Key.Tab || e.text == Key.Backtab) {
+                if e.text == Key.Tab {
+                    if field.has-focus { cancel.focus-button(); }
+                    else if cancel.has-focus && create.enabled { create.focus-button(); }
+                    else { field.focus-input(); }
+                } else {
+                    if field.has-focus && create.enabled { create.focus-button(); }
+                    else if field.has-focus { cancel.focus-button(); }
+                    else if create.has-focus { cancel.focus-button(); }
+                    else { field.focus-input(); }
+                }
+                return accept;
+            }
+            return reject;
+        }
         card := Rectangle {
             width: min(400px, parent.width - 32px);
             height: layout.preferred-height;
@@ -36,13 +55,15 @@ export component CreatePlaylistDialog inherits Rectangle {
                     accepted(text) => { if !Ui.playlist-busy && Actions.valid-playlist-name(text) { Actions.create-playlist(text); } }
                     init => { self.focus-input(); }
                 }
+                if Ui.error != "" : Text { text: Ui.error; color: Theme.t.tx; font-size: Type.meta; wrap: word-wrap; }
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
-                    TextButton { text: @tr("Отмена"); outline: true; clicked => { Ui.create-playlist = false; } }
-                    TextButton { text: @tr("Создать"); primary: true; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
+                    cancel := TextButton { text: @tr("Отмена"); outline: true; clicked => { Ui.create-playlist = false; } }
+                    create := TextButton { text: @tr("Создать"); primary: true; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
                 }
             }
+        }
         }
     }
 }

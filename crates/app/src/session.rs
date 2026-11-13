@@ -5529,6 +5529,10 @@ mod delta_tests {
             tx,
         )
         .unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let (catalog_tx, catalog_rx) = mpsc::channel();
+        worker.catalog = Some(catalog_tx);
         worker.view = View::Search;
         worker.view_generation = 20;
         let id: TrackId = "yandex:1_13".parse().unwrap();
@@ -5542,6 +5546,7 @@ mod delta_tests {
             .playlist_changed(19, vec![], Some(playlist), None)
             .unwrap();
         assert_eq!(worker.view, View::Search);
+        assert!(catalog_rx.try_recv().is_err());
         assert!(
             events_rx
                 .try_iter()
@@ -5552,7 +5557,6 @@ mod delta_tests {
         worker.playlist_changed(20, vec![], None, Some(id)).unwrap();
         assert_eq!(worker.view, View::Playlist);
         worker.catalog.take();
-        worker.catalog_worker.take().unwrap().join().unwrap();
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -41,13 +41,40 @@ fn playlist_dialog_accepts_spaces_enter_and_escape() {
             .dispatch_event(WindowEvent::KeyPressed { text: text.into() });
     }
     assert_eq!(window.global::<Ui>().get_playlist_name(), "A B");
+    for _ in 0..3 {
+        window.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Tab.into(),
+        });
+    }
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "C".into() });
+    assert_eq!(window.global::<Ui>().get_playlist_name(), "A BC");
+    for _ in 0..3 {
+        window.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Backtab.into(),
+        });
+    }
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "D".into() });
+    assert_eq!(window.global::<Ui>().get_playlist_name(), "A BCD");
+    let before_error = window.window().take_snapshot().unwrap();
+    window.global::<Ui>().set_error("Ошибка создания".into());
+    let with_error = window.window().take_snapshot().unwrap();
+    assert_ne!(before_error.as_bytes(), with_error.as_bytes());
     window
         .window()
         .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
-    assert_eq!(*created.borrow(), "A B");
+    assert_eq!(*created.borrow(), "A BCD");
     window.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Escape.into(),
     });
     assert!(!window.global::<Ui>().get_create_playlist());
     assert!(window.global::<Ui>().get_panel_open());
+    window.global::<Ui>().set_create_playlist(true);
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "E".into() });
+    assert_eq!(window.global::<Ui>().get_playlist_name(), "A BCDE");
 }

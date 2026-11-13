@@ -84,6 +84,7 @@ export component Field inherits Rectangle {
     in-out property <string> text <=> input.text;
     callback accepted(string);
     public function focus-input() { input.focus(); }
+    out property <bool> has-focus: input.has-focus;
     height: 40px;
     border-radius: 10px;
     background: Theme.t.surf;
