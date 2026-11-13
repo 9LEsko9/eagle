@@ -121,6 +121,17 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
             settle(root, pass)?;
         }
     } else {
+        // The decoded cache is keyed by source, so each key needs its own file name: hard links to
+        // the one fixture image give every key a separate entry without copying the bytes.
+        let dir = root.join("covers");
+        for (prefix, count, edge) in [("t", 10_000, 64), ("a", 1000, 600)] {
+            for n in 0..count {
+                let link = dir.join(format!("{prefix}{n}-{edge}.png"));
+                if !link.exists() {
+                    std::fs::hard_link(dir.join(format!("fixture-{edge}.png")), link)?;
+                }
+            }
+        }
         let (tx, rx) = mpsc::channel();
         let covers = crate::covers::Covers::start(
             root.to_owned(),
@@ -146,7 +157,7 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
                                     context: String::new(),
                                     reply: None,
                                     key: format!("{prefix}:fixture:{n}"),
-                                    stem: "fixture".into(),
+                                    stem: format!("{prefix}{n}"),
                                     uri: None,
                                     size,
                                 })
