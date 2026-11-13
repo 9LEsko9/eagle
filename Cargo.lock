@@ -1730,12 +1730,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fearless_simd"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
-
-[[package]]
 name = "field-offset"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2284,15 +2278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hayro-jpeg2000"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c75ab947623ef4ccaa7acf0579edf7cbb5a73838e3839a7be73335e522f433a1"
-dependencies = [
- "fearless_simd",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2622,7 +2607,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f55019ac1db606ff01afed8a9d18d91b83e6463da421084f767c89026467b619"
 dependencies = [
  "byteorder",
- "hayro-jpeg2000",
  "png 0.18.1",
 ]
 

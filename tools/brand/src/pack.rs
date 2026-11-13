@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use resvg::tiny_skia::Pixmap;
 
 /// Returns the pixels of `p` as straight (non-premultiplied) RGBA bytes.
-fn straight_rgba(p: &Pixmap) -> Vec<u8> {
+pub fn straight_rgba(p: &Pixmap) -> Vec<u8> {
     p.pixels()
         .iter()
         .flat_map(|c| {

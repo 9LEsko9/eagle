@@ -6,8 +6,9 @@ mod common;
 use std::fs::File;
 use std::path::Path;
 
-use common::{SRC, build_tmp, read_png_rgba, straight_rgba};
+use common::{SRC, build_tmp, read_png_rgba};
 use eagle_brand::build::{build_desktop, build_tray};
+use eagle_brand::pack::straight_rgba;
 use eagle_brand::render::render_svg;
 use eagle_brand::sources::{Source, load};
 

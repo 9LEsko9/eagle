@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 eagle contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Writes the desktop and tray assets.
+//! Writes the desktop, tray, mobile and web assets.
 
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use resvg::tiny_skia::Pixmap;
+use resvg::tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
 
 use crate::pack::{write_icns, write_ico, write_png};
+use crate::palette::{GRAPHITE, rgb};
 use crate::render::{render_svg, tint, to_template};
 use crate::sources::{Source, for_size, load};
 
@@ -23,6 +24,50 @@ const WIN_TRAY_SIZES: [u32; 4] = [16, 20, 24, 32];
 const LINUX_TRAY_SIZES: [u32; 2] = [22, 24];
 /// Color of the light tray glyph on dark panels.
 const WHITE: [u8; 3] = [255, 255, 255];
+/// Android density buckets: name, adaptive layer size and legacy icon size.
+const ANDROID_DENSITIES: [(&str, u32, u32); 5] = [
+    ("mdpi", 108, 48),
+    ("hdpi", 162, 72),
+    ("xhdpi", 216, 96),
+    ("xxhdpi", 324, 144),
+    ("xxxhdpi", 432, 192),
+];
+/// Adaptive icon layers: file name suffix and source.
+const ANDROID_LAYERS: [(&str, Source); 3] = [
+    ("foreground", Source::AndroidFg),
+    ("background", Source::AndroidBg),
+    ("monochrome", Source::AndroidMono),
+];
+/// Adaptive icon description that refers to the layer PNGs.
+const ADAPTIVE_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/ic_launcher_background"/>
+    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>
+</adaptive-icon>
+"#;
+/// Xcode asset catalog entry for the single 1024 px app icon.
+const CONTENTS_JSON: &str = r#"{
+  "images": [
+    {
+      "idiom": "universal",
+      "platform": "ios",
+      "size": "1024x1024",
+      "filename": "AppIcon-1024.png"
+    }
+  ],
+  "info": {
+    "author": "eagle-brand",
+    "version": 1
+  }
+}
+"#;
+/// Sizes of the favicon ICO.
+const FAVICON_SIZES: [u32; 3] = [16, 32, 48];
+/// Size of the Apple touch icon.
+const APPLE_TOUCH_SIZE: u32 = 180;
+/// Size of the mark PNG.
+const MARK_SIZE: u32 = 512;
 
 /// Renders `large` at `size` pixels, using the small variant where one exists.
 fn render_at(src: &Path, large: Source, size: u32) -> Result<Pixmap> {
@@ -91,4 +136,88 @@ pub fn build_tray(src: &Path, out: &Path) -> Result<()> {
         write_png(&p, &linux.join(format!("tray-{size}.png")))?;
     }
     Ok(())
+}
+
+/// Writes `text` to `path`, replacing any existing file.
+fn write_text(path: &Path, text: &str) -> Result<()> {
+    fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Renders the full icon at `size` on an opaque background.
+///
+/// The icon has an opaque background, so the graphite fill is only used if
+/// the render still leaves transparent pixels.
+fn opaque_icon(src: &Path, size: u32) -> Result<Pixmap> {
+    let icon = render_at(src, Source::Icon, size)?;
+    if icon.pixels().iter().all(|c| c.alpha() == u8::MAX) {
+        return Ok(icon);
+    }
+    let mut out =
+        Pixmap::new(icon.width(), icon.height()).context("pixmap size must be non-zero")?;
+    let [r, g, b] = rgb(GRAPHITE);
+    out.fill(Color::from_rgba8(r, g, b, u8::MAX));
+    out.draw_pixmap(
+        0,
+        0,
+        icon.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    Ok(out)
+}
+
+/// Writes the iOS app icon set into `out`.
+///
+/// Produces `ios/AppIcon.appiconset/AppIcon-1024.png` and `Contents.json`.
+pub fn build_ios(src: &Path, out: &Path) -> Result<()> {
+    let set = out.join("ios/AppIcon.appiconset");
+    mkdir(&set)?;
+    write_png(&opaque_icon(src, 1024)?, &set.join("AppIcon-1024.png"))?;
+    write_text(&set.join("Contents.json"), CONTENTS_JSON)
+}
+
+/// Writes the Android launcher icons into `out`.
+///
+/// Produces the adaptive layers and legacy icon in `android/res/mipmap-*`
+/// and the adaptive icon description in `mipmap-anydpi-v26/ic_launcher.xml`.
+pub fn build_android(src: &Path, out: &Path) -> Result<()> {
+    let res = out.join("android/res");
+    let adaptive = res.join("mipmap-anydpi-v26");
+    mkdir(&adaptive)?;
+    for (density, layer_size, legacy_size) in ANDROID_DENSITIES {
+        let dir = res.join(format!("mipmap-{density}"));
+        mkdir(&dir)?;
+        for (layer, source) in ANDROID_LAYERS {
+            let p = render_at(src, source, layer_size)?;
+            write_png(&p, &dir.join(format!("ic_launcher_{layer}.png")))?;
+        }
+        let legacy = render_at(src, Source::Icon, legacy_size)?;
+        write_png(&legacy, &dir.join("ic_launcher.png"))?;
+    }
+    write_text(&adaptive.join("ic_launcher.xml"), ADAPTIVE_XML)
+}
+
+/// Writes the web icons into `out`.
+///
+/// Produces `web/favicon.svg`, `web/favicon.ico`, `web/apple-touch-icon.png`
+/// and `mark/mark-512.png`.
+pub fn build_web(src: &Path, out: &Path) -> Result<()> {
+    let web = out.join("web");
+    let mark = out.join("mark");
+    mkdir(&web)?;
+    mkdir(&mark)?;
+
+    fs::copy(src.join(Source::Mark.file_name()), web.join("favicon.svg"))
+        .context("failed to copy favicon.svg")?;
+    let favicon = render_all(src, Source::Icon, &FAVICON_SIZES)?;
+    write_ico(&favicon, &web.join("favicon.ico"))?;
+    write_png(
+        &opaque_icon(src, APPLE_TOUCH_SIZE)?,
+        &web.join("apple-touch-icon.png"),
+    )?;
+    write_png(
+        &render_at(src, Source::Mark, MARK_SIZE)?,
+        &mark.join("mark-512.png"),
+    )
 }

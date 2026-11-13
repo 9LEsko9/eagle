@@ -9,7 +9,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use resvg::tiny_skia::Pixmap;
 use tempfile::TempDir;
 
 /// Brand SVG sources, relative to this crate.
@@ -74,16 +73,4 @@ pub fn read_png_rgba(path: &Path) -> Rgba {
         height: info.height,
         data,
     }
-}
-
-/// Converts a premultiplied pixmap to straight (non-premultiplied) RGBA bytes.
-#[allow(dead_code)]
-pub fn straight_rgba(p: &Pixmap) -> Vec<u8> {
-    p.pixels()
-        .iter()
-        .flat_map(|c| {
-            let c = c.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
 }

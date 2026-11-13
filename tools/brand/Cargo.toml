@@ -12,7 +12,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1"
 ico = "0.6"
-icns = "0.5"
+icns = { version = "0.5", default-features = false, features = ["pngio"] }
 png = "0.18"
 resvg = "0.50"
 
