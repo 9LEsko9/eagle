@@ -294,5 +294,24 @@
     "release_build": "passed",
     "platform_ci": "not run; no remote push",
     "windows_linux_hardware": "not run"
+  },
+  "latest_native_attempt": {
+    "binary_sha256": "105f0d79c1adc32533e5c3cb1794440fbd8c460451e58cdbd825cbc72cf35639",
+    "os": "macOS-27.2-arm64-arm-64bit-Mach-O",
+    "machine": "Mac14,15",
+    "physical_memory_bytes": 8589934592,
+    "renderer_requested": "skia",
+    "actual_graphics_api": "unverified",
+    "foreground_and_occlusion": "unverified",
+    "audible_output": "not independently verified by sampler",
+    "measurement": "physical footprint; process wakeups do not separate UI and audio",
+    "settle_seconds": 2,
+    "sample_seconds": 2,
+    "samples": [],
+    "error": "Desktop smoke did not exit within 120 seconds",
+    "source": "97b3089",
+    "status": "failed before first native stage; no performance samples",
+    "comparison": "Earlier b7037d2 binary also failed to reach its first stage in a separate 12-second control.",
+    "independent_probe": "Minimal AppKit process did not receive applicationDidFinishLaunching; main queue and prelaunch timer worked. CGSession was NULL; Computer Use service startup failed."
   }
 }

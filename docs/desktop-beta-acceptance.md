@@ -8,6 +8,16 @@ The incoming working tree was preserved in local commit `9735e02` (parent `48246
 
 The measured implementation is local commit `b7037d2`. Its normal release binary has SHA-256 `c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97`.
 
+The subsequent playlist/radio implementation is commit `97b3089`; its normal release binary has SHA-256 `105f0d79c1adc32533e5c3cb1794440fbd8c460451e58cdbd825cbc72cf35639`. Its final workspace run passed 183 tests; formatting, clippy, Rust 1.92 workspace/all-targets, seven Python tests and release build passed.
+
+## Latest native run: blocked before launch completion
+
+The final native fixture attempt timed out after 120 seconds without reaching its first stage; it produced no valid memory or CPU samples. A controlled comparison ran the older `b7037d2` binary and the new binary for 12 seconds each: neither reached the first marker. All owned fixture processes were stopped.
+
+An independent minimal AppKit program reproduced missing `applicationDidFinishLaunching`, while its main queue and a prelaunch timer worked. Winit waits for that notification before dispatching the initial Slint events. In the same tool context `CGSessionCopyCurrentDictionary()` returned NULL, `scutil` reported an invalid destination port, Launch Services failed to open an existing temporary app, and Computer Use reported service startup failure. The user confirmed that the desktop was unlocked. These observations establish an unresolved native/session-service access problem in this execution context; they do not establish its root cause or prove a new Eagle regression. Production launch notifications were not fabricated and system services were not modified.
+
+Repeat the native fixture from the user's normal graphical terminal after restoring access. A headless screenshot pass or a successful compile does not resolve this blocker. The [measurement record](measurements/desktop-beta-release.json) retains this failed attempt separately from earlier valid samples.
+
 ## Implemented paths
 
 | Area | Behavior | Evidence required for acceptance |
