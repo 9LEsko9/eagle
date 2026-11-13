@@ -3,7 +3,4 @@
 
 //! Shared domain types.
 
-mod secrets;
-pub use secrets::{SignedUrl, Token};
-mod models;
-pub use models::*;
+pub use eagle_provider_sdk::*;

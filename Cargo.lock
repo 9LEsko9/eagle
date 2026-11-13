@@ -1398,6 +1398,7 @@ dependencies = [
 name = "eagle-core"
 version = "0.1.0"
 dependencies = [
+ "eagle-provider-sdk",
  "log",
  "serde",
  "thiserror 2.0.21",
@@ -1459,6 +1460,15 @@ dependencies = [
  "eagle-core",
  "log",
  "oslog",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "eagle-provider-sdk"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
  "thiserror 2.0.21",
 ]
 
