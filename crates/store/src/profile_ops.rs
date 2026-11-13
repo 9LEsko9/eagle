@@ -156,6 +156,8 @@ fn set_state(
     Ok(true)
 }
 
+pub(crate) const LIKE_AT_SQL: &str = "SELECT MAX(s.hlc) FROM track_groups g CROSS JOIN profile_state s ON s.kind='like' AND s.key=g.track WHERE g.grp=?1 AND s.deleted=0";
+
 /// Brings `liked` in line with `profile_state` for the group of `track`.
 pub(crate) fn project_like(tx: &Transaction, track: &str) -> Result<(), Error> {
     let grp: Option<i64> = tx
@@ -168,11 +170,9 @@ pub(crate) fn project_like(tx: &Transaction, track: &str) -> Result<(), Error> {
     let Some(grp) = grp else {
         return Ok(());
     };
-    let at: Option<i64> = tx.query_row(
-        "SELECT MAX(s.hlc) FROM profile_state s JOIN track_groups g ON g.track=s.key WHERE s.kind='like' AND g.grp=?1 AND s.deleted=0",
-        [grp],
-        |r| r.get(0),
-    )?;
+    // CROSS JOIN fixes the order: from the group's few members into `profile_state` by key. The
+    // planner's own choice walks every like for each call, which is quadratic in a full sync.
+    let at: Option<i64> = tx.query_row(LIKE_AT_SQL, [grp], |r| r.get(0))?;
     match at {
         Some(at) => tx.execute(
             "INSERT OR REPLACE INTO liked VALUES(?1,?2)",

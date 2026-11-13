@@ -362,6 +362,26 @@ mod tests {
     use eagle_core::{Artist, Availability};
     use std::collections::HashMap;
 
+    #[test]
+    fn like_projection_starts_from_the_group_members() {
+        // A full sync projects every like; reading all likes for each one is quadratic.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(profile_ops::SCHEMA).unwrap();
+        c.execute_batch(
+            "CREATE TABLE track_groups(track TEXT PRIMARY KEY, grp INTEGER NOT NULL, method TEXT NOT NULL); \
+             CREATE INDEX track_groups_grp ON track_groups(grp);",
+        )
+        .unwrap();
+        let plan: Vec<String> = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", profile_ops::LIKE_AT_SQL))
+            .unwrap()
+            .query_map([1], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(plan[0].contains("track_groups_grp"), "{plan:?}");
+    }
+
     fn root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("eg-likes-{name}-{}", std::process::id()))
     }
