@@ -1380,6 +1380,7 @@ dependencies = [
  "eagle-net",
  "eagle-palette",
  "eagle-platform",
+ "eagle-provider-sdk",
  "eagle-store",
  "eagle-yandex",
  "log",

@@ -22,3 +22,6 @@ serde_json = "1"
 rpassword = "7"
 crossterm = { version = "=0.28.1", default-features = false, features = ["events", "windows"] }
 sha2 = "0.10"
+
+[dev-dependencies]
+eagle-provider-sdk = { path = "../provider-sdk", features = ["testkit"] }
