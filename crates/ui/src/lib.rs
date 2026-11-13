@@ -940,9 +940,29 @@ mod tests {
         assert!(accept_event(&mut waiting, true, false, false));
         assert!(!accept_event(&mut waiting, false, false, false));
     }
+    fn player_bar_centre_is_independent_of_title() {
+        let ui = DesktopWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280., 880.));
+        ui.global::<Player>().set_title("A".into());
+        ui.global::<Player>().set_artist("A".into());
+        ui.show().unwrap();
+        let play_x = || {
+            ElementHandle::find_by_accessible_label(&ui, "Играть")
+                .next()
+                .unwrap()
+                .absolute_position()
+                .x
+        };
+        let short = play_x();
+        ui.global::<Player>().set_title("A".repeat(200).into());
+        ui.global::<Player>().set_artist("A".repeat(200).into());
+        let long = play_x();
+        assert!((short - long).abs() <= 0.5, "short={short}, long={long}");
+    }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        player_bar_centre_is_independent_of_title();
         let window = DesktopWindow::new().unwrap();
         let weak = window.as_weak();
         window.show().unwrap();
