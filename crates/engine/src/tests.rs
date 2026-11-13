@@ -172,6 +172,48 @@ fn queue_frames(names: &[&str], rate: u32) -> Vec<Frame> {
     }
     frames
 }
+
+fn worker_with_preloaded_next() -> (Worker, rtrb::Consumer<Frame>) {
+    let (_, commands) = mpsc::channel();
+    let (events, _) = mpsc::sync_channel(128);
+    let mut worker = Worker::new(
+        Config::default(),
+        Arc::new(Shared::default()),
+        commands,
+        events,
+    );
+    worker.sources = vec![fixture("split-0.wav"), fixture("long-vbr.mp3")];
+    let (output, mut consumer) = Output::offline(44100);
+    worker.output = Some(output);
+    worker.prepare().unwrap();
+    worker.preload = Some((1, worker.open_decoder(1).unwrap()));
+    while worker.decode_index == 0 {
+        worker.produce(0).unwrap();
+        while consumer.pop().is_ok() {}
+    }
+    (worker, consumer)
+}
+
+#[test]
+fn track_change_reuses_the_preloaded_decoder() {
+    let (mut worker, _) = worker_with_preloaded_next();
+    assert_eq!(worker.open_count, 2);
+    worker.prepare().unwrap();
+    assert_eq!(worker.open_count, 2);
+}
+
+#[test]
+fn preloaded_decoder_honours_restart_position() {
+    let (mut worker, mut consumer) = worker_with_preloaded_next();
+    worker.restart_position = Duration::from_millis(1500);
+    worker.prepare().unwrap();
+    worker.produce(0).unwrap();
+    let frame = consumer.pop().unwrap();
+    assert_eq!(frame.track, 1);
+    assert_eq!(frame.position, 66150);
+    let reference = decoded("long-vbr.mp3", 44100);
+    assert!((frame.samples[0] - reference[66150][0]).abs() < 0.0001);
+}
 #[test]
 fn continuous_split_recording_keeps_the_resampler_history_and_exact_track_positions() {
     let queued = queue_frames(&["split-0.wav", "split-1.wav"], 48000);
