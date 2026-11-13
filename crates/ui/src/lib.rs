@@ -986,6 +986,14 @@ mod tests {
             panel_ui.global::<Ui>().set_signed_in(true);
             panel_ui.global::<Ui>().set_route(Route::Playlist);
             panel_ui.show().unwrap();
+            let check_panel = |width: f32| {
+                for surface in
+                    ElementHandle::find_by_element_id(&panel_ui, "NowPlayingCard::panel-surface")
+                {
+                    let right = surface.absolute_position().x + surface.size().width;
+                    assert!(right <= width + 0.1, "width={width}, panel right={right}");
+                }
+            };
             for index in 0..5 {
                 let label = if index % 2 == 0 {
                     "Показать панель"
@@ -998,10 +1006,28 @@ mod tests {
                     .invoke_accessible_default_action();
                 i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
                 slint::platform::update_timers_and_animations();
+                check_panel(width);
             }
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
             slint::platform::update_timers_and_animations();
             assert!(panel_ui.global::<Ui>().get_panel_open());
+            assert_eq!(
+                ElementHandle::find_by_element_id(&panel_ui, "NowPlayingCard::panel-surface")
+                    .count(),
+                1
+            );
+            check_panel(width);
+            for resized in [1067., 1068., 1128.] {
+                panel_ui
+                    .window()
+                    .set_size(slint::LogicalSize::new(resized, 880.));
+                slint::platform::update_timers_and_animations();
+                check_panel(resized);
+            }
+            panel_ui
+                .window()
+                .set_size(slint::LogicalSize::new(width, 880.));
+            slint::platform::update_timers_and_animations();
             let close = ElementHandle::find_by_accessible_label(&panel_ui, "Скрыть панель")
                 .find(|element| element.absolute_position().y < 100.)
                 .unwrap();

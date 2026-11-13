@@ -136,7 +136,7 @@ export component DesktopWindow inherits Window {
         // Floating «Сейчас играет» on windows too narrow for a third column.
         if Layout.narrow && (Ui.panel-open || root.panel-lifetime > 0) : NowPlayingCard {
             floating: true;
-            x: parent.width - self.width - 16px;
+            x: parent.width - self.width - 24px;
             y: 16px;
             height: parent.height - root.bar-height - 32px;
         }
