@@ -292,6 +292,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_itunes_data_does_not_hide_the_next_item() {
+        let invalid_data = [
+            vec![0; 7],
+            [vec![0; 8], vec![0xff]].concat(),
+            [vec![0; 8], b"00000000 invalid 00000038 00002EE0".to_vec()].concat(),
+        ];
+        for data in invalid_data {
+            let fields = [
+                atom(
+                    b"mean",
+                    &[vec![0; 4], b"com.apple.iTunes".to_vec()].concat(),
+                ),
+                atom(b"name", &[vec![0; 4], b"iTunSMPB".to_vec()].concat()),
+                atom(b"data", &data),
+            ]
+            .concat();
+            let items = [atom(b"----", &fields), valid_itunes_item()].concat();
+            let moov = atom(b"meta", &[vec![0; 4], atom(b"ilst", &items)].concat());
+            let trim = parse(&moov, 48000).unwrap();
+            assert_eq!((trim.start, trim.length), (1024, 12000));
+        }
+    }
+
+    #[test]
     fn simple_audio_edit_list_is_scaled_and_not_double_trimmed() {
         let mut mvhd = vec![0; 16];
         mvhd[12..].copy_from_slice(&1000u32.to_be_bytes());
