@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use crate::{SignedUrl, Token};
+use crate::{Capabilities, ProviderInfo, SignedUrl, Token};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr, time::SystemTime};
 
@@ -167,6 +167,9 @@ pub struct Track {
     pub duration_ms: u64,
     pub cover: Option<String>,
     pub availability: Availability,
+    /// Only set by providers whose `Capabilities::isrc` is true.
+    #[serde(default)]
+    pub isrc: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Quality {
@@ -199,6 +202,9 @@ pub struct Stream {
 pub struct Account {
     pub id: String,
     pub subscription: bool,
+    /// What this account may use (subscription, region); narrows `ProviderInfo::capabilities`.
+    #[serde(default)]
+    pub capabilities: Capabilities,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -250,8 +256,22 @@ pub trait Provider: Send + Sync {
         Ok(AccessCheck::Unknown)
     }
 
-    fn name(&self) -> &str;
+    fn info(&self) -> &ProviderInfo;
     fn login(&self, token: Token) -> Result<Account, ProviderError>;
+    /// Signs in with a token the host already holds; must not persist it anywhere.
+    fn restore(&self, token: Token) -> Result<Account, ProviderError> {
+        self.login(token)
+    }
+    /// Forgets the token held in memory.
+    fn logout(&self) {}
+    /// All tracks of an artist, page by page; `cursor` is opaque.
+    fn artist_tracks(
+        &self,
+        _id: &TrackId,
+        _cursor: Option<&str>,
+    ) -> Result<Page<Track>, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
     fn account(&self) -> Result<Account, ProviderError>;
     fn search(&self, query: &str, page: u32) -> Result<Page<Track>, ProviderError>;
     fn search_artists(&self, _query: &str, _page: u32) -> Result<Page<Artist>, ProviderError> {

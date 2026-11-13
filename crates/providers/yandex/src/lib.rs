@@ -18,6 +18,7 @@ pub struct Yandex {
     liked_ids: Mutex<Option<Vec<String>>>,
     /// Account uid, cached so likes and lists cost one request instead of two.
     uid: Mutex<Option<String>>,
+    info: ProviderInfo,
 }
 fn keyring() -> Result<keyring::Entry, ProviderError> {
     keyring::Entry::new("eagle", "yandex").map_err(|_| ProviderError::Keyring)
@@ -121,6 +122,7 @@ pub fn parse_track(v: &Value) -> Result<Track, ProviderError> {
         } else {
             Availability::Unknown
         },
+        isrc: None,
     })
 }
 fn tracks(v: &Value) -> Result<Vec<Track>, ProviderError> {
@@ -160,7 +162,30 @@ fn encode(s: &str) -> String {
 }
 impl Yandex {
     pub fn new(net: Arc<Client>) -> Self {
+        let mut capabilities = Capabilities::none();
+        capabilities.search_tracks = true;
+        capabilities.search_artists = true;
+        capabilities.search_albums = true;
+        capabilities.search_playlists = true;
+        capabilities.likes = true;
+        capabilities.dislikes = true;
+        capabilities.liked_albums = true;
+        capabilities.liked_artists = true;
+        capabilities.playlists_read = true;
+        capabilities.playlists_edit = true;
+        capabilities.artist_page = true;
+        capabilities.radio = true;
+        capabilities.offline = true;
         Self {
+            info: ProviderInfo {
+                id: "yandex",
+                name: "Яндекс Музыка",
+                auth: AuthMethod::Token {
+                    hint: "OAuth-токен Яндекс Музыки",
+                    help_url: None,
+                },
+                capabilities,
+            },
             net,
             #[cfg(test)]
             api_base: None,
@@ -420,8 +445,8 @@ impl Provider for Yandex {
     ) -> Result<PlaylistSnapshot, PlaylistEditError> {
         self.edit_playlist_unverified(snapshot, edit)
     }
-    fn name(&self) -> &str {
-        "yandex"
+    fn info(&self) -> &ProviderInfo {
+        &self.info
     }
     fn login(&self, token: Token) -> Result<Account, ProviderError> {
         if token.expose().trim().is_empty() {
@@ -439,6 +464,7 @@ impl Provider for Yandex {
         Ok(Account {
             id: ident(&v["account"]["uid"])?,
             subscription: v["plus"]["hasPlus"].as_bool().unwrap_or(false),
+            capabilities: self.info.capabilities,
         })
     }
     fn search(&self, query: &str, page: u32) -> Result<Page<Track>, ProviderError> {

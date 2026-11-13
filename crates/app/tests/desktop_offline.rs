@@ -76,8 +76,8 @@ struct HttpFixture {
     url: String,
 }
 impl Provider for HttpFixture {
-    fn name(&self) -> &str {
-        self.base.name()
+    fn info(&self) -> &ProviderInfo {
+        self.base.info()
     }
     fn login(&self, token: Token) -> Result<Account, ProviderError> {
         self.base.login(token)

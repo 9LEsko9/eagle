@@ -3989,6 +3989,7 @@ mod delta_tests {
                 duration_ms: 1000,
                 cover: None,
                 availability: Availability::Available,
+                isrc: None,
             }),
             liked,
         }
@@ -4672,6 +4673,7 @@ mod lifecycle_tests {
                     duration_ms: 1000,
                     cover: None,
                     availability: Availability::Available,
+                    isrc: None,
                 })
                 .unwrap();
             store.replace_likes(vec!["yandex:1".into()]).unwrap();
@@ -4762,13 +4764,20 @@ mod sync_tests {
         calls: std::sync::atomic::AtomicUsize,
     }
     impl Provider for EditFixture {
-        fn name(&self) -> &str {
-            "yandex"
+        fn info(&self) -> &ProviderInfo {
+            static INFO: ProviderInfo = ProviderInfo {
+                id: "yandex",
+                name: "yandex",
+                auth: AuthMethod::None,
+                capabilities: Capabilities::none(),
+            };
+            &INFO
         }
         fn account(&self) -> std::result::Result<Account, ProviderError> {
             Ok(Account {
                 id: "1".into(),
                 subscription: true,
+                capabilities: Capabilities::default(),
             })
         }
         fn login(&self, _: Token) -> std::result::Result<Account, ProviderError> {
@@ -4901,6 +4910,7 @@ mod sync_tests {
                 duration_ms: 1,
                 cover: None,
                 availability: Availability::Available,
+                isrc: None,
             };
             let snapshot = PlaylistSnapshot {
                 playlist: Playlist {
@@ -5041,8 +5051,14 @@ mod sync_tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl Provider for Fixture {
-        fn name(&self) -> &str {
-            "yandex"
+        fn info(&self) -> &ProviderInfo {
+            static INFO: ProviderInfo = ProviderInfo {
+                id: "yandex",
+                name: "yandex",
+                auth: AuthMethod::None,
+                capabilities: Capabilities::none(),
+            };
+            &INFO
         }
         fn account(&self) -> std::result::Result<Account, ProviderError> {
             Err(ProviderError::Unavailable)
@@ -5067,6 +5083,7 @@ mod sync_tests {
                     duration_ms: 1,
                     cover: None,
                     availability: Availability::Available,
+                    isrc: None,
                 }],
                 cover: Some("image/%%".into()),
                 year: None,
@@ -5183,6 +5200,7 @@ mod sync_tests {
                 duration_ms: 1,
                 cover: None,
                 availability: Availability::Available,
+                isrc: None,
             };
             Ok(Page {
                 items: vec![track],

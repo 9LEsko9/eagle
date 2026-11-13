@@ -67,7 +67,7 @@ impl Downloads {
             .spawn(move || {
                 let mut account = String::new();
                 let allow_metered = store.setting("allow_metered").ok().flatten().as_deref() == Some("true");
-                let fixture = cfg!(test) || provider.name() == "fixture";
+                let fixture = cfg!(test) || provider.info().id == "fixture";
                 let mut network_policy = if fixture {
                     eagle_net::policy::NetworkPolicy { allow_metered, ..Default::default() }
                 } else {
@@ -229,7 +229,7 @@ impl Downloads {
                                     let track = match task_store.track(&task.track)? {
                                         Some(track) => track,
                                         None => {
-                                            if provider.name() != task.track.provider()
+                                            if provider.info().id != task.track.provider()
                                                 || provider.account()?.id != task.account
                                             {
                                                 return Err("аккаунт загрузки изменился".into());
@@ -372,7 +372,7 @@ fn audio(
     let unsupported_quality = attempt.unsupported_quality.clone();
     let resolve = Arc::new(move || {
         // Credentials can also be changed by another entry point between launches.
-        if provider.name() != id.provider()
+        if provider.info().id != id.provider()
             || provider
                 .account()
                 .map_err(|_| eagle_net::Error::Source("не удалось проверить аккаунт загрузки"))?
@@ -997,6 +997,7 @@ mod tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         store.put_track(&track).unwrap();
         store
@@ -1085,6 +1086,7 @@ mod tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         store.put_track(&track).unwrap();
         store

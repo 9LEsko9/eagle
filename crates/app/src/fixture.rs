@@ -20,6 +20,7 @@ fn tracks() -> Vec<Track> {
                 duration_ms: 30_000,
                 cover: None,
                 availability: Availability::Available,
+                isrc: None,
             })
         })
         .collect()
@@ -63,8 +64,14 @@ pub fn seed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 impl Provider for Fixture {
-    fn name(&self) -> &str {
-        "fixture"
+    fn info(&self) -> &ProviderInfo {
+        static INFO: ProviderInfo = ProviderInfo {
+            id: "fixture",
+            name: "fixture",
+            auth: AuthMethod::None,
+            capabilities: Capabilities::none(),
+        };
+        &INFO
     }
     fn login(&self, _: Token) -> Result<Account, ProviderError> {
         self.account()
@@ -73,6 +80,7 @@ impl Provider for Fixture {
         Ok(Account {
             id: "fixture".into(),
             subscription: true,
+            capabilities: Capabilities::default(),
         })
     }
     fn search(&self, _: &str, page: u32) -> Result<Page<Track>, ProviderError> {

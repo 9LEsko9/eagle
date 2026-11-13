@@ -214,7 +214,7 @@ pub(crate) fn sync(store: &Store, provider: &dyn Provider) -> Result<()> {
         store.put_tracks(&p.tracks)?;
         playlists.push((p.id.to_string(), serde_json::to_string(&p)?));
     }
-    store.replace_playlists(provider.name(), playlists)?;
+    store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
 /// Writes metadata page by page; publishes the ordered likes only after every page succeeds.
@@ -241,7 +241,7 @@ pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<(
         .iter()
         .map(|p| Ok((p.id.to_string(), serde_json::to_string(p)?)))
         .collect::<Result<Vec<_>>>()?;
-    store.replace_playlists(provider.name(), playlists)?;
+    store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
 pub fn run(args: &[String], root: &Path) -> Result<()> {
@@ -363,6 +363,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         })?;
     }
     // Hold 100 decoded RGB thumbnails (64 x 64) as a defined cover-cache workload.
@@ -470,6 +471,7 @@ mod metadata_tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         metadata(&store, &net, &root, &track).unwrap();
         let cover = root.join("covers/yandex_coverless-600.png");

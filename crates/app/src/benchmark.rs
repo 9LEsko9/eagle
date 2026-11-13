@@ -10,8 +10,14 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Fixture;
 impl Provider for Fixture {
-    fn name(&self) -> &str {
-        "yandex"
+    fn info(&self) -> &ProviderInfo {
+        static INFO: ProviderInfo = ProviderInfo {
+            id: "yandex",
+            name: "yandex",
+            auth: AuthMethod::None,
+            capabilities: Capabilities::none(),
+        };
+        &INFO
     }
     fn account(&self) -> std::result::Result<Account, ProviderError> {
         Err(ProviderError::Unavailable)
@@ -54,6 +60,7 @@ impl Provider for Fixture {
                     duration_ms: 1000,
                     cover: None,
                     availability: Availability::Available,
+                    isrc: None,
                 })
             })
             .collect::<std::result::Result<Vec<_>, ProviderError>>()?;

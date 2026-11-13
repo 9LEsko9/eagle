@@ -98,6 +98,7 @@ mod tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            isrc: None,
         };
         let entry = PlaybackEntry {
             id: 1,
