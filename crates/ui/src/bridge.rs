@@ -528,9 +528,11 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             ui.global::<Ui>().set_route(route(view));
             ui.global::<Ui>().set_error("".into());
         }
-        Event::PlaylistCreated(_) => {
+        Event::PlaylistCreated(id) => {
             ui.global::<Ui>().set_create_playlist(false);
             ui.global::<Ui>().set_playlist_name("".into());
+            ui.global::<Actions>()
+                .invoke_collection(Route::Playlist, id.to_string().into());
         }
         Event::PlaylistDeleted(_) => ui.global::<Ui>().set_confirm_delete(false),
         Event::PlaylistMutationBusy(busy) => ui.global::<Ui>().set_playlist_busy(busy),

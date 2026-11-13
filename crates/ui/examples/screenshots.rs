@@ -358,6 +358,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
+            "create-playlist-paper",
+            ThemeMode::Paper,
+            Route::Library,
+            false,
+            false,
+            1280.,
+        ),
+        (
             "delete-playlist",
             ThemeMode::Graphite,
             Route::Playlist,
