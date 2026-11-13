@@ -101,7 +101,11 @@ impl Providers {
     /// Signs in with a token the user typed; it is saved only after the provider accepts it.
     pub fn sign_in(&self, provider: &dyn Provider, token: Token) -> Result<Account, ProviderError> {
         let account = provider.login(token.clone())?;
-        self.tokens.save(provider.info().id, &token)?;
+        if let Err(error) = self.tokens.save(provider.info().id, &token) {
+            // The session must not outlive a sign-in that reported a failure.
+            provider.logout();
+            return Err(error);
+        }
         self.set_account(provider.info().id, Some(account.clone()));
         Ok(account)
     }
@@ -301,5 +305,32 @@ mod tests {
         let id: TrackId = "fakeb:7".parse().unwrap();
         assert_eq!(providers.for_track(&id).map(|p| p.info().id), Some("fakeb"));
         assert!(providers.for_track(&"nope:1".parse().unwrap()).is_none());
+    }
+
+    struct FailingSave;
+    impl TokenStore for FailingSave {
+        fn load(&self, _: &str) -> Result<Option<Token>, ProviderError> {
+            Ok(None)
+        }
+        fn save(&self, _: &str, _: &Token) -> Result<(), ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn delete(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn sign_in_that_cannot_save_the_token_leaves_no_session() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out());
+        let providers = Providers::new(vec![fake.clone() as Arc<dyn Provider>], &[])
+            .with_tokens(Arc::new(FailingSave));
+        assert!(
+            providers
+                .sign_in(fake.as_ref(), Token::new("t".into()))
+                .is_err()
+        );
+        assert!(fake.account().is_err());
+        assert!(!providers.is_signed_in(fake.as_ref()));
     }
 }

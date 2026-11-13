@@ -659,7 +659,7 @@ impl Provider for Yandex {
             .ok_or(ProviderError::ApiChanged)?;
         Ok(Page {
             items,
-            next: ((u64::from(page) + 1) * per < total).then(|| (page + 1).to_string()),
+            next: (per > 0 && (u64::from(page) + 1) * per < total).then(|| (page + 1).to_string()),
         })
     }
     fn search_artists(&self, query: &str, page: u32) -> Result<Page<Artist>, ProviderError> {
