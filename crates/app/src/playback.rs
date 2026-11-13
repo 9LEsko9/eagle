@@ -302,6 +302,8 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
     let store = Arc::new(Store::open(root)?);
     let cache = Arc::new(Cache::open(&root.join("audio"), LIMIT * 4, &store)?);
     let provider = Arc::new(eagle_yandex::Yandex::new(net.clone()));
+    // A missing saved token surfaces later, when a stream is requested.
+    let _ = crate::music::restore_saved(provider.as_ref());
     let mut sources = Vec::new();
     let mut prepared = HashMap::<String, Source>::new();
     for item in &options.items {

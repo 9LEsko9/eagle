@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use eagle_core::{Encryption, Provider, Quality, SignedUrl, Stream, TrackId};
+use eagle_core::{
+    Account, Encryption, Provider, ProviderError, Quality, SignedUrl, Stream, Token, TrackId,
+};
 use eagle_net::{Client, Priority, Request};
 use eagle_store::{Cache, RangeMap, Store};
 use std::{
@@ -244,6 +246,41 @@ pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<(
     store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
+/// Signs in with the token saved in the keyring, or with the provider's current session.
+pub fn restore_saved(provider: &dyn Provider) -> std::result::Result<Account, ProviderError> {
+    // Tests never read the user's keychain; they keep the fixture's own account.
+    #[cfg(test)]
+    {
+        provider.account()
+    }
+    #[cfg(not(test))]
+    {
+        match eagle_platform::tokens::load(provider.info().id) {
+            Ok(Some(token)) => provider.restore(token),
+            // Without a saved token the provider keeps what it already holds, as before.
+            _ => provider.account(),
+        }
+    }
+}
+/// Saves a token the provider has just accepted. Tests never write to the keychain.
+pub fn remember_token(
+    provider: &dyn Provider,
+    token: &Token,
+) -> std::result::Result<(), ProviderError> {
+    #[cfg(test)]
+    {
+        let _ = (provider, token);
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        eagle_platform::tokens::save(provider.info().id, token)
+    }
+}
+/// Asks for the Yandex token without echoing it.
+fn prompt_token() -> std::io::Result<Token> {
+    rpassword::prompt_password("Токен Яндекс Музыки: ").map(Token::new)
+}
 pub fn run(args: &[String], root: &Path) -> Result<()> {
     if args.is_empty() {
         println!(
@@ -260,19 +297,23 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
     let net = Arc::new(Client::new()?);
     let provider = eagle_yandex::Yandex::new(net.clone());
     if command == "login" {
-        let account = provider.login(eagle_yandex::prompt_token()?)?;
+        let token = prompt_token()?;
+        let account = provider.login(token.clone())?;
+        remember_token(&provider, &token)?;
         println!("Вход выполнен: {}", account.id);
         sync(&Store::open(root)?, &provider)?;
         return Ok(());
     }
     if command == "status" {
-        let a = provider.account()?;
+        let a = restore_saved(&provider)?;
         println!("Аккаунт: {}, Plus: {}", a.id, a.subscription);
         return Ok(());
     }
     if command == "play" {
         return crate::playback::run(tail, root, net);
     }
+    // Other commands work only with the saved token; a missing one fails with `Auth` below.
+    let _ = restore_saved(&provider);
     let store = Store::open(root)?;
     let tid =
         || -> Result<TrackId> { Ok(tail.first().ok_or("укажите provider:id")?.parse()?) };

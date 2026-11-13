@@ -2,8 +2,7 @@
 //! Blocking Yandex Music adapter. Secrets never enter SQLite or error text.
 pub mod contracts;
 
-use eagle_core::*;
-use eagle_net::{Client, Priority, Request};
+use eagle_provider_sdk::*;
 use serde_json::Value;
 use std::{
     sync::{Arc, Mutex, RwLock},
@@ -11,7 +10,7 @@ use std::{
 };
 const API: &str = "https://api.music.yandex.net";
 pub struct Yandex {
-    net: Arc<Client>,
+    net: Arc<dyn Http>,
     #[cfg(test)]
     api_base: Option<String>,
     token: RwLock<Option<Token>>,
@@ -20,19 +19,13 @@ pub struct Yandex {
     uid: Mutex<Option<String>>,
     info: ProviderInfo,
 }
-fn keyring() -> Result<keyring::Entry, ProviderError> {
-    keyring::Entry::new("eagle", "yandex").map_err(|_| ProviderError::Keyring)
-}
-pub fn prompt_token() -> Result<Token, std::io::Error> {
-    rpassword::prompt_password("Токен Яндекс Музыки: ").map(Token::new)
-}
-fn net_error(e: eagle_net::Error) -> ProviderError {
+fn net_error(e: HttpError) -> ProviderError {
     match e {
-        eagle_net::Error::Status(401) => ProviderError::Auth,
-        eagle_net::Error::Status(403 | 451) => ProviderError::Unavailable,
-        eagle_net::Error::Status(404) => ProviderError::NotFound,
-        eagle_net::Error::Status(429) => ProviderError::RateLimited,
-        eagle_net::Error::TooLarge => ProviderError::ApiChanged,
+        HttpError::Status(401) => ProviderError::Auth,
+        HttpError::Status(403 | 451) => ProviderError::Unavailable,
+        HttpError::Status(404) => ProviderError::NotFound,
+        HttpError::Status(429) => ProviderError::RateLimited,
+        HttpError::TooLarge => ProviderError::ApiChanged,
         _ => ProviderError::Network,
     }
 }
@@ -161,7 +154,7 @@ fn encode(s: &str) -> String {
         .collect()
 }
 impl Yandex {
-    pub fn new(net: Arc<Client>) -> Self {
+    pub fn new(net: Arc<dyn Http>) -> Self {
         let mut capabilities = Capabilities::none();
         capabilities.search_tracks = true;
         capabilities.search_artists = true;
@@ -195,12 +188,11 @@ impl Yandex {
         }
     }
     fn token(&self) -> Result<Token, ProviderError> {
-        if let Some(t) = self.token.read().map_err(|_| ProviderError::Auth)?.clone() {
-            return Ok(t);
-        }
-        let token = Token::new(keyring()?.get_password().map_err(|_| ProviderError::Auth)?);
-        *self.token.write().map_err(|_| ProviderError::Auth)? = Some(token.clone());
-        Ok(token)
+        self.token
+            .read()
+            .map_err(|_| ProviderError::Auth)?
+            .clone()
+            .ok_or(ProviderError::Auth)
     }
     fn api(&self, path: &str, form: Option<Vec<(String, String)>>) -> Result<Value, ProviderError> {
         self.api_at(path, form, Priority::Metadata)
@@ -452,12 +444,19 @@ impl Provider for Yandex {
         if token.expose().trim().is_empty() {
             return Err(ProviderError::Auth);
         }
-        self.set_token(token.clone())?;
-        let account = self.account()?;
-        keyring()?
-            .set_password(token.expose())
-            .map_err(|_| ProviderError::Keyring)?;
-        Ok(account)
+        self.set_token(token)?;
+        self.account()
+    }
+    fn logout(&self) {
+        if let Ok(mut token) = self.token.write() {
+            *token = None;
+        }
+        if let Ok(mut uid) = self.uid.lock() {
+            *uid = None;
+        }
+        if let Ok(mut liked) = self.liked_ids.lock() {
+            *liked = None;
+        }
     }
     fn account(&self) -> Result<Account, ProviderError> {
         let v = self.api("/account/status", None)?;
@@ -730,7 +729,7 @@ impl Provider for Yandex {
                 Request::get(SignedUrl::new(url.into())),
                 None,
             ) {
-                Err(eagle_net::Error::Status(410)) if attempt == 0 => continue,
+                Err(HttpError::Status(410)) if attempt == 0 => continue,
                 result => result.map_err(net_error)?,
             };
             let url = direct_link(&response.bytes)?;
@@ -792,6 +791,7 @@ fn direct_link(xml: &[u8]) -> Result<String, ProviderError> {
 }
 #[cfg(test)]
 mod tests {
+    use eagle_net::Client;
     fn mock_api(responses: Vec<&'static str>) -> (Yandex, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

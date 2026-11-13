@@ -11,6 +11,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 eagle-core = { path = "../core" }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 log.workspace = true
 thiserror.workspace = true
 

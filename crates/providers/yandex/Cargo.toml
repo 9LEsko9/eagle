@@ -10,10 +10,11 @@ publish.workspace = true
 license = "GPL-3.0-or-later"
 
 [dependencies]
-eagle-core = { path = "../../core" }
-eagle-net = { path = "../../net" }
+eagle-provider-sdk = { path = "../../provider-sdk" }
 serde_json = "1"
 md5 = "0.7"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-rpassword = "7"
 roxmltree = "0.20"
+
+[dev-dependencies]
+eagle-core = { path = "../../core" }
+eagle-net = { path = "../../net" }

@@ -59,6 +59,11 @@ version = "=0.1.0"
 allow = ["GPL-3.0-or-later"]
 
 [[licenses.exceptions]]
+name = "eagle-provider-sdk"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
 name = "eagle-vk"
 version = "=0.1.0"
 allow = ["GPL-3.0-or-later"]

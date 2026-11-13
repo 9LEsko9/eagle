@@ -12,6 +12,7 @@ license = "GPL-3.0-or-later"
 [dependencies]
 log.workspace = true
 eagle-core = { path = "../core" }
+eagle-provider-sdk = { path = "../provider-sdk" }
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 thiserror.workspace = true
 url = "2"

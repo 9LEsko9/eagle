@@ -3262,7 +3262,7 @@ impl Catalog {
                 Ok(CatalogReply::Collections(playlists))
             }
             Command::Library => self.library(),
-            Command::Restore => Ok(match self.provider.account() {
+            Command::Restore => Ok(match crate::music::restore_saved(self.provider.as_ref()) {
                 Ok(account) => {
                     let changed = self.switch_account(&account.id)?;
                     self.refresh_access(&account.id)?;
@@ -3469,7 +3469,8 @@ impl Catalog {
                 Ok(page)
             }
             Command::Login(token) => {
-                let account = self.provider.login(token)?;
+                let account = self.provider.login(token.clone())?;
+                crate::music::remember_token(self.provider.as_ref(), &token)?;
                 Ok(CatalogReply::Account(self.switch_account(&account.id)?))
             }
             Command::Like(id) => {

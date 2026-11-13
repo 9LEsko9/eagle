@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Proposed provider contracts. Wire compatibility requires live verification.
 
-pub use eagle_core::{PlaylistEdit, PlaylistEditError, PlaylistSnapshot, PlaylistTrack};
-use eagle_core::{Track, TrackId};
+pub use eagle_provider_sdk::{PlaylistEdit, PlaylistEditError, PlaylistSnapshot, PlaylistTrack};
+use eagle_provider_sdk::{Track, TrackId};
 
 /// Identifiers are opaque and must remain associated with their originating session.
 #[derive(Clone, Debug)]
@@ -55,24 +55,24 @@ impl super::Yandex {
     pub fn playlist_snapshot_unverified(
         &self,
         id: &TrackId,
-    ) -> Result<PlaylistSnapshot, eagle_core::ProviderError> {
+    ) -> Result<PlaylistSnapshot, eagle_provider_sdk::ProviderError> {
         let (owner, kind) = self
             .local(id)?
             .split_once('_')
-            .ok_or(eagle_core::ProviderError::InvalidId)?;
+            .ok_or(eagle_provider_sdk::ProviderError::InvalidId)?;
         if owner.is_empty()
             || kind.is_empty()
             || !owner.bytes().all(|b| b.is_ascii_digit())
             || !kind.bytes().all(|b| b.is_ascii_digit())
         {
-            return Err(eagle_core::ProviderError::InvalidId);
+            return Err(eagle_provider_sdk::ProviderError::InvalidId);
         }
         let value = self.api(&format!("/users/{owner}/playlists/{kind}"), None)?;
         let count = match value.get("trackCount") {
             Some(count) => Some(
                 count
                     .as_u64()
-                    .ok_or(eagle_core::ProviderError::ApiChanged)?,
+                    .ok_or(eagle_provider_sdk::ProviderError::ApiChanged)?,
             ),
             None => None,
         };
@@ -80,21 +80,21 @@ impl super::Yandex {
             Some(tracks) => {
                 let tracks = tracks
                     .as_array()
-                    .ok_or(eagle_core::ProviderError::ApiChanged)?;
+                    .ok_or(eagle_provider_sdk::ProviderError::ApiChanged)?;
                 if count.is_some_and(|count| count != tracks.len() as u64) {
-                    return Err(eagle_core::ProviderError::ApiChanged);
+                    return Err(eagle_provider_sdk::ProviderError::ApiChanged);
                 }
             }
             None if count == Some(0) => {}
-            None => return Err(eagle_core::ProviderError::ApiChanged),
+            None => return Err(eagle_provider_sdk::ProviderError::ApiChanged),
         }
         let playlist = self.parse_playlist(&value)?;
         if playlist.id != *id {
-            return Err(eagle_core::ProviderError::ApiChanged);
+            return Err(eagle_provider_sdk::ProviderError::ApiChanged);
         }
         let revision = value["revision"]
             .as_u64()
-            .ok_or(eagle_core::ProviderError::ApiChanged)?;
+            .ok_or(eagle_provider_sdk::ProviderError::ApiChanged)?;
         Ok(PlaylistSnapshot { playlist, revision })
     }
 
@@ -104,7 +104,7 @@ impl super::Yandex {
         snapshot: &PlaylistSnapshot,
         edit: PlaylistEdit,
     ) -> Result<PlaylistSnapshot, PlaylistEditError> {
-        use eagle_core::ProviderError;
+        use eagle_provider_sdk::ProviderError;
         let invalid = || PlaylistEditError::Provider(ProviderError::InvalidId);
         let (owner, kind) = self
             .local(&snapshot.playlist.id)
