@@ -19,6 +19,8 @@ export global Theme {
     out property <color> press: t.tx.with-alpha(0.1);
     // Pure black or white: a tinted outline picks up the surface colour and reads as dirt on the cover edge.
     out property <color> image-outline: dark ? #ffffff1a : #0000001a;
+    // Placeholder bars and tiles while content loads.
+    out property <color> skeleton: t.tx.with-alpha(0.08);
 }
 export global Motion {
     in-out property <bool> reduced;

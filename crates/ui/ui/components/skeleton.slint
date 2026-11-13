@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme } from "../globals/theme.slint";
+import { Ui } from "../globals/bridge.slint";
+import { TrackColumns } from "track-row.slint";
+import { SkeletonPulse, SkeletonBar } from "spinner.slint";
+
+// Placeholder track rows laid out like TrackRowView, so real rows do not move the page.
+export component SkeletonRows inherits Rectangle {
+    in property <int> count: 8;
+    in property <bool> show-album;
+    // Title widths as a share of the title column, cycled by row so the list looks natural.
+    private property <[float]> widths: [0.62, 0.48, 0.7, 0.55, 0.4, 0.66, 0.52, 0.58];
+    height: root.count * TrackColumns.row-height;
+    SkeletonPulse {
+        width: parent.width;
+        height: parent.height;
+        VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            for index in root.count : HorizontalLayout {
+                height: TrackColumns.row-height;
+                padding-left: TrackColumns.inset;
+                padding-right: TrackColumns.inset;
+                spacing: TrackColumns.gap;
+                Rectangle { width: TrackColumns.number; }
+                if Ui.list-covers : Rectangle {
+                    width: 40px;
+                    Rectangle {
+                        width: Ui.compact ? 32px : 40px;
+                        height: self.width;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 4px;
+                        background: Theme.skeleton;
+                    }
+                }
+                // Bars are placed absolutely inside the column: a layout child sized from its
+                // parent would make the row's preferred width depend on itself.
+                Rectangle {
+                    horizontal-stretch: 2;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    title-bar := SkeletonBar {
+                        x: 0px;
+                        y: (parent.height - 28px) / 2;
+                        width: min(260px, parent.width * root.widths[mod(index, root.widths.length)]);
+                        height: 12px;
+                    }
+                    SkeletonBar {
+                        x: 0px;
+                        y: title-bar.y + 18px;
+                        width: title-bar.width * 0.6;
+                        height: 10px;
+                    }
+                }
+                if root.show-album : Rectangle {
+                    horizontal-stretch: 1.2;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    SkeletonBar {
+                        x: 0px;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width * 0.5;
+                        height: 10px;
+                    }
+                }
+                Rectangle { width: TrackColumns.actions; }
+                Rectangle {
+                    width: TrackColumns.time;
+                    SkeletonBar {
+                        x: parent.width - self.width;
+                        y: (parent.height - self.height) / 2;
+                        width: 28px;
+                        height: 10px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Placeholder card grid with the same geometry as CardGrid.
+export component SkeletonGrid inherits Rectangle {
+    in property <bool> round;
+    in property <int> rows: 2;
+    private property <length> gap: 20px;
+    private property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
+    private property <length> art: (self.width - (columns - 1) * gap) / columns;
+    height: root.rows * (art + 52px + gap);
+    SkeletonPulse {
+        width: parent.width;
+        height: parent.height;
+        for index in root.columns * root.rows : Rectangle {
+            x: mod(index, root.columns) * (root.art + root.gap);
+            y: floor(index / root.columns) * (root.art + 52px + root.gap);
+            width: root.art;
+            height: root.art + 52px;
+            // Same rhythm as Tile: artwork, then title and subtitle lines below it.
+            VerticalLayout {
+                alignment: start;
+                spacing: 0px;
+                Rectangle {
+                    height: root.art;
+                    border-radius: root.round ? root.art / 2 : 8px;
+                    background: Theme.skeleton;
+                }
+                Rectangle { height: 12px; }
+                HorizontalLayout {
+                    alignment: root.round ? LayoutAlignment.center : LayoutAlignment.start;
+                    SkeletonBar { width: root.art * 0.7; height: 12px; }
+                }
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    alignment: root.round ? LayoutAlignment.center : LayoutAlignment.start;
+                    SkeletonBar { width: root.art * 0.45; height: 10px; }
+                }
+            }
+        }
+    }
+}

@@ -974,9 +974,59 @@ mod tests {
             );
         }
     }
+    /// Indicators wait for `Loading.delay`, so fast work never flashes, and drop at once.
+    fn loading_indicators_wait_for_the_delay() {
+        let ui = DesktopWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280., 880.));
+        ui.global::<Ui>().set_signed_in(true);
+        ui.global::<Ui>().set_route(Route::Playlist);
+        ui.show().unwrap();
+        let skeletons = || ElementHandle::find_by_element_type_name(&ui, "SkeletonRows").count();
+        let step = |ms: u64| {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+            slint::platform::update_timers_and_animations();
+        };
+        ui.global::<Ui>().set_busy(true);
+        step(0);
+        step(150);
+        assert!(!ui.global::<Loading>().get_page());
+        assert_eq!(skeletons(), 0);
+        step(100);
+        assert!(ui.global::<Loading>().get_page());
+        assert!(skeletons() > 0);
+        ui.global::<Ui>().set_busy(false);
+        step(0);
+        assert!(!ui.global::<Loading>().get_page());
+        assert_eq!(skeletons(), 0);
+
+        // A busy button shows a spinner and ignores activation.
+        let created = Rc::new(RefCell::new(0));
+        ui.global::<Actions>().on_create_playlist({
+            let created = created.clone();
+            move |_| *created.borrow_mut() += 1
+        });
+        ui.global::<Actions>().on_valid_playlist_name(|_| true);
+        ui.global::<Ui>().set_playlist_name("Вечер".into());
+        ui.global::<Ui>().set_create_playlist(true);
+        ui.global::<Ui>().set_playlist_busy(true);
+        step(0);
+        step(250);
+        assert!(ui.global::<Loading>().get_playlist());
+        assert!(ElementHandle::find_by_accessible_label(&ui, "Загрузка").count() > 0);
+        ElementHandle::find_by_accessible_label(&ui, "Создать")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(*created.borrow(), 0);
+        ui.global::<Ui>().set_playlist_busy(false);
+        ui.global::<Ui>().set_create_playlist(false);
+        step(0);
+        assert!(!ui.global::<Loading>().get_playlist());
+    }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        loading_indicators_wait_for_the_delay();
         player_bar_centre_is_independent_of_title();
         for width in [1000., 1067., 1068., 1127., 1128., 1129., 1280.] {
             let panel_ui = DesktopWindow::new().unwrap();

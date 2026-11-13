@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Ui, Player, Status } from "bridge.slint";
+
+// Delayed copies of the busy flags. Indicators read these, never the raw flags, so work
+// that finishes within `delay` shows no loading state at all.
+export global Loading {
+    out property <duration> delay: 200ms;
+    // A screen (album, playlist, artist, grid) is loading: Ui.busy.
+    in-out property <bool> page;
+    // A search is in flight: Ui.search-pending.
+    in-out property <bool> search;
+    // «Моя волна» is fetching: Ui.radio-busy.
+    in-out property <bool> radio;
+    // A playlist change is being saved: Ui.playlist-busy.
+    in-out property <bool> playlist;
+    // The current track is loading or buffering.
+    in-out property <bool> player;
+}
+
+// Mirrors `active` after Loading.delay and drops it at once.
+component Delayed {
+    in property <bool> active;
+    out property <bool> shown;
+    changed active => { if !self.active { self.shown = false; } }
+    Timer {
+        interval: Loading.delay;
+        running: root.active && !root.shown;
+        triggered => { root.shown = true; }
+    }
+}
+
+// Placed once in the window; feeds the Loading global.
+export component LoadingDelays {
+    Delayed { active: Ui.busy; changed shown => { Loading.page = self.shown; } }
+    Delayed { active: Ui.search-pending && Ui.search-valid; changed shown => { Loading.search = self.shown; } }
+    Delayed { active: Ui.radio-busy; changed shown => { Loading.radio = self.shown; } }
+    Delayed { active: Ui.playlist-busy; changed shown => { Loading.playlist = self.shown; } }
+    Delayed { active: Player.status == Status.loading || Player.status == Status.buffering; changed shown => { Loading.player = self.shown; } }
+}

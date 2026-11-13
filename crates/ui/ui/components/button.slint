@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Motion, Type } from "../globals/theme.slint";
+import { Spinner } from "spinner.slint";
 
 // Pill button. `primary` is filled with the text colour, `outline` has a hairline border, otherwise it is plain.
 export component TextButton inherits Rectangle {
@@ -9,11 +10,15 @@ export component TextButton inherits Rectangle {
     in property <bool> outline;
     in property <bool> enabled: true;
     out property <bool> hovered: touch.has-hover;
+    // Work started by this button is running: a spinner replaces the icon, clicks are ignored.
+    in property <bool> busy;
     out property <bool> has-focus: focus.has-focus;
     public function focus-button() { focus.focus(); }
     callback clicked();
     private property <color> fg: primary ? Theme.t.bg : Theme.t.tx;
-    private property <float> scale: touch.pressed ? 0.96 : 1;
+    // Pressed and hovered washes stay off while busy: the button ignores clicks then.
+    private property <bool> idle: !root.busy;
+    private property <float> scale: (touch.pressed && root.idle) ? 0.96 : 1;
     animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
     transform-scale-x: root.scale * 100%;
     transform-scale-y: root.scale * 100%;
@@ -22,30 +27,34 @@ export component TextButton inherits Rectangle {
     border-radius: self.height / 2;
     accessible-role: button;
     accessible-label: text;
-    accessible-action-default => { if root.enabled { root.clicked(); } }
+    accessible-description: root.busy ? @tr("Выполняется") : "";
+    accessible-action-default => { if root.enabled && !root.busy { root.clicked(); } }
     forward-focus: focus;
-    opacity: enabled ? 1 : 0.4;
-    background: primary ? (touch.pressed ? Theme.t.tx.with-alpha(0.82) : touch.has-hover ? Theme.t.tx.with-alpha(0.9) : Theme.t.tx)
-        : touch.pressed ? Theme.press : touch.has-hover ? Theme.hover : transparent;
+    // Busy beats the disabled look: a working button should not look dead.
+    opacity: (enabled || busy) ? 1 : 0.4;
+    background: primary ? ((touch.pressed && idle) ? Theme.t.tx.with-alpha(0.82) : (touch.has-hover && idle) ? Theme.t.tx.with-alpha(0.9) : Theme.t.tx)
+        : (touch.pressed && idle) ? Theme.press : (touch.has-hover && idle) ? Theme.hover : transparent;
     border-width: focus.has-focus ? 2px : outline ? 1px : 0px;
     border-color: focus.has-focus ? (primary ? Theme.t.tx2 : Theme.t.tx) : Theme.t.ln;
     animate background { duration: Motion.fast; }
     HorizontalLayout {
-        padding-left: root.icon.width > 0 ? 12px : 16px;
-        padding-right: root.icon.width > 0 ? 18px : 16px;
+        // The spinner takes the icon's slot, so the label keeps its place.
+        padding-left: (root.busy || root.icon.width > 0) ? 12px : 16px;
+        padding-right: (root.busy || root.icon.width > 0) ? 18px : 16px;
         spacing: 8px;
         alignment: center;
-        if root.icon.width > 0 : VerticalLayout {
+        if root.busy || root.icon.width > 0 : VerticalLayout {
             alignment: center;
-            Image { source: root.icon; colorize: root.fg; width: 16px; height: 16px; }
+            if root.busy : Spinner { size: 16px; fg: root.fg; }
+            if !root.busy : Image { source: root.icon; colorize: root.fg; width: 16px; height: 16px; }
         }
         Text { text: root.text; color: root.fg; font-size: Type.meta; font-weight: 600; vertical-alignment: center; }
     }
     focus := FocusScope {
         enabled: root.enabled;
-        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { if !root.busy { root.clicked(); } return accept; } return reject; }
     }
-    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    touch := TouchArea { enabled: root.enabled; clicked => { if !root.busy { root.clicked(); } } }
 }
 
 // Text-only sidebar item.

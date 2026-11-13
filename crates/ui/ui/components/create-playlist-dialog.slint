@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Type, Motion } from "../globals/theme.slint";
 import { Ui, Actions } from "../globals/bridge.slint";
+import { Loading } from "../globals/loading.slint";
 import { Field } from "controls.slint";
 import { TextButton } from "button.slint";
 
@@ -60,7 +61,7 @@ export component CreatePlaylistDialog inherits Rectangle {
                     alignment: end;
                     spacing: 8px;
                     cancel := TextButton { text: @tr("Отмена"); outline: true; clicked => { Ui.create-playlist = false; } }
-                    create := TextButton { text: @tr("Создать"); primary: true; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
+                    create := TextButton { text: @tr("Создать"); primary: true; busy: Loading.playlist; enabled: !Ui.playlist-busy && Actions.valid-playlist-name(Ui.playlist-name); clicked => { Actions.create-playlist(Ui.playlist-name); } }
                 }
             }
         }
