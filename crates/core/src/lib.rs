@@ -4,3 +4,5 @@
 //! Shared domain types.
 
 pub use eagle_provider_sdk::*;
+
+pub mod matching;
