@@ -84,7 +84,15 @@ export component MenuItem inherits Rectangle {
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    public function focus-item() { focus.focus(); }
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.t.tx;
     background: touch.has-hover ? Theme.hover : transparent;
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
     Text { x: 10px; width: parent.width - 20px; text: root.text; color: root.enabled ? Theme.t.tx : Theme.t.tx2; font-size: Type.meta; font-weight: 500; vertical-alignment: center; overflow: elide; }
     touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }

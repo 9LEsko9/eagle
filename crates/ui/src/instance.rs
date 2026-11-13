@@ -42,7 +42,7 @@ impl Instance {
                     Err(error) => return Err(error),
                 }
                 let listener = TcpListener::bind("127.0.0.1:0")?;
-                let activation = Activation::start(listener, lock)?;
+                let activation = Activation::start(listener, Lock::Instance(lock))?;
                 let temporary = root.join("desktop.port.tmp");
                 fs::write(&temporary, activation.address.port().to_string())?;
                 fs::rename(temporary, port_path)?;
@@ -79,12 +79,31 @@ impl Instance {
         }
     }
 }
+#[allow(dead_code)]
+enum Lock {
+    Instance(File),
+    Storage(Arc<eagle_store::relocation::StorageLease>),
+}
+impl Primary {
+    pub fn claim_empty(
+        root: &Path,
+    ) -> io::Result<(Self, Arc<eagle_store::relocation::StorageLease>)> {
+        let lease = Arc::new(eagle_store::relocation::StorageLease::claim_empty(root)?);
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let activation = Activation::start(listener, Lock::Storage(lease.clone()))?;
+        fs::write(
+            root.join("desktop.port"),
+            activation.address.port().to_string(),
+        )?;
+        Ok((Self { activation }, lease))
+    }
+}
 pub struct Activation {
     stopping: Arc<AtomicBool>,
     address: std::net::SocketAddr,
     worker: Option<thread::JoinHandle<()>>,
     handler: Arc<Mutex<Handler>>,
-    _lock: File,
+    _lock: Lock,
 }
 impl Primary {
     pub fn listen(self, activate: impl Fn() + Send + 'static) -> io::Result<Activation> {
@@ -104,7 +123,7 @@ impl Primary {
     }
 }
 impl Activation {
-    fn start(listener: TcpListener, lock: File) -> io::Result<Self> {
+    fn start(listener: TcpListener, lock: Lock) -> io::Result<Self> {
         let address = listener.local_addr()?;
         let stopping = Arc::new(AtomicBool::new(false));
         let stopped = stopping.clone();

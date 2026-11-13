@@ -96,7 +96,7 @@ impl Store {
         let track = track.to_string();
         self.write(move |c| {
             c.execute(
-                "INSERT INTO downloads(account,track,quality,state) VALUES(?1,?2,?3,'queued') ON CONFLICT(account,track,quality) DO NOTHING",
+                "INSERT INTO downloads(account,track,quality,state) VALUES(?1,?2,?3,'queued') ON CONFLICT(account,track,quality) DO UPDATE SET state='queued',revision=downloads.revision+1,error=NULL WHERE downloads.state='cancelled'",
                 params![account, track, quality.key()],
             )?;
             Ok(())
@@ -125,7 +125,7 @@ impl Store {
         self.write(move |c| {
             let tx = c.transaction()?;
             for track in tracks {
-                tx.execute("INSERT INTO downloads(account,track,quality,state) VALUES(?1,?2,?3,'queued') ON CONFLICT(account,track,quality) DO NOTHING", params![account, track, quality.key()])?;
+                tx.execute("INSERT INTO downloads(account,track,quality,state) VALUES(?1,?2,?3,'queued') ON CONFLICT(account,track,quality) DO UPDATE SET state='queued',revision=downloads.revision+1,error=NULL WHERE downloads.state='cancelled'", params![account, track, quality.key()])?;
             }
             tx.commit()?;
             Ok(())
@@ -267,6 +267,57 @@ mod tests {
         assert_eq!(store.downloads("a").unwrap().len(), 100);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn saving_again_requeues_only_cancelled_jobs() {
+        for batch in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("eg-resave-{}-{batch}", std::process::id()));
+            let store = Store::open(&root).unwrap();
+            let track = "yandex:1".parse().unwrap();
+            let enqueue = || {
+                if batch {
+                    store
+                        .enqueue_downloads("a", std::slice::from_ref(&track), Quality::High)
+                        .unwrap();
+                } else {
+                    store.enqueue_download("a", &track, Quality::High).unwrap();
+                }
+            };
+            enqueue();
+            let stale = store.claim_download("a").unwrap().unwrap();
+            enqueue();
+            assert_eq!(store.downloads("a").unwrap()[0].revision, stale.revision);
+            store
+                .control_download("a", stale.id, DownloadState::Cancelled)
+                .unwrap();
+            let cancelled_revision = store.downloads("a").unwrap()[0].revision;
+            enqueue();
+            let queued = &store.downloads("a").unwrap()[0];
+            assert_eq!(queued.state, DownloadState::Queued);
+            assert!(queued.revision > cancelled_revision);
+            let job = store.claim_download("a").unwrap().unwrap();
+            assert!(!store.finish_download(&stale, true).unwrap());
+            assert!(store.finish_download(&job, true).unwrap());
+            enqueue();
+            assert_eq!(
+                store.downloads("a").unwrap()[0].state,
+                DownloadState::AudioReady
+            );
+            let ready = store.claim_download("a").unwrap().unwrap();
+            assert!(store.finish_saved_download(&ready).unwrap());
+            enqueue();
+            assert_eq!(store.downloads("a").unwrap()[0].state, DownloadState::Saved);
+            store.forget_saved("a", ready.id).unwrap().unwrap();
+            enqueue();
+            assert_eq!(
+                store.downloads("a").unwrap()[0].state,
+                DownloadState::Queued
+            );
+            assert!(store.claim_download("a").unwrap().is_some());
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
     #[test]
     fn quality_failure_is_durable_and_cannot_override_cancellation() {

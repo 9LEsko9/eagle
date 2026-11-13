@@ -133,6 +133,7 @@ pub enum Command {
     RelocateStorage {
         destination: PathBuf,
         bootstrap: PathBuf,
+        lease: Option<Arc<eagle_store::relocation::StorageLease>>,
     },
     RemoveSaved(i64),
     Save {
@@ -1010,6 +1011,7 @@ impl Worker {
                     Message::Command(Command::RelocateStorage {
                         destination,
                         bootstrap,
+                        lease,
                     }) => {
                         if let Err(error) = self.checkpoint() {
                             (self.emit)(Event::Error(format!(
@@ -1017,7 +1019,7 @@ impl Worker {
                             )));
                             continue;
                         }
-                        self = self.move_storage(destination, bootstrap)?;
+                        self = self.move_storage(destination, bootstrap, lease)?;
                         continue 'session;
                     }
                     Message::Command(Command::Shutdown) => {
@@ -1231,7 +1233,12 @@ impl Worker {
             return Ok(());
         }
     }
-    fn move_storage(mut self, destination: PathBuf, bootstrap: PathBuf) -> Result<Self> {
+    fn move_storage(
+        mut self,
+        destination: PathBuf,
+        bootstrap: PathBuf,
+        lease: Option<Arc<eagle_store::relocation::StorageLease>>,
+    ) -> Result<Self> {
         (self.emit)(Event::StorageMoving(true));
         self.stop_engine();
         self.catalog.take();
@@ -1267,7 +1274,14 @@ impl Worker {
         } = self;
         drop(downloads);
         drop(covers);
-        let outcome = crate::storage::relocate(store, cache, &root, &destination, &bootstrap)?;
+        let outcome = crate::storage::relocate(
+            store,
+            cache,
+            &root,
+            &destination,
+            &bootstrap,
+            lease.as_deref(),
+        )?;
         let mut next = match outcome {
             crate::storage::MoveOutcome::Busy { store, cache } => {
                 (emit)(Event::Error(
@@ -1449,28 +1463,7 @@ impl Worker {
         if let Some(playlist) = created {
             (self.emit)(Event::PlaylistCreated(playlist.id.clone()));
             if generation == self.view_generation {
-                self.playlist_id = Some(playlist.id.clone());
-                self.title.clear();
-                self.header = Header::default();
-                self.header_job = None;
-                self.length = Duration::ZERO;
-                self.view = View::Playlist;
-                self.view_generation += 1;
-                (self.emit)(Event::View(View::Playlist));
-                self.publish(Vec::new());
-                self.cards.clear();
-                self.title = playlist.title.clone();
-                self.length = Duration::ZERO;
-                (self.emit)(Event::Collection {
-                    title: playlist.title,
-                    length: Duration::ZERO,
-                });
-                self.header = Header {
-                    id: playlist.id.to_string(),
-                    deletable: true,
-                    ..Header::default()
-                };
-                (self.emit)(Event::Header(self.header.clone()));
+                self.command(Command::Playlist(playlist.id))?;
             }
         } else if let Some(id) = deleted {
             (self.emit)(Event::PlaylistDeleted(id.clone()));
@@ -4215,10 +4208,13 @@ mod delta_tests {
         .unwrap();
         let sender = session.sender();
         sender.send(Command::EnqueueNext(track.id.clone())).unwrap();
+        let lease =
+            Arc::new(eagle_store::relocation::StorageLease::claim_empty(&destination).unwrap());
         sender
             .send(Command::RelocateStorage {
                 destination: destination.clone(),
                 bootstrap,
+                lease: Some(lease.clone()),
             })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -4232,6 +4228,15 @@ mod delta_tests {
                 break;
             }
         }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination.join("desktop.lock"))
+            .unwrap();
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
         sender.send(Command::Snapshot).unwrap();
         loop {
             if let Event::Snapshot(snapshot) =
@@ -4252,6 +4257,8 @@ mod delta_tests {
         assert!(std::path::Path::new(&path).starts_with(destination.canonicalize().unwrap()));
         assert!(source.join("metadata.sqlite").exists());
         drop(store);
+        drop(lease);
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -4825,6 +4832,60 @@ mod sync_tests {
             }
             result.revision += 1;
             Ok(result)
+        }
+    }
+    #[test]
+    fn created_playlist_loads_snapshot_and_handles_snapshot_failure() {
+        for mode in [0, 3] {
+            let mut c = catalog(false);
+            let playlist = Playlist {
+                id: "yandex:1_13".parse().unwrap(),
+                title: "new".into(),
+                tracks: vec![],
+                cover: None,
+            };
+            c.store
+                .put_json(
+                    "playlists",
+                    &playlist.id.to_string(),
+                    serde_json::to_string(&playlist).unwrap(),
+                )
+                .unwrap();
+            c.provider = Arc::new(EditFixture {
+                snapshot: PlaylistSnapshot {
+                    playlist: playlist.clone(),
+                    revision: 7,
+                },
+                mode,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let root = c.root.join("worker");
+            let (tx, _) = mpsc::channel();
+            let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+            worker.catalog.take();
+            worker.catalog_worker.take().unwrap().join().unwrap();
+            let (catalog_tx, catalog_rx) = mpsc::channel();
+            worker.catalog = Some(catalog_tx);
+            worker
+                .playlist_changed(worker.view_generation, vec![], Some(playlist.clone()), None)
+                .unwrap();
+            let request = catalog_rx.recv().unwrap();
+            assert!(
+                matches!(&request, CatalogRequest::Command(_, Command::Playlist(id)) if *id == playlist.id)
+            );
+            let CatalogReply::Page {
+                header,
+                playlist_snapshot,
+                ..
+            } = c.request(request).unwrap()
+            else {
+                panic!("expected playlist page");
+            };
+            assert_eq!(header.editable, mode == 0);
+            assert_eq!(header.playlist_revision, (mode == 0).then_some(7));
+            assert_eq!(playlist_snapshot.is_some(), mode == 0);
+            drop(worker);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
     #[test]

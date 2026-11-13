@@ -1483,6 +1483,7 @@ dependencies = [
  "eagle-engine",
  "eagle-palette",
  "eagle-platform",
+ "eagle-store",
  "i-slint-backend-testing",
  "image",
  "ksni",

@@ -47,6 +47,11 @@ struct Shell {
     software: bool,
     window: Option<DesktopWindow>,
     waiting_snapshot: bool,
+    storage_locks: Vec<(
+        PathBuf,
+        Arc<eagle_store::relocation::StorageLease>,
+        instance::Activation,
+    )>,
 }
 thread_local! { static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) }; }
 
@@ -65,6 +70,28 @@ fn claim_instances(
         }
     }
     Ok(Some(primaries))
+}
+
+// Recovery may select a directory outside both initially locked roots.
+fn claim_resolved(
+    root: &std::path::Path,
+    original: &std::path::Path,
+    bootstrap: &std::path::Path,
+    primaries: &mut Vec<instance::Primary>,
+) -> std::io::Result<bool> {
+    let resolved = std::fs::canonicalize(root)?;
+    for path in [original, bootstrap] {
+        if std::fs::canonicalize(path)? == resolved {
+            return Ok(true);
+        }
+    }
+    match instance::Instance::claim(root)? {
+        instance::Instance::Primary(primary) => {
+            primaries.push(primary);
+            Ok(true)
+        }
+        instance::Instance::Activated => Ok(false),
+    }
 }
 
 pub fn run(root: PathBuf, software: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -98,14 +125,20 @@ fn run_inner(
     software: bool,
     provider: Option<Arc<dyn eagle_core::Provider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(primaries) = claim_instances(&root, &bootstrap_root)? else {
+    let Some(mut primaries) = claim_instances(&root, &bootstrap_root)? else {
         return Ok(());
     };
+    let original_root = root.clone();
     let root = if provider.is_none() {
         eagle_app::resolve_storage(root, &bootstrap_root)?
     } else {
         root
     };
+    if provider.is_none()
+        && !claim_resolved(&root, &original_root, &bootstrap_root, &mut primaries)?
+    {
+        return Ok(());
+    }
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name(if software { "software" } else { "skia" }.into())
@@ -155,6 +188,7 @@ fn run_inner(
             software,
             window: None,
             waiting_snapshot: false,
+            storage_locks: Vec::new(),
         })
     });
     let event_media = media.handle();
@@ -271,16 +305,19 @@ fn run_inner(
         None
     };
     let result = slint::run_event_loop_until_quit();
-    SHELL.with(|shell| {
-        if let Some(shell) = shell.borrow_mut().take()
+    let storage_locks = SHELL.with(|shell| {
+        let shell = shell.borrow_mut().take();
+        if let Some(shell) = &shell
             && shell.window.is_some()
         {
             let _ = shell.sender.send(Command::UiAttached(false));
         }
+        shell.map(|shell| shell.storage_locks)
     });
     bridge::clear();
-    drop(activations);
     drop(session);
+    drop(activations);
+    drop(storage_locks);
     let _ = dispatcher.join();
     media.shutdown();
     result?;
@@ -493,8 +530,8 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
     let weak = ui.as_weak();
     ui.global::<Actions>().on_move_storage(move |destination| {
         SHELL.with(|shell| {
-            let shell = shell.borrow();
-            let Some(shell) = shell.as_ref() else {
+            let mut shell = shell.borrow_mut();
+            let Some(shell) = shell.as_mut() else {
                 return;
             };
             if shell.fixture || shell.root.join(".eagle-fixture").exists() {
@@ -504,10 +541,39 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return;
             }
-            if let Err(error) = shell.sender.send(Command::RelocateStorage {
-                destination: destination.as_str().into(),
-                bootstrap: shell.bootstrap_root.clone(),
-            }) && let Some(ui) = weak.upgrade()
+            let destination = PathBuf::from(destination.as_str());
+            let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let canonical = std::fs::canonicalize(&destination)?;
+                let lease = if let Some((_, lease, _)) = shell
+                    .storage_locks
+                    .iter()
+                    .find(|(path, _, _)| *path == canonical)
+                {
+                    lease.clone()
+                } else {
+                    let (primary, lease) = instance::Primary::claim_empty(&canonical)?;
+                    let activation = primary.listen(|| {
+                        let _ = slint::invoke_from_event_loop(|| {
+                            let _ = show_window();
+                        });
+                    })?;
+                    shell
+                        .storage_locks
+                        .push((canonical, lease.clone(), activation));
+                    lease
+                };
+                shell
+                    .sender
+                    .send(Command::RelocateStorage {
+                        destination,
+                        bootstrap: shell.bootstrap_root.clone(),
+                        lease: Some(lease),
+                    })
+                    .map_err(|_| "session stopped")?;
+                Ok(())
+            })();
+            if let Err(error) = result
+                && let Some(ui) = weak.upgrade()
             {
                 ui.global::<Ui>().set_error(error.to_string().into());
             }
@@ -699,6 +765,25 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
+    fn recovered_storage_is_locked_before_session_starts() {
+        let base =
+            std::env::temp_dir().join(format!("eagle-recovered-lock-{}", std::process::id()));
+        let (original, bootstrap, active) = (
+            base.join("original"),
+            base.join("bootstrap"),
+            base.join("active"),
+        );
+        std::fs::create_dir_all(&active).unwrap();
+        let mut primaries = claim_instances(&original, &bootstrap).unwrap().unwrap();
+        assert!(claim_resolved(&active, &original, &bootstrap, &mut primaries).unwrap());
+        assert!(matches!(
+            instance::Instance::claim(&active).unwrap(),
+            instance::Instance::Activated
+        ));
+        drop(primaries);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
     fn recreated_window_waits_for_latest_snapshot_and_drops_old_events() {
         let mut waiting = true;
         assert!(!accept_event(&mut waiting, false, true, true));
@@ -752,6 +837,30 @@ mod tests {
             .unwrap()
             .invoke_accessible_default_action();
         assert_eq!(&*liked.borrow(), "yandex:1");
+        let saved = Rc::new(RefCell::new(String::new()));
+        ui.global::<Actions>().on_save({
+            let saved = saved.clone();
+            move |id| *saved.borrow_mut() = id.to_string()
+        });
+        ElementHandle::find_by_accessible_label(&ui, "Ещё")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: "\n".into() });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyReleased { text: "\n".into() });
+        assert_eq!(&*saved.borrow(), "yandex:1");
+        saved.borrow_mut().clear();
+        ElementHandle::find_by_accessible_label(&ui, "Ещё")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: " ".into() });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyReleased { text: " ".into() });
+        assert_eq!(&*saved.borrow(), "yandex:1");
         let toggles = Rc::new(RefCell::new(0));
         ui.global::<Actions>().on_toggle_play({
             let toggles = toggles.clone();

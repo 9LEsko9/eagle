@@ -52,7 +52,7 @@ export component TrackMenu inherits Rectangle {
             VerticalLayout {
                 padding: 5px;
                 if Ui.route != Route.radio : MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
-                MenuItem { text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
+                MenuItem { init => { self.focus-item(); } text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
                 if root.editable : MenuItem { text: @tr("Переместить выше"); enabled: root.item.album-id != "" && root.row-index > 0 && !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 1); popup.close(); } }

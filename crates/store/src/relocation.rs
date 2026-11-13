@@ -8,6 +8,38 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Exclusive ownership of a relocation destination without managed content.
+/// The lease must outlive every writer using the destination.
+#[derive(Debug)]
+pub struct StorageLease {
+    root: PathBuf,
+    _lock: File,
+}
+impl StorageLease {
+    pub fn claim_empty(root: &Path) -> io::Result<Self> {
+        let root = root.canonicalize()?;
+        let lock = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("desktop.lock"))?;
+        lock.try_lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if !matches!(
+                entry.file_name().to_str(),
+                Some("desktop.lock" | "desktop.port")
+            ) || !entry.file_type()?.is_file()
+            {
+                return Err(io::Error::other("destination is not empty"));
+            }
+        }
+        Ok(Self { root, _lock: lock })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Journal {
     source: PathBuf,
@@ -103,10 +135,18 @@ fn digest(path: &Path) -> io::Result<[u8; 32]> {
     }
     Ok(hash.finalize().into())
 }
-fn copy_tree(source: &Path, destination: &Path, temp_root: &Path) -> io::Result<()> {
+fn copy_tree(source: &Path, destination: &Path, temp_root: &Path, top: bool) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        if top
+            && matches!(
+                entry.file_name().to_str(),
+                Some("desktop.lock" | "desktop.port" | "desktop.port.tmp")
+            )
+        {
+            continue;
+        }
         let source = entry.path();
         let destination = destination.join(entry.file_name());
         let kind = entry.file_type()?;
@@ -118,7 +158,7 @@ fn copy_tree(source: &Path, destination: &Path, temp_root: &Path) -> io::Result<
                     "destination directory changed during relocation",
                 ));
             }
-            copy_tree(&source, &destination, temp_root)?;
+            copy_tree(&source, &destination, temp_root, false)?;
         } else if kind.is_file() {
             if let Ok(metadata) = fs::symlink_metadata(&destination) {
                 if metadata.file_type().is_file() && digest(&source)? == digest(&destination)? {
@@ -166,20 +206,32 @@ pub fn relocate(
     bootstrap: &Path,
     source: &Path,
     destination: &Path,
+    lease: Option<&StorageLease>,
 ) -> io::Result<()> {
     if source.canonicalize()? != permit.0 {
         return Err(io::Error::other("move permit does not match source"));
     }
-    relocate_quiesced(bootstrap, source, destination)
+    relocate_with_lease(bootstrap, source, destination, lease, |_| Ok(()))
 }
+#[cfg(test)]
 fn relocate_quiesced(bootstrap: &Path, source: &Path, destination: &Path) -> io::Result<()> {
     relocate_with_fault(bootstrap, source, destination, |_| Ok(()))
 }
 
+#[cfg(test)]
 fn relocate_with_fault(
     bootstrap: &Path,
     source: &Path,
     destination: &Path,
+    fault: impl Fn(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    relocate_with_lease(bootstrap, source, destination, None, fault)
+}
+fn relocate_with_lease(
+    bootstrap: &Path,
+    source: &Path,
+    destination: &Path,
+    lease: Option<&StorageLease>,
     fault: impl Fn(&str) -> io::Result<()>,
 ) -> io::Result<()> {
     let journal_path = &bootstrap.join("relocation.json");
@@ -197,6 +249,9 @@ fn relocate_with_fault(
         .ok_or_else(|| io::Error::other("journal needs a parent"))?
         .canonicalize()?;
     let destination = destination.canonicalize()?;
+    if lease.is_some_and(|lease| lease.root != destination) {
+        return Err(io::Error::other("destination lease does not match"));
+    }
     if source.starts_with(&destination)
         || destination.starts_with(&source)
         || journal_parent.starts_with(&source)
@@ -211,7 +266,16 @@ fn relocate_with_fault(
         }
         journal
     } else {
-        if fs::read_dir(&destination)?.next().is_some() {
+        let owned = lease.is_some_and(|lease| lease.root == destination);
+        if fs::read_dir(&destination)?.any(|entry| {
+            entry.map_or(true, |entry| {
+                !owned
+                    || !matches!(
+                        entry.file_name().to_str(),
+                        Some("desktop.lock" | "desktop.port")
+                    )
+            })
+        }) {
             return Err(io::Error::other("destination is not empty"));
         }
         let journal = Journal {
@@ -230,6 +294,7 @@ fn relocate_with_fault(
             destination
                 .parent()
                 .ok_or_else(|| io::Error::other("destination has no parent"))?,
+            true,
         )?;
         fault("copied")?;
         if !journal.complete {
@@ -288,6 +353,52 @@ pub fn active_path(bootstrap: &Path) -> io::Result<Option<PathBuf>> {
 mod tests {
     use super::*;
     #[test]
+    fn destination_lease_is_required_and_survives_switch() {
+        let base = std::env::temp_dir().join(format!("eagle-lease-{}", std::process::id()));
+        let source = base.join("source");
+        let destination = base.join("destination");
+        let bootstrap = base.join("bootstrap");
+        for path in [&source, &destination, &bootstrap] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(source.join("data"), b"data").unwrap();
+        fs::write(source.join("desktop.port"), b"old").unwrap();
+        let lease = StorageLease::claim_empty(&destination).unwrap();
+        fs::write(destination.join("desktop.port"), b"new").unwrap();
+        assert!(relocate_with_lease(&bootstrap, &source, &destination, None, |_| Ok(())).is_err());
+        relocate_with_lease(&bootstrap, &source, &destination, Some(&lease), |_| Ok(())).unwrap();
+        assert_eq!(fs::read(destination.join("desktop.port")).unwrap(), b"new");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination.join("desktop.lock"))
+            .unwrap();
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(lease);
+        assert!(lock.try_lock().is_ok());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn destination_lease_allows_stale_reserved_files_and_rejects_content() {
+        let base = std::env::temp_dir().join(format!("eagle-lease-foreign-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("desktop.lock"), b"stale").unwrap();
+        fs::write(base.join("desktop.port"), b"old").unwrap();
+        let lease = StorageLease::claim_empty(&base).unwrap();
+        assert!(StorageLease::claim_empty(&base).is_err());
+        drop(lease);
+        assert!(StorageLease::claim_empty(&base).is_ok());
+        fs::write(base.join("metadata.sqlite"), b"keep").unwrap();
+        assert!(StorageLease::claim_empty(&base).is_err());
+        assert_eq!(fs::read(base.join("metadata.sqlite")).unwrap(), b"keep");
+        assert_eq!(fs::read(base.join("desktop.lock")).unwrap(), b"stale");
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
     fn permit_requires_all_cache_readers_and_handles_to_be_released() {
         let root = std::env::temp_dir().join(format!("eg-relocate-permit-{}", std::process::id()));
         let store = std::sync::Arc::new(crate::Store::open(&root).unwrap());
@@ -312,7 +423,7 @@ mod tests {
         for dir in [&other, &dest, &boot] {
             fs::create_dir_all(dir).unwrap();
         }
-        assert!(relocate(permit, &boot, &other, &dest).is_err());
+        assert!(relocate(permit, &boot, &other, &dest, None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

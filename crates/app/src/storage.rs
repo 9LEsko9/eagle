@@ -27,12 +27,13 @@ pub(crate) fn relocate(
     source: &Path,
     destination: &Path,
     bootstrap: &Path,
+    lease: Option<&eagle_store::relocation::StorageLease>,
 ) -> io::Result<MoveOutcome> {
     let permit = match relocation::quiesce(store, cache) {
         Ok(permit) => permit,
         Err((store, cache)) => return Ok(MoveOutcome::Busy { store, cache }),
     };
-    let error = relocation::relocate(permit, bootstrap, source, destination).err();
+    let error = relocation::relocate(permit, bootstrap, source, destination, lease).err();
     // Recovery decides whether the durable switch happened. Never guess on read failure.
     let root = relocation::recover(bootstrap)?.unwrap_or(source.canonicalize()?);
     Ok(MoveOutcome::Reopen { root, error })
@@ -56,7 +57,7 @@ mod tests {
         std::fs::write(destination.join("existing"), b"keep").unwrap();
         let store = Arc::new(Store::open(&source).unwrap());
         let cache = Arc::new(Cache::open(&source.join("audio"), 100, &store).unwrap());
-        match relocate(store, cache, &source, &destination, &bootstrap).unwrap() {
+        match relocate(store, cache, &source, &destination, &bootstrap, None).unwrap() {
             MoveOutcome::Reopen {
                 root,
                 error: Some(_),
@@ -84,13 +85,13 @@ mod tests {
         let cache = Arc::new(Cache::open(&source.join("audio"), 100, &store).unwrap());
         let extra = store.clone();
         let (store, cache) =
-            match relocate(store, cache, &source, &destination, &bootstrap).unwrap() {
+            match relocate(store, cache, &source, &destination, &bootstrap, None).unwrap() {
                 MoveOutcome::Busy { store, cache } => (store, cache),
                 _ => panic!("unexpected move while in use"),
             };
         assert!(Arc::ptr_eq(&store, &extra));
         drop(extra);
-        match relocate(store, cache, &source, &destination, &bootstrap).unwrap() {
+        match relocate(store, cache, &source, &destination, &bootstrap, None).unwrap() {
             MoveOutcome::Reopen { root, error: None } => {
                 assert_eq!(root, destination.canonicalize().unwrap())
             }

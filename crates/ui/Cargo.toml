@@ -11,6 +11,7 @@ license = "GPL-3.0-or-later"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 eagle-app = { path = "../app" }
+eagle-store = { path = "../store" }
 eagle-core = { path = "../core" }
 eagle-platform = { path = "../platform" }
 eagle-engine = { path = "../engine" }

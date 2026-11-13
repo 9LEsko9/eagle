@@ -4,7 +4,7 @@ This record separates implemented behavior, automated evidence, and hardware acc
 
 Completion states remain separate: **code and all required automatic checks ready — not yet** (rename/feedback contracts and cross-platform CI remain open); **full desktop beta accepted — no** (resource budget and hardware gates remain open). Passing local checks of the implemented subset does not change either full-plan status.
 
-The incoming working tree was preserved in local commit `9735e02` (parent `4824682`). Its provenance is the incoming uncommitted work, not newly authored changes from this run. The original patch, `instance.rs` patch and first test logs are kept locally in `.review/desktop-beta-start/`. No changes were pushed.
+The incoming working tree was preserved in commit `9735e02` (parent `4824682`). Its provenance is the incoming uncommitted work, not newly authored changes from this run. The original patch, `instance.rs` patch and first test logs are kept locally in `.review/desktop-beta-start/`. Preservation and initial integration were performed locally before the user requested a pull request.
 
 The measured implementation is local commit `b7037d2`. Its normal release binary has SHA-256 `c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97`.
 
@@ -23,6 +23,20 @@ Repeat the native fixture from the user's normal graphical terminal after restor
 The real player had survived a WindowServer restart and retained both single-instance locks. Ordinary new launches therefore activated that orphan and exited. After a private SQLite backup and termination of only the verified old process, the user launched the new release from Terminal and confirmed that its window appeared. This restores ordinary startup; automated native fixtures in the tool context remain unverified. The code does not yet automatically recover an orphan after a graphical-session failure.
 
 The native macOS title bar now takes the selected theme's opaque background, with a matching light/dark appearance. Auto mode releases the native appearance override and reconciles the actual system theme through a weak, deferred callback. It adds no polling timer. The user confirmed the visible title-bar correction on the new release (SHA-256 `cce4ea9a4355c6c1bd7fa65babb64f9843355401b0bb081c0cf947269f35bb66`). UI tests (8), formatting, UI/all-targets clippy with `-D warnings`, Rust 1.92 and release build passed. The complete native theme-switch/fullscreen/reopen matrix has not been performed.
+
+### Pull-request review
+
+Three `gpt-6.1-terra` reviewers performed six focused passes: shell/platform lifetime; storage/downloads/account isolation; Yandex/Session contracts; UI interaction; CI/platform configuration; and engine/covers/measurement code. Findings received follow-up review by a different reviewer. These were local source and fixture reviews, not hardware acceptance or completed remote CI.
+
+- Recovered storage is locked before Session opens it. Relocation holds an opaque destination lease before copying and through Session shutdown; source activation files are excluded from the copy. Existing reserved lock files can be reclaimed after process exit, and lock files are never unlinked during acquisition failure.
+- Save and Save All requeue cancelled jobs with a new revision. Running, AudioReady and Saved jobs retain their state; stale completion remains rejected.
+- A newly created playlist uses the ordinary snapshot-loading route, including its read-only fallback on retrieval failure.
+- Track-menu items accept keyboard focus and Enter/Space. A headless test exercises activation after opening; complete native Tab traversal remains unverified.
+- Cancelling artwork releases the cover worker while an existing network worker may finish its socket operation. A stalled local HTTP fixture checks that dropping Covers returns within two seconds and does not write the cache. This does **not** bound full process shutdown: DNS, Client destruction and other outstanding network work may still delay it.
+
+Relocation limitations remain explicit: a failed attempt retains its destination lease until the process exits, and retry after a partial copy requires a new empty destination. Recovery keeps the source authoritative before the durable switch; it does not automatically clear the partial destination. The lease change does not establish general power-loss or cross-volume acceptance.
+
+The reviewed changes passed 189 workspace tests, workspace/all-target clippy with `-D warnings`, formatting, seven Python tests and Rust 1.92 workspace/all-target checking. Clippy initially rejected an incomplete HTTP-header read in the new cancellation fixture; after correcting that fixture, its focused test and the complete clippy/MSRV checks passed again. Logs and detailed reviewer reports remain local under `.review/`. These fixes have not received a new native release measurement or platform CI run.
 
 ## Implemented paths
 

@@ -4,7 +4,7 @@ use eagle_core::{SignedUrl, Token};
 pub mod growing;
 pub mod policy;
 pub mod system_network;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
     io::Read,
@@ -166,7 +166,21 @@ impl Client {
         request: Request,
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
     ) -> Result<Response, Error> {
-        self.perform(priority, request, refresh, None)
+        self.perform(priority, request, refresh, None, None)
+    }
+    /// Cancellation releases the caller; an in-flight socket or DNS lookup may finish later.
+    /// This operation does not accept a sink and never retries.
+    pub fn request_cancellable(
+        &self,
+        priority: Priority,
+        request: Request,
+        cancelled: Arc<AtomicBool>,
+        timeout: Duration,
+    ) -> Result<Response, Error> {
+        if request.method != "GET" {
+            return Err(Error::Source("отменяемый запрос допускает только GET"));
+        }
+        self.perform(priority, request, None, None, Some((cancelled, timeout)))
     }
     pub fn request_into(
         &self,
@@ -174,7 +188,7 @@ impl Client {
         request: Request,
         sink: Arc<dyn BodySink>,
     ) -> Result<Response, Error> {
-        self.perform(priority, request, None, Some(sink))
+        self.perform(priority, request, None, Some(sink), None)
     }
     fn perform(
         &self,
@@ -182,11 +196,18 @@ impl Client {
         mut request: Request,
         refresh: Option<&(dyn Fn() -> Result<Token, Error> + Sync)>,
         sink: Option<Arc<dyn BodySink>>,
+        cancellation: Option<(Arc<AtomicBool>, Duration)>,
     ) -> Result<Response, Error> {
         if request.body.is_some() && (request.method != "POST" || !request.form.is_empty()) {
             return Err(Error::Source("тело запроса требует POST без form"));
         }
         for attempt in 0..4 {
+            if cancellation
+                .as_ref()
+                .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+            {
+                return Err(Error::Stopped);
+            }
             // Refresh happens outside workers to avoid deadlock if the hook uses this client.
             let (tx, rx) = mpsc::sync_channel(1);
             let url = request.url.clone();
@@ -199,6 +220,7 @@ impl Client {
             let limit = request.limit;
             let counters = self.counters.clone();
             let sink = sink.clone();
+            let cancel_job = cancellation.clone();
             {
                 let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
                 if s.stopping {
@@ -209,6 +231,12 @@ impl Client {
                 }
                 s.queues[priority as usize].push_back(Box::new(move |agent| {
                     let result = (|| {
+                        if cancel_job
+                            .as_ref()
+                            .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+                        {
+                            return Err(Error::Stopped);
+                        }
                         let mut current =
                             url::Url::parse(url.expose()).map_err(|_| Error::Network)?;
                         if !matches!(current.scheme(), "http" | "https")
@@ -220,10 +248,19 @@ impl Client {
                             ));
                         }
                         for redirect in 0..=5 {
+                            if cancel_job
+                                .as_ref()
+                                .is_some_and(|(flag, _)| flag.load(Ordering::Acquire))
+                            {
+                                return Err(Error::Stopped);
+                            }
                             counters.requests.fetch_add(1, Ordering::Relaxed);
                             let mut req = agent
                                 .request(method, current.as_str())
                                 .set("Accept-Encoding", "identity");
+                            if let Some((_, timeout)) = &cancel_job {
+                                req = req.timeout(*timeout);
+                            }
                             for (k, v) in &headers {
                                 req = req.set(k, v);
                             }
@@ -320,10 +357,22 @@ impl Client {
                                 });
                             }
                             let mut bytes = Vec::new();
-                            let read_result = response
-                                .into_reader()
-                                .take(limit as u64 + 1)
-                                .read_to_end(&mut bytes);
+                            let mut reader = response.into_reader().take(limit as u64 + 1);
+                            let read_result = if let Some((flag, _)) = &cancel_job {
+                                let mut buffer = [0; 8192];
+                                loop {
+                                    if flag.load(Ordering::Acquire) {
+                                        break Err(std::io::Error::other("cancelled"));
+                                    }
+                                    match reader.read(&mut buffer) {
+                                        Ok(0) => break Ok(()),
+                                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                                        Err(error) => break Err(error),
+                                    }
+                                }
+                            } else {
+                                reader.read_to_end(&mut bytes).map(|_| ())
+                            };
                             counters
                                 .response_bytes
                                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -344,7 +393,23 @@ impl Client {
                 }));
                 self.shared.ready.notify_one();
             }
-            let result = rx.recv().map_err(|_| Error::Stopped)?;
+            let result = if let Some((flag, _)) = &cancellation {
+                loop {
+                    if flag.load(Ordering::Acquire) {
+                        return Err(Error::Stopped);
+                    }
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(result) => break result,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Stopped),
+                    }
+                }
+            } else {
+                rx.recv().map_err(|_| Error::Stopped)?
+            };
+            if cancellation.is_some() {
+                return result;
+            }
             if attempt < 3 {
                 if matches!(result, Err(Error::Status(401)))
                     && let Some(refresh) = refresh
