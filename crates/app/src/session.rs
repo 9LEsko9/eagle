@@ -3047,6 +3047,8 @@ enum CatalogRequest {
         online: bool,
     },
 }
+// A reply crosses the channel once per request, so the size of `Page` is not a hot-path cost.
+#[allow(clippy::large_enum_variant)]
 enum CatalogReply {
     RadioResult(String, bool, std::result::Result<RadioSession, RadioError>),
     Collections(Vec<Collection>),

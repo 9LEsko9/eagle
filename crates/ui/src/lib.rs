@@ -857,6 +857,23 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
     });
     Ok(())
 }
+fn record_fixture_window(root: &std::path::Path, stage: &str) {
+    let value = SHELL.with(|shell| {
+        let shell = shell.borrow();
+        let shell = shell.as_ref()?;
+        let size = shell.window.as_ref().map(|ui| ui.window().size());
+        Some(serde_json::json!({
+            "stage": stage,
+            "surface_physical_pixels": size.map(|size| [size.width, size.height]),
+            "scale_factor": shell.window.as_ref().map(|ui| ui.window().scale_factor()),
+            "window_open": shell.open.load(Ordering::Acquire),
+            "visible_to_user": shell.visible.load(Ordering::Acquire),
+        }))
+    });
+    if let Some(value) = value {
+        let _ = std::fs::write(root.join("fixture-window.json"), value.to_string());
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,23 +1168,5 @@ mod tests {
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(10));
         slint::platform::update_timers_and_animations();
         assert_eq!(*positions.borrow(), before);
-    }
-}
-
-fn record_fixture_window(root: &std::path::Path, stage: &str) {
-    let value = SHELL.with(|shell| {
-        let shell = shell.borrow();
-        let shell = shell.as_ref()?;
-        let size = shell.window.as_ref().map(|ui| ui.window().size());
-        Some(serde_json::json!({
-            "stage": stage,
-            "surface_physical_pixels": size.map(|size| [size.width, size.height]),
-            "scale_factor": shell.window.as_ref().map(|ui| ui.window().scale_factor()),
-            "window_open": shell.open.load(Ordering::Acquire),
-            "visible_to_user": shell.visible.load(Ordering::Acquire),
-        }))
-    });
-    if let Some(value) = value {
-        let _ = std::fs::write(root.join("fixture-window.json"), value.to_string());
     }
 }
