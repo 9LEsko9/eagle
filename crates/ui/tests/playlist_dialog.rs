@@ -1,3 +1,5 @@
+#![cfg(not(any(target_os = "android", target_os = "ios")))]
+
 use eagle_ui::{Actions, DesktopWindow, Motion, Ui};
 use slint::ComponentHandle;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
