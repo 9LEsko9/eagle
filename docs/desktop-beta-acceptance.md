@@ -42,6 +42,8 @@ PR #5 subsequently published `42b6d39`. Its first CI run passed the complete mac
 
 The conflict with main was a squash-history divergence: `4824682` and main differed only in `instance.rs`, whose main version was already present in preserved commit `9735e02`. A reconciliation merge records main ancestry without changing the reviewed source tree.
 
+The follow-up CI on `e404941` passed dependencies, Android, iOS and MSRV. Windows then reached the tray builder and exposed a macOS-only `with_icon_templated` call. Tray construction now uses that method only under macOS and the ordinary `with_icon` method under Windows; the compiler-suggested `with_icon_as_template` was avoided because it is deprecated and takes a boolean. Formatting and dependency-source verification passed; Windows compilation still requires the next CI run.
+
 ## Implemented paths
 
 | Area | Behavior | Evidence required for acceptance |

@@ -66,12 +66,15 @@ impl Tray {
             action(&sender, event.id.as_ref())
         }));
         let icon = tray_icon::Icon::from_rgba(icon(), 16, 16)?;
-        let tray = tray_icon::TrayIconBuilder::new()
+        let builder = tray_icon::TrayIconBuilder::new()
             .with_tooltip("eagle")
             .with_menu_on_left_click(false)
-            .with_icon_templated(icon)
-            .with_menu(Box::new(menu))
-            .build()?;
+            .with_menu(Box::new(menu));
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(target_os = "windows")]
+        let builder = builder.with_icon(icon);
+        let tray = builder.build()?;
         Ok(Self {
             icon: tray,
             previous,
