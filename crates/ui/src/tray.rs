@@ -67,12 +67,15 @@ impl Tray {
         }));
         let (pixels, width, height) = icon()?;
         let icon = tray_icon::Icon::from_rgba(pixels, width, height)?;
-        let tray = tray_icon::TrayIconBuilder::new()
+        let builder = tray_icon::TrayIconBuilder::new()
             .with_tooltip("eagle")
             .with_menu_on_left_click(false)
-            .with_icon_templated(icon)
-            .with_menu(Box::new(menu))
-            .build()?;
+            .with_menu(Box::new(menu));
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(target_os = "windows")]
+        let builder = builder.with_icon(icon);
+        let tray = builder.build()?;
         Ok(Self {
             icon: tray,
             previous,
@@ -117,7 +120,7 @@ impl ksni::Tray for LinuxTray {
         let Ok((mut pixels, width, height)) = icon() else {
             return Vec::new();
         };
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.rotate_right(1);
         }
         vec![ksni::Icon {

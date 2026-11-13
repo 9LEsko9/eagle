@@ -103,9 +103,9 @@ fn replace(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> io::Result<()> {
+fn sync_dir(_path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    File::open(path)?.sync_all()?;
+    File::open(_path)?.sync_all()?;
     Ok(())
 }
 fn persist(path: &Path, journal: &Journal) -> io::Result<()> {
