@@ -12,4 +12,3 @@ license.workspace = true
 [dependencies]
 anyhow = "1"
 resvg = "0.50"
-tiny-skia = "0.12"

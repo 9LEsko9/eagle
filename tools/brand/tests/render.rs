@@ -62,3 +62,12 @@ fn palette_constants_and_rgb_parse() {
     assert_eq!(palette::rgb(GOLD), [0xE9, 0xA2, 0x3B]);
     assert_eq!(palette::rgb("#000000"), [0, 0, 0]);
 }
+
+#[test]
+fn rgb_returns_black_for_malformed_hex() {
+    for bad in [
+        "#1AZZ1D", "#+F0000", "1A1A1D", "#1A1A", "", "#1A1A1D0", "#ÄÄÄ",
+    ] {
+        assert_eq!(palette::rgb(bad), [0, 0, 0], "input {bad:?}");
+    }
+}
