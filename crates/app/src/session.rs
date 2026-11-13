@@ -25,6 +25,8 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Above this many inserts/removals a list change is sent as one reset.
 const RESET_THRESHOLD: usize = 32;
+/// Wait before retrying likes that a provider refused for rate limiting.
+const LIKE_RETRY_SECS: i64 = 300;
 
 /// The uid of the account owning this installation's rights, or empty when none is stored.
 fn stored_account(store: &Store, providers: &Providers) -> Result<String> {
@@ -843,16 +845,12 @@ impl Worker {
                 .map_or(Duration::ZERO, |t| Duration::from_millis(t.duration_ms)),
         );
         let player = Arc::make_mut(&mut self.player);
-        self.queue_likes = {
-            let c = self.store.read()?;
-            let mut statement = c.prepare("SELECT id FROM likes")?;
-            statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-                .into_iter()
-                .filter_map(|id| id.parse().ok())
-                .collect()
-        };
+        self.queue_likes = self
+            .store
+            .liked_track_ids()?
+            .into_iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
         player.track = self.queue.get(self.current).cloned();
         player.liked = player
             .track
@@ -1240,16 +1238,12 @@ impl Worker {
                                 self.background(Command::SyncLibrary)?;
                             }
                             Ok(CatalogReply::Synced) => {
-                                let liked = {
-                                    let db = self.store.read()?;
-                                    let mut stmt = db.prepare("SELECT id FROM likes")?;
-                                    let ids = stmt
-                                        .query_map([], |row| row.get::<_, String>(0))?
-                                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                                    ids.into_iter()
-                                        .filter_map(|id| id.parse().ok())
-                                        .collect::<HashSet<TrackId>>()
-                                };
+                                let liked = self
+                                    .store
+                                    .liked_track_ids()?
+                                    .into_iter()
+                                    .filter_map(|id| id.parse().ok())
+                                    .collect::<HashSet<TrackId>>();
                                 self.queue_likes = liked;
                                 let mut rows = self.rows.clone();
                                 for row in &mut rows {
@@ -2854,6 +2848,10 @@ impl Worker {
 #[derive(Default)]
 struct SyncState {
     step: u8,
+    /// Provider whose liked tracks are being read.
+    provider: Option<Arc<dyn Provider>>,
+    /// Providers whose likes are already handled in this run.
+    done: Vec<String>,
     cursor: Option<String>,
     ids: Vec<String>,
 }
@@ -3014,6 +3012,13 @@ impl Catalog {
         }
     }
 
+    /// Next signed-in provider with likes that this sync run has not handled yet.
+    fn next_likes_provider(&self, state: &SyncState) -> Option<Arc<dyn Provider>> {
+        self.providers
+            .with_capability(|c| c.likes)
+            .find(|p| !state.done.iter().any(|d| d == p.info().id))
+            .cloned()
+    }
     fn sync_step(&self, state: &mut SyncState) -> Result<(Option<CatalogReply>, bool)> {
         match state.step {
             0 => {
@@ -3033,38 +3038,75 @@ impl Catalog {
                 Ok((reply, false))
             }
             1 => {
-                let Some(provider) = self.providers.first_with(|c| c.likes) else {
-                    state.step = 3;
-                    return Ok((None, false));
-                };
-                let page = match provider.likes(state.cursor.as_deref()) {
-                    Ok(page) => page,
-                    Err(error) => {
-                        log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
-                        state.step = 3;
-                        return Ok((None, false));
+                let provider = match &state.provider {
+                    Some(provider) => provider.clone(),
+                    None => {
+                        if state.done.is_empty() {
+                            // Send what is waiting before reading the provider's list.
+                            self.flush_likes();
+                        }
+                        let Some(next) = self.next_likes_provider(state) else {
+                            state.step = 3;
+                            return Ok((None, false));
+                        };
+                        state.provider = Some(next.clone());
+                        state.cursor = None;
+                        state.ids.clear();
+                        next
                     }
                 };
-                if let Err(error) = self.store.put_tracks(&page.items) {
-                    log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
-                    state.step = 3;
-                    return Ok((None, false));
-                }
-                state
-                    .ids
-                    .extend(page.items.iter().map(|track| track.id.to_string()));
-                state.cursor = page.next;
-                if state.cursor.is_none() {
-                    state.step = 2;
+                let provider_id = provider.info().id;
+                let stored = provider
+                    .likes(state.cursor.as_deref())
+                    .map_err(|error| error.to_string())
+                    .and_then(|page| {
+                        self.store
+                            .put_tracks(&page.items)
+                            .map(|()| page)
+                            .map_err(|error| error.to_string())
+                    });
+                match stored {
+                    Ok(page) => {
+                        state
+                            .ids
+                            .extend(page.items.iter().map(|track| track.id.to_string()));
+                        state.cursor = page.next;
+                        if state.cursor.is_none() {
+                            state.step = 2;
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(provider = provider_id, error = error.as_str(); "liked tracks sync failed");
+                        state.done.push(provider_id.to_owned());
+                        state.provider = None;
+                        state.ids.clear();
+                        if self.next_likes_provider(state).is_none() {
+                            state.step = 3;
+                        }
+                    }
                 }
                 Ok((None, false))
             }
             2 => {
-                state.step = 3;
-                match self.store.replace_likes(std::mem::take(&mut state.ids)) {
-                    Ok(()) => Ok((Some(CatalogReply::Synced), false)),
+                let Some(provider) = state.provider.take() else {
+                    state.step = 1;
+                    return Ok((None, false));
+                };
+                let provider_id = provider.info().id;
+                state.done.push(provider_id.to_owned());
+                state.step = if self.next_likes_provider(state).is_some() {
+                    1
+                } else {
+                    3
+                };
+                let ids: Vec<TrackId> = std::mem::take(&mut state.ids)
+                    .iter()
+                    .filter_map(|id| id.parse().ok())
+                    .collect();
+                match self.store.sync_provider_likes(provider_id, &ids) {
+                    Ok(_) => Ok((Some(CatalogReply::Synced), false)),
                     Err(error) => {
-                        log::warn!(error = error.to_string().as_str(); "liked tracks sync failed");
+                        log::warn!(provider = provider_id, error = error.to_string().as_str(); "liked tracks sync failed");
                         Ok((None, false))
                     }
                 }
@@ -3280,6 +3322,50 @@ impl Catalog {
         }
         Ok(())
     }
+    /// Sends queued likes to their providers. A failed attempt stays queued unless its outcome is
+    /// unknown (never resent by itself) or the provider rejected it for good.
+    fn flush_likes(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for provider in self.providers.with_capability(|c| c.likes) {
+            let provider_id = provider.info().id;
+            let jobs = match self.store.like_jobs(provider_id, now) {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    log::warn!(provider = provider_id, error = error.to_string().as_str(); "like queue unreadable");
+                    continue;
+                }
+            };
+            for job in jobs {
+                let sent = match job.track.parse::<TrackId>() {
+                    Ok(track) => provider.set_liked(&track, job.liked),
+                    Err(_) => Err(eagle_core::ProviderError::InvalidId),
+                };
+                let recorded = match sent {
+                    Ok(()) => self.store.finish_like_job(&job),
+                    Err(eagle_core::ProviderError::Uncertain) => {
+                        self.store.mark_like_job_uncertain(&job)
+                    }
+                    Err(eagle_core::ProviderError::RateLimited) => {
+                        let _ = self.store.defer_like_job(&job, now + LIKE_RETRY_SECS);
+                        break;
+                    }
+                    Err(eagle_core::ProviderError::Network | eagle_core::ProviderError::Auth) => {
+                        break;
+                    }
+                    Err(error) => {
+                        log::warn!(provider = provider_id, track_id = job.track.as_str(), error = error.to_string().as_str(); "like rejected");
+                        self.store.finish_like_job(&job)
+                    }
+                };
+                if let Err(error) = recorded {
+                    log::warn!(provider = provider_id, error = error.to_string().as_str(); "like queue update failed");
+                }
+            }
+        }
+    }
     fn switch_account(&self, uid: &str) -> Result<bool> {
         let Some(provider) = self.account_id() else {
             return Ok(false);
@@ -3287,6 +3373,8 @@ impl Catalog {
         let uid = uid.to_owned();
         let account_setting = account_key(provider);
         let likes_prefix = format!("{provider}:%");
+        let provider_id = provider.to_owned();
+        let likes_synced = format!("likes_synced:{provider}");
         let albums_setting = liked_albums_key(provider);
         let artists_setting = liked_artists_key(provider);
         Ok(self.store.write(move |connection| {
@@ -3297,10 +3385,16 @@ impl Catalog {
                 |row| row.get(0),
             )?;
             if !same {
+                // Likes are the profile's; only what was learned from the old account goes.
                 tx.execute(
-                    "DELETE FROM likes WHERE id LIKE ?1",
-                    [likes_prefix.as_str()],
+                    "DELETE FROM provider_liked_seen WHERE provider=?1",
+                    [provider_id.as_str()],
                 )?;
+                tx.execute(
+                    "DELETE FROM like_outbox WHERE provider=?1",
+                    [provider_id.as_str()],
+                )?;
+                tx.execute("DELETE FROM settings WHERE key=?1", [likes_synced.as_str()])?;
                 tx.execute(
                     "DELETE FROM playlists WHERE id LIKE ?1",
                     [likes_prefix.as_str()],
@@ -3319,23 +3413,25 @@ impl Catalog {
         })?)
     }
     fn library(&self) -> Result<CatalogReply> {
-        let mut rows = {
-            let c = self.store.read()?;
-            // The library is the liked collection, newest like first.
-            let mut stmt = c.prepare(
-                "SELECT tracks.json FROM likes JOIN tracks ON tracks.id=likes.id ORDER BY likes.rowid DESC",
-            )?;
-            stmt.query_map([], |r| r.get::<_, String>(0))?
-                .map(|json| {
-                    Ok(LibraryItem {
-                        sources: Vec::new(),
-                        blocked_reason: None,
-                        track: Arc::new(serde_json::from_str(&json?)?),
-                        liked: true,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        // The library is the liked collection, newest like first, shown by the provider
+        // with the highest priority.
+        let priority: Vec<String> = self
+            .providers
+            .all()
+            .iter()
+            .map(|p| p.info().id.to_owned())
+            .collect();
+        let mut rows: Vec<LibraryItem> = self
+            .store
+            .liked_tracks(&priority)?
+            .into_iter()
+            .map(|track| LibraryItem {
+                sources: Vec::new(),
+                blocked_reason: None,
+                track: Arc::new(track),
+                liked: true,
+            })
+            .collect();
         self.apply_access(&mut rows)?;
         Ok(CatalogReply::Tracks(rows, String::new()))
     }
@@ -3453,12 +3549,7 @@ impl Catalog {
     }
     fn tracks(&self, tracks: Vec<Track>, title: String) -> Result<CatalogReply> {
         self.store.put_tracks(&tracks)?;
-        let liked = {
-            let c = self.store.read()?;
-            let mut stmt = c.prepare("SELECT id FROM likes")?;
-            stmt.query_map([], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<HashSet<_>, _>>()?
-        };
+        let liked = self.store.liked_track_ids()?;
         let mut items = tracks
             .into_iter()
             .map(|track| LibraryItem {
@@ -3768,27 +3859,18 @@ impl Catalog {
                 })
             }
             Command::Like(id) => {
-                let liked = !self.store.read()?.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM likes WHERE id=?1)",
-                    [id.to_string()],
-                    |r| r.get::<_, bool>(0),
-                )?;
-                if let Err(error) = self.provider_for(&id)?.set_liked(&id, liked) {
+                let liked = !self.store.is_liked(&id)?;
+                let targets: Vec<String> = self
+                    .providers
+                    .with_capability(|c| c.likes)
+                    .map(|p| p.info().id.to_owned())
+                    .collect();
+                // Local first: the like is the profile's, providers get it from the outbox.
+                if let Err(error) = self.store.like(&id, liked, &targets) {
                     // The UI already flipped the heart; tell it the real state.
                     return Ok(CatalogReply::LikeFailed(id, !liked, error.to_string()));
                 }
-                let key = id.to_string();
-                self.store.write(move |c| {
-                    c.execute(
-                        if liked {
-                            "INSERT OR IGNORE INTO likes VALUES(?1)"
-                        } else {
-                            "DELETE FROM likes WHERE id=?1"
-                        },
-                        [key],
-                    )?;
-                    Ok(())
-                })?;
+                self.flush_likes();
                 Ok(CatalogReply::Liked(id, liked))
             }
             _ => Err("команда не относится к каталогу".into()),
@@ -3810,6 +3892,41 @@ impl Clone for PlayerState {
         }
     }
 }
+/// Likes `id` in a test store, storing a minimal track first when it is not there yet.
+#[cfg(test)]
+fn seed_like(store: &Store, id: &str) {
+    seed_track(store, id);
+    store.like(&id.parse().unwrap(), true, &[]).unwrap();
+}
+/// Like `seed_like`, and the provider has listed it in an earlier sync, so a later sync that no
+/// longer lists it removes it.
+#[cfg(test)]
+fn seed_synced_like(store: &Store, id: &str) {
+    seed_like(store, id);
+    let id: TrackId = id.parse().unwrap();
+    let provider = id.provider().to_owned();
+    store.sync_provider_likes(&provider, &[id]).unwrap();
+}
+#[cfg(test)]
+fn seed_track(store: &Store, id: &str) {
+    let id: TrackId = id.parse().unwrap();
+    if store.track(&id).unwrap().is_none() {
+        store
+            .put_track(&Track {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: vec![],
+                album: None,
+                album_title: None,
+                duration_ms: 1000,
+                cover: None,
+                availability: Availability::Available,
+                isrc: None,
+            })
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5103,7 +5220,7 @@ mod lifecycle_tests {
                     isrc: None,
                 })
                 .unwrap();
-            store.replace_likes(vec!["yandex:1".into()]).unwrap();
+            seed_like(&store, "yandex:1");
         }
         let (tx, rx) = mpsc::channel();
         let session = Session::start(root.clone(), move |event| {
@@ -5727,6 +5844,9 @@ mod sync_tests {
         providers.set_account("fakea", Some(fakea.login(Token::new("a".into())).unwrap()));
         providers.set_account("fakeb", Some(fakeb.login(Token::new("b".into())).unwrap()));
         let c = catalog_with(providers);
+        c.store
+            .put_track(&fake_track("fakeb", "1", "Song", "Artist", 1000))
+            .unwrap();
 
         let id: TrackId = "fakeb:1".parse().unwrap();
         c.request(CatalogRequest::Command(0, Command::Like(id.clone())))
@@ -5923,7 +6043,7 @@ mod sync_tests {
     #[test]
     fn account_switch_clears_only_private_cache_and_preserves_same_account() {
         let c = catalog(false);
-        c.store.replace_likes(vec!["yandex:1".into()]).unwrap();
+        seed_like(&c.store, "yandex:1");
         c.store
             .put_json("playlists", "yandex:1_2", "{}".into())
             .unwrap();
@@ -5936,10 +6056,11 @@ mod sync_tests {
         c.store.put_setting("unrelated", "kept".into()).unwrap();
         assert!(c.switch_account("1").unwrap());
         let db = c.store.read().unwrap();
+        // Likes belong to the profile: a new account does not remove them.
         assert_eq!(
-            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+            db.query_row("SELECT count(*) FROM liked", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            0
+            1
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM playlists", [], |r| r.get::<_, i64>(0))
@@ -5962,18 +6083,18 @@ mod sync_tests {
             c.store.setting("unrelated").unwrap().as_deref(),
             Some("kept")
         );
-        c.store.replace_likes(vec!["yandex:2".into()]).unwrap();
+        seed_like(&c.store, "yandex:2");
         assert!(!c.switch_account("1").unwrap());
         assert_eq!(
-            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+            db.query_row("SELECT count(*) FROM liked", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            1
+            2
         );
         assert!(c.switch_account("2").unwrap());
         assert_eq!(
-            db.query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+            db.query_row("SELECT count(*) FROM liked", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            0
+            2
         );
     }
     #[test]
@@ -5985,7 +6106,7 @@ mod sync_tests {
             gate: None,
             calls: Arc::default(),
         }));
-        c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+        seed_synced_like(&c.store, "yandex:99");
         let mut state = SyncState::default();
         assert!(c.sync_step(&mut state).unwrap().0.is_none());
         assert_eq!(state.step, 1);
@@ -6004,7 +6125,7 @@ mod sync_tests {
             c.store
                 .read()
                 .unwrap()
-                .query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, i64>(0))
+                .query_row("SELECT count(*) FROM liked", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             0
         );
@@ -6014,12 +6135,13 @@ mod sync_tests {
         let c = catalog(false);
         c.store
             .write(|db| {
-                db.execute("DROP TABLE likes", [])?;
+                db.execute("DROP TABLE provider_liked_seen", [])?;
                 Ok(())
             })
             .unwrap();
         let mut state = SyncState {
             step: 2,
+            provider: c.providers.first_with(|caps| caps.likes).cloned(),
             ..SyncState::default()
         };
         assert!(c.sync_step(&mut state).unwrap().0.is_none());
@@ -6043,7 +6165,7 @@ mod sync_tests {
             gate: Some(gate.clone()),
             calls: Arc::default(),
         }));
-        c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+        seed_like(&c.store, "yandex:99");
         let store = c.store.clone();
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -6084,7 +6206,7 @@ mod sync_tests {
         let count: u32 = store
             .read()
             .unwrap()
-            .query_row("SELECT count(*) FROM likes WHERE id='yandex:99'", [], |r| {
+            .query_row("SELECT count(*) FROM liked l JOIN track_groups g ON g.grp=l.grp WHERE g.track='yandex:99'", [], |r| {
                 r.get(0)
             })
             .unwrap();
@@ -6101,7 +6223,8 @@ mod sync_tests {
             gate: Some(gate.clone()),
             calls: calls.clone(),
         }));
-        c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+        seed_like(&c.store, "yandex:99");
+        seed_track(&c.store, "yandex:3");
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || c.run(rx, reply_tx));
@@ -6184,7 +6307,7 @@ mod sync_tests {
             gate: None,
             calls: Arc::default(),
         }));
-        c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+        seed_synced_like(&c.store, "yandex:99");
         let mut state = SyncState::default();
         c.sync_step(&mut state).unwrap();
         c.sync_step(&mut state).unwrap();
@@ -6192,7 +6315,7 @@ mod sync_tests {
             c.store
                 .read()
                 .unwrap()
-                .query_row("SELECT count(*) FROM likes", [], |r| r.get::<_, u32>(0))
+                .query_row("SELECT count(*) FROM liked", [], |r| r.get::<_, u32>(0))
                 .unwrap()
         };
         assert_eq!(count(), 1);
@@ -6203,7 +6326,7 @@ mod sync_tests {
     fn pages_publish_only_after_success_and_commands_interleave() {
         for fail in [false, true] {
             let c = catalog(fail);
-            c.store.replace_likes(vec!["yandex:99".into()]).unwrap();
+            seed_synced_like(&c.store, "yandex:99");
             let mut state = SyncState::default();
             c.sync_step(&mut state).unwrap();
             c.sync_step(&mut state).unwrap();
@@ -6215,7 +6338,7 @@ mod sync_tests {
                 c.store
                     .read()
                     .unwrap()
-                    .query_row("SELECT count(*) FROM likes WHERE id='yandex:99'", [], |r| {
+                    .query_row("SELECT count(*) FROM liked l JOIN track_groups g ON g.grp=l.grp WHERE g.track='yandex:99'", [], |r| {
                         r.get::<_, u32>(0)
                     })
                     .unwrap()
@@ -6237,14 +6360,12 @@ mod sync_tests {
                 assert_eq!(count(), 1);
                 c.sync_step(&mut state).unwrap();
                 assert_eq!(count(), 0);
-                let conn = c.store.read().unwrap();
-                let mut stmt = conn
-                    .prepare("SELECT id FROM likes ORDER BY rowid DESC")
-                    .unwrap();
-                let ids: Vec<String> = stmt
-                    .query_map([], |r| r.get(0))
+                let ids: Vec<String> = c
+                    .store
+                    .liked_tracks(&[])
                     .unwrap()
-                    .map(|r| r.unwrap())
+                    .into_iter()
+                    .map(|track| track.id.to_string())
                     .collect();
                 assert_eq!(ids, ["yandex:1", "yandex:2"]);
             }
@@ -6360,13 +6481,13 @@ mod sync_tests {
                     "INSERT INTO settings VALUES('account:fakea','fake-uid')",
                     [],
                 )?;
-                c.execute("INSERT INTO likes VALUES('fakea:1'),('fakeb:2')", [])?;
                 Ok(())
             })
             .unwrap();
         for (provider, id) in [("fakea", "1"), ("fakeb", "2")] {
             let track = fake_track(provider, id, "Song", "Artist", 1000);
             worker.store.put_track(&track).unwrap();
+            worker.store.like(&track.id, true, &[]).unwrap();
             worker
                 .store
                 .enqueue_download("fake-uid", &track.id, Quality::High)
@@ -6401,14 +6522,13 @@ mod sync_tests {
         assert!(worker.store.setting("account:fakea").unwrap().is_none());
         assert!(worker.account.is_empty());
         assert_eq!(saved(&worker), ["fakeb:2"]);
-        let likes: Vec<String> = {
-            let c = worker.store.read().unwrap();
-            let mut stmt = c.prepare("SELECT id FROM likes ORDER BY id").unwrap();
-            stmt.query_map([], |r| r.get(0))
-                .unwrap()
-                .collect::<std::result::Result<_, _>>()
-                .unwrap()
-        };
+        let mut likes: Vec<String> = worker
+            .store
+            .liked_track_ids()
+            .unwrap()
+            .into_iter()
+            .collect();
+        likes.sort();
         assert_eq!(likes, ["fakea:1", "fakeb:2"]);
         let last = seen.lock().unwrap().last().cloned().unwrap();
         assert_eq!(
@@ -6422,6 +6542,97 @@ mod sync_tests {
                     keep_saved: false
                 })
                 .is_err()
+        );
+    }
+    /// Two signed-in fake providers that both know the song, behind a catalog.
+    fn like_catalog(
+        failure: Option<fn() -> ProviderError>,
+    ) -> (
+        Catalog,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+        Arc<eagle_provider_sdk::testkit::FakeProvider>,
+    ) {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let song = |provider| fake_track(provider, "1", "Song", "Artist", 1000);
+        let mut fakea = FakeProvider::new("fakea").with_tracks(vec![song("fakea")]);
+        if let Some(failure) = failure {
+            fakea = fakea.fail_with(failure);
+        }
+        let fakea = Arc::new(fakea);
+        let fakeb = Arc::new(FakeProvider::new("fakeb").with_tracks(vec![song("fakeb")]));
+        let all: Vec<Arc<dyn Provider>> = vec![fakea.clone(), fakeb.clone()];
+        let providers = Arc::new(Providers::new(all, &[]));
+        for provider in [&fakea, &fakeb] {
+            providers.set_account(
+                provider.info().id,
+                Some(provider.login(Token::new("t".into())).unwrap()),
+            );
+        }
+        let c = catalog_with(providers);
+        c.store.put_tracks(&[song("fakea"), song("fakeb")]).unwrap();
+        (c, fakea, fakeb)
+    }
+    fn pending_likes(c: &Catalog, provider: &str) -> usize {
+        c.store.like_jobs(provider, i64::MAX).unwrap().len()
+    }
+    #[test]
+    fn like_goes_to_every_provider_that_has_the_song() {
+        let (c, fakea, fakeb) = like_catalog(None);
+        let id: TrackId = "fakea:1".parse().unwrap();
+        assert!(matches!(
+            c.command(Command::Like(id.clone())).unwrap(),
+            CatalogReply::Liked(_, true)
+        ));
+        assert_eq!(fakea.set_liked_calls(), vec![(id, true)]);
+        assert_eq!(
+            fakeb.set_liked_calls(),
+            vec![("fakeb:1".parse().unwrap(), true)]
+        );
+        assert_eq!(pending_likes(&c, "fakea") + pending_likes(&c, "fakeb"), 0);
+    }
+    #[test]
+    fn an_offline_provider_keeps_the_like_queued_and_gets_it_later() {
+        let (c, fakea, fakeb) = like_catalog(Some(|| ProviderError::Network));
+        let id: TrackId = "fakeb:1".parse().unwrap();
+        // The like is local at once and reaches the reachable provider.
+        assert!(matches!(
+            c.command(Command::Like(id.clone())).unwrap(),
+            CatalogReply::Liked(_, true)
+        ));
+        assert!(c.store.is_liked(&id).unwrap());
+        assert_eq!(fakeb.set_liked_calls().len(), 1);
+        assert_eq!(pending_likes(&c, "fakea"), 1);
+        fakea.clear_failure();
+        c.flush_likes();
+        assert_eq!(pending_likes(&c, "fakea"), 0);
+        assert_eq!(fakea.set_liked_calls().len(), 1);
+    }
+    #[test]
+    fn an_uncertain_like_is_not_resent_and_a_rate_limit_waits() {
+        let (c, fakea, _) = like_catalog(Some(|| ProviderError::Uncertain));
+        c.command(Command::Like("fakea:1".parse().unwrap()))
+            .unwrap();
+        assert_eq!(pending_likes(&c, "fakea"), 0);
+        assert_eq!(c.store.uncertain_like_jobs("fakea").unwrap().len(), 1);
+        fakea.clear_failure();
+        c.flush_likes();
+        assert!(fakea.set_liked_calls().is_empty());
+
+        let (c, fakea, _) = like_catalog(Some(|| ProviderError::RateLimited));
+        c.command(Command::Like("fakea:1".parse().unwrap()))
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(c.store.like_jobs("fakea", now).unwrap().is_empty());
+        assert_eq!(pending_likes(&c, "fakea"), 1);
+        fakea.clear_failure();
+        c.flush_likes();
+        assert_eq!(
+            pending_likes(&c, "fakea"),
+            1,
+            "deferred until the retry time"
         );
     }
     #[test]

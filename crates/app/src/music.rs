@@ -218,20 +218,20 @@ pub(crate) fn sync(store: &Store, provider: &dyn Provider) -> Result<()> {
     store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
-/// Writes metadata page by page; publishes the ordered likes only after every page succeeds.
+/// Writes metadata page by page; merges the provider's likes only after every page succeeds.
 pub(crate) fn sync_likes(store: &Store, provider: &dyn Provider) -> Result<()> {
     let mut cursor = None;
     let mut ids = Vec::new();
     loop {
         let page = provider.likes(cursor.as_deref())?;
         store.put_tracks(&page.items)?;
-        ids.extend(page.items.iter().map(|track| track.id.to_string()));
+        ids.extend(page.items.iter().map(|track| track.id.clone()));
         cursor = page.next;
         if cursor.is_none() {
             break;
         }
     }
-    store.replace_likes(ids)?;
+    store.sync_provider_likes(provider.info().id, &ids)?;
     Ok(())
 }
 /// Playlist titles only (one request), so the sidebar fills before the slow likes sync.

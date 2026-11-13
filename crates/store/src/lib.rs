@@ -26,6 +26,8 @@ pub enum Error {
     Stopped,
     #[error("недостаточно места в незакреплённом кэше")]
     CacheFull,
+    #[error("трек не сохранён")]
+    UnknownTrack,
 }
 mod access;
 mod usage;
@@ -40,6 +42,12 @@ pub use downloads::{DownloadJob, DownloadState};
 mod playback;
 pub use playback::{PlaybackEntry, PlaybackState, RadioContext};
 mod groups;
+mod like_outbox;
+mod likes;
+mod profile_ops;
+pub use like_outbox::LikeJob;
+pub use likes::LikeSync;
+pub use profile_ops::Op;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
@@ -58,7 +66,7 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 10 {
+    if version > 12 {
         return Err(Error::FutureSchema);
     }
     if version == 0 {
@@ -130,6 +138,12 @@ fn initialize(path: &Path) -> Result<Connection, Error> {
     }
     if version < 10 {
         groups::migrate(&mut c)?;
+    }
+    if version < 11 {
+        likes::migrate_tables(&c)?;
+    }
+    if version < 12 {
+        likes::migrate_likes(&mut c)?;
     }
     let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -251,11 +265,13 @@ impl Store {
                     job(&mut c);
                 }
             })?;
-        Ok(Self {
+        let store = Self {
             path,
             tx: Some(tx),
             worker: Some(worker),
-        })
+        };
+        store.compact_profile_if_due();
+        Ok(store)
     }
     pub fn write<T: Send + 'static>(
         &self,
@@ -340,22 +356,6 @@ impl Store {
         let id = id.to_owned();
         self.write(move |c| {
             c.execute(&sql, params![id, json])?;
-            Ok(())
-        })
-    }
-    /// Replaces Yandex likes. `ids` is newest first; rows are stored oldest first so that
-    /// `ORDER BY rowid DESC` lists the newest like first, including likes added later.
-    pub fn replace_likes(&self, ids: Vec<String>) -> Result<(), Error> {
-        self.write(move |c| {
-            let tx = c.transaction()?;
-            tx.execute("DELETE FROM likes WHERE id LIKE 'yandex:%'", [])?;
-            {
-                let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO likes VALUES(?1)")?;
-                for id in ids.iter().rev() {
-                    insert.execute([id])?;
-                }
-            }
-            tx.commit()?;
             Ok(())
         })
     }
@@ -897,16 +897,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         store.put_tracks(&tracks).unwrap();
-        // Provider order is newest first.
-        store
-            .replace_likes(vec!["yandex:3".into(), "yandex:1".into()])
-            .unwrap();
-        store
-            .write(|c| {
-                c.execute("INSERT OR IGNORE INTO likes VALUES('yandex:2')", [])?;
-                Ok(())
-            })
-            .unwrap();
+        for n in [1, 3, 2] {
+            store
+                .like(&format!("yandex:{n}").parse().unwrap(), true, &[])
+                .unwrap();
+        }
         let ids = |sql: &str| -> Vec<String> {
             let c = store.read().unwrap();
             let mut stmt = c.prepare(sql).unwrap();
@@ -915,12 +910,13 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert_eq!(
-            ids(
-                "SELECT likes.id FROM likes JOIN tracks ON tracks.id=likes.id ORDER BY likes.rowid DESC"
-            ),
-            ["yandex:2", "yandex:3", "yandex:1"]
-        );
+        let liked: Vec<String> = store
+            .liked_tracks(&[])
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id.to_string())
+            .collect();
+        assert_eq!(liked, ["yandex:2", "yandex:3", "yandex:1"]);
         store.put_json("playlists", "vk:9", "{}".into()).unwrap();
         store
             .replace_playlists(
