@@ -28,7 +28,7 @@ const DECODED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Job {
-    /// Routing key for the UI, e.g. `t:yandex:1` for a track row.
+    /// Routing key for the UI, e.g. `t:fixture:1` for a track row.
     pub key: String,
     /// File stem in the cover cache.
     pub stem: String,

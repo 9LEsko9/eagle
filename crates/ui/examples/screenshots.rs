@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_track_id("fixture:0".into());
     ui.global::<Player>().set_title("Магистраль".into());
     ui.global::<Player>().set_artist("Шум волн".into());
-    ui.global::<Player>().set_source("yandex".into());
+    ui.global::<Player>().set_source("Яндекс Музыка".into());
     ui.global::<Player>().set_length(262.);
     ui.global::<Player>().set_quality("320 кбит/с".into());
     ui.global::<Player>().set_shown(84.);

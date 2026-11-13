@@ -14,6 +14,15 @@
 - Логи доступны с этапа 0: используй `log` с kv; на info пиши только provider/track_id, без названий и поисковых запросов. Секреты храни в `eagle_core::Token`/`SignedUrl`, не логируй `expose()`. Бэкендная маскировка — только страховка.
 - Не используй OpenCode для работы над проектом.
 
+## Провайдеры
+
+- Провайдер — отдельный крейт `crates/providers/<имя>`, реализующий трейт `Provider` из [`eagle-provider-sdk`](crates/provider-sdk/README.md). Заготовка: `crates/providers/_template`. Дизайн: `docs/superpowers/specs/2026-11-13-provider-platform-design.md`.
+- Подключение — одна строка в `providers::builtin` (`crates/app/src/providers.rs`). Больше нигде в `app`, `store` и `ui` имя провайдера не пишется: это проверяет `crates/app/tests/no_provider_names.rs` (исключения вне `#[cfg(test)]` — только `builtin` и миграция v9 в store). В тестах используй фейки из `eagle_provider_sdk::testkit`.
+- Возможности объявляй в `ProviderInfo::capabilities`; приложение выбирает провайдера по возможности и приоритету пользователя, а не по имени. Метод, который провайдер не поддерживает, возвращает ошибку без обращения к сети (см. README SDK).
+- Права на офлайн (`access`, `offline_owners`, `downloads.account`) привязаны к аккаунту провайдера, не к профилю. Лайки, история и позиция принадлежат профилю.
+- Проверка нового провайдера: тесты конформности из SDK (`eagle_provider_sdk::testkit::conformance`) на записанных ответах, `cargo test --workspace`, `cargo xtask bench` против baseline.
+- Миграции схемы — только через `PRAGMA user_version`, без потери данных пользователя; для нового шага добавь тест на настоящей схеме предыдущей версии (пример: `crates/store/tests/migrate_v8.rs`).
+
 ## CodeGraph
 
 - Если в корне есть `.codegraph/`, начинай работу с кодом с `codegraph_explore`: указывай в запросе соответствующий файл или символ до текстового поиска и чтения кода.

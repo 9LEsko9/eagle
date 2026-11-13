@@ -509,7 +509,14 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         .into(),
                 );
                 player.set_title(track.title.as_str().into());
-                player.set_source(track.id.provider().into());
+                // The provider's own name comes from the connected list; an unknown key shows as is.
+                let key = track.id.provider();
+                let providers = ui.global::<Ui>().get_providers();
+                let name = providers
+                    .iter()
+                    .find(|p| p.id == key)
+                    .map_or_else(|| key.into(), |p| p.name);
+                player.set_source(name);
                 player.set_artist(
                     track
                         .artists

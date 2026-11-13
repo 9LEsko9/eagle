@@ -6,9 +6,9 @@ import { TextButton } from "../components/button.slint";
 import { IconButton } from "../components/icon-button.slint";
 
 export global Source {
-    // Provider key from the track id → human name.
+    // The bridge already puts the provider's name here; only local files have no provider.
     pure public function name(key: string) -> string {
-        return key == "yandex" ? @tr("Яндекс Музыка") : key == "vk" ? @tr("VK Музыка") : key == "file" ? @tr("Файл") : key;
+        return key == "file" ? @tr("Файл") : key;
     }
 }
 

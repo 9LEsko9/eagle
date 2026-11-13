@@ -260,14 +260,10 @@ export component SettingsScreen inherits Flickable {
                         Switch { label: @tr("Автозапуск"); checked: Ui.autostart; toggled => { Actions.autostart(!Ui.autostart); } }
                     }
                     SectionTitle { text: @tr("Аккаунты"); }
-                    SettingRow {
-                        title: @tr("Яндекс Музыка");
-                        hint: Ui.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
-                        if !Ui.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
-                    }
-                    SettingRow {
-                        title: @tr("VK Музыка");
-                        hint: @tr("Пока недоступно");
+                    for provider in Ui.providers : SettingRow {
+                        title: provider.name;
+                        hint: provider.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
+                        if !provider.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
                     }
                     Text {
                         text: @tr("При закрытии окна приложение выходит.");

@@ -245,14 +245,14 @@ pub(crate) fn sync_playlists(store: &Store, provider: &dyn Provider) -> Result<(
     store.replace_playlists(provider.info().id, playlists)?;
     Ok(())
 }
-/// Asks for the Yandex token without echoing it.
+/// Asks for the provider token without echoing it.
 fn prompt_token() -> std::io::Result<Token> {
-    rpassword::prompt_password("Токен Яндекс Музыки: ").map(Token::new)
+    rpassword::prompt_password("Токен: ").map(Token::new)
 }
 pub fn run(args: &[String], root: &Path) -> Result<()> {
     if args.is_empty() {
         println!(
-            "eagle-cli yandex login|status|search <текст>|play <yandex:id>|likes|playlists|album <id>|playlist <id>|like <id>|unlike <id>|sync\neagle-cli play <provider:id> [--standard] [--save]"
+            "eagle-cli [провайдер] login|status|search <текст>|play <provider:id>|likes|playlists|album <id>|playlist <id>|like <id>|unlike <id>|sync\neagle-cli play <provider:id> [--standard] [--save]"
         );
         return Ok(());
     }
@@ -373,7 +373,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
     let _cache = Cache::open(&root.join("audio"), LIMIT * 4, &store)?;
     for n in 0..1000 {
         store.put_track(&eagle_core::Track {
-            id: format!("yandex:{n}").parse()?,
+            id: format!("fixture:{n}").parse()?,
             title: "Benchmark fixture".into(),
             artists: vec![],
             album: None,

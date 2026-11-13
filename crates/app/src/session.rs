@@ -6503,6 +6503,24 @@ mod sync_tests {
             CatalogReply::Providers
         ));
     }
+    #[test]
+    fn app_starts_with_no_signed_in_providers() {
+        let root = std::env::temp_dir().join(format!("eg-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (_, tokens, fakea, fakeb) = token_providers();
+        let emit: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|_| {});
+        let (tx, _) = mpsc::channel();
+        let worker =
+            Worker::new_with_providers(root.clone(), emit, tx, Some(vec![fakea, fakeb]), tokens)
+                .unwrap();
+        let status = worker.providers.statuses();
+        assert_eq!(status.len(), 2);
+        assert!(status.iter().all(|p| !p.signed_in));
+        assert!(worker.account.is_empty());
+        assert_eq!(worker.providers.signed_in().count(), 0);
+        drop(worker);
+        let _ = std::fs::remove_dir_all(root);
+    }
     fn logout_worker(
         tag: &str,
     ) -> (

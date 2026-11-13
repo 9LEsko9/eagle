@@ -20,8 +20,8 @@ const fn capabilities() -> Capabilities {
 impl Provider for Fixture {
     fn info(&self) -> &ProviderInfo {
         static INFO: ProviderInfo = ProviderInfo {
-            id: "yandex",
-            name: "yandex",
+            id: "fixture",
+            name: "fixture",
             auth: AuthMethod::None,
             capabilities: capabilities(),
         };
@@ -60,7 +60,7 @@ impl Provider for Fixture {
         let items = (start..end)
             .map(|n| {
                 Ok(Track {
-                    id: format!("yandex:{n}").parse()?,
+                    id: format!("fixture:{n}").parse()?,
                     title: format!("Fixture {n} {}", "metadata ".repeat(32)),
                     artists: vec![],
                     album: None,
@@ -143,7 +143,7 @@ pub fn run(root: &Path, scenario: &str) -> Result<()> {
                         covers.request(
                             (start..(start + 20).min(count))
                                 .map(|n| crate::covers::Job {
-                                    key: format!("{prefix}:yandex:{n}"),
+                                    key: format!("{prefix}:fixture:{n}"),
                                     stem: "fixture".into(),
                                     uri: None,
                                     size,
