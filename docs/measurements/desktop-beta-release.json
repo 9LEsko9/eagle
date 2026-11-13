@@ -193,7 +193,7 @@
       ],
       "exit_code": 0,
       "name": "final-gpu",
-      "source": "integration source with UiAttached, decoded-cover suspension and header rehydration; local commit recorded in acceptance document"
+      "source": "b7037d2 (UiAttached, decoded-cover suspension and header rehydration)"
     },
     {
       "binary_sha256": "c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97",
@@ -281,7 +281,7 @@
       ],
       "exit_code": 0,
       "name": "final-software",
-      "source": "integration source with UiAttached, decoded-cover suspension and header rehydration; local commit recorded in acceptance document"
+      "source": "b7037d2 (UiAttached, decoded-cover suspension and header rehydration)"
     }
   ],
   "checks": {

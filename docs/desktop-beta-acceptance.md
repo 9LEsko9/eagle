@@ -4,6 +4,8 @@ This record separates implemented behavior, automated evidence, and hardware acc
 
 The incoming working tree was preserved in local commit `9735e02` (parent `4824682`). Its provenance is the incoming uncommitted work, not newly authored changes from this run. The original patch, `instance.rs` patch and first test logs are kept locally in `.review/desktop-beta-start/`. No changes were pushed.
 
+The measured implementation is local commit `b7037d2`. Its normal release binary has SHA-256 `c422dda9925c531bd7b739b25231c30d8c449880133897ca165b1f50d412cd97`.
+
 ## Implemented paths
 
 | Area | Behavior | Evidence required for acceptance |
