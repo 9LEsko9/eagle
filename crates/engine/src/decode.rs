@@ -25,6 +25,7 @@ pub(crate) enum Decoder {
 pub(crate) struct Symphonia {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn SymphoniaDecoder>,
+    samples: Option<SampleBuffer<f32>>,
     track: u32,
     rate: u32,
     channels: usize,
@@ -33,6 +34,7 @@ pub(crate) struct Symphonia {
     damaged: u64,
     trim: Option<crate::mp4::Trim>,
     limit: Option<u64>,
+    limit_known: bool,
     emitted: u64,
     trust_frame_count: bool,
     time_base: Option<symphonia::core::units::TimeBase>,
@@ -156,6 +158,7 @@ impl Decoder {
         Ok(Self::Symphonia(Symphonia {
             format,
             decoder,
+            samples: None,
             track,
             rate,
             channels,
@@ -164,6 +167,7 @@ impl Decoder {
             damaged: 0,
             trim,
             limit,
+            limit_known: false,
             emitted: 0,
             trust_frame_count,
             time_base,
@@ -239,13 +243,16 @@ impl Symphonia {
             if packet.track_id() != self.track {
                 continue;
             }
-            if self.trust_frame_count && self.trim.is_none() {
-                self.limit = self
-                    .format
-                    .tracks()
-                    .iter()
-                    .find(|t| t.id == self.track)
-                    .and_then(|t| t.codec_params.n_frames);
+            if !self.limit_known {
+                if self.trust_frame_count && self.trim.is_none() {
+                    self.limit = self
+                        .format
+                        .tracks()
+                        .iter()
+                        .find(|t| t.id == self.track)
+                        .and_then(|t| t.codec_params.n_frames);
+                }
+                self.limit_known = true;
             }
             let decoded = match self.decoder.decode(&packet) {
                 Ok(d) => d,
@@ -268,7 +275,16 @@ impl Symphonia {
                     "параметры аудио изменились внутри трека",
                 ));
             }
-            let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+            if self
+                .samples
+                .as_ref()
+                .is_some_and(|samples| samples.capacity() / self.channels < decoded.capacity())
+            {
+                self.samples = None;
+            }
+            let samples = self.samples.get_or_insert_with(|| {
+                SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec())
+            });
             samples.copy_interleaved_ref(decoded);
             // MP3/Vorbis decoders already apply packet trim; never apply it a second time.
             let packet_start = self.time_base.map_or(packet.ts(), |base| {
@@ -294,14 +310,15 @@ impl Symphonia {
             if remaining == 0 {
                 return Ok(None);
             }
-            let frames: Vec<_> = samples
-                .samples()
-                .chunks_exact(self.channels)
-                .take(take)
-                .skip(skip)
-                .take(remaining)
-                .map(|s| [s[0], s[self.channels - 1]])
-                .collect();
+            let data = samples.samples();
+            let n = data.len() / self.channels;
+            let start = skip.min(n).min(take);
+            let end = take.min(n).min(start.saturating_add(remaining));
+            let mut frames = Vec::with_capacity(end - start);
+            for i in start..end {
+                let offset = i * self.channels;
+                frames.push([data[offset], data[offset + self.channels - 1]]);
+            }
             if frames.is_empty() {
                 continue;
             }
