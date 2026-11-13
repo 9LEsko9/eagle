@@ -13,7 +13,6 @@ export component CreatePlaylistDialog inherits Rectangle {
     if Ui.create-playlist || root.lifetime > 0 : Rectangle {
         background: #00000059;
         opacity: root.lifetime;
-        TouchArea { clicked => { Ui.create-playlist = false; } }
         focus := FocusScope {
             private property <bool> open: Ui.create-playlist;
             changed open => { if self.open { field.focus-input(); } }
@@ -33,6 +32,7 @@ export component CreatePlaylistDialog inherits Rectangle {
             }
             return reject;
         }
+        TouchArea { width: parent.width; height: parent.height; clicked => { Ui.create-playlist = false; } }
         card := Rectangle {
             width: min(400px, parent.width - 32px);
             height: layout.preferred-height;

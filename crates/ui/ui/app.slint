@@ -42,7 +42,7 @@ component Sidebar inherits VerticalLayout {
         height: 46px;
         Text { text: @tr("Плейлисты"); color: Theme.t.tx2; font-size: Type.small; font-weight: 500; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
-        IconButton { size: 28px; icon-size: 16px; icon: @image-url("icons/plus.svg"); label: @tr("Создать плейлист"); clicked => { Ui.drawer-open = false; Ui.playlist-name = ""; Ui.error = ""; Ui.create-playlist = true; } }
+        IconButton { private property <bool> dialog-open: Ui.create-playlist; changed dialog-open => { if !self.dialog-open && !Layout.compact { self.focus-button(); } } size: 28px; icon-size: 16px; icon: @image-url("icons/plus.svg"); label: @tr("Создать плейлист"); clicked => { Ui.drawer-open = false; Ui.playlist-name = ""; Ui.error = ""; Ui.create-playlist = true; } }
     }
     if Ui.signed-in : Rectangle { height: 6px; }
     ListView {
@@ -90,6 +90,8 @@ export component DesktopWindow inherits Window {
     private property <length> drawer-offset: Ui.drawer-open ? 0px : -24px;
     animate drawer-offset { duration: Motion.base; easing: cubic-bezier(0.2, 0, 0, 1); }
     private property <length> bar-height: 80px;
+    private property <bool> dialog-open: Ui.create-playlist;
+    changed dialog-open => { if !self.dialog-open && !Ui.signed-in && !Layout.compact { keys.focus(); } }
     keys := FocusScope {
         VerticalLayout {
             spacing: 0;
@@ -104,7 +106,7 @@ export component DesktopWindow inherits Window {
                     spacing: Layout.compact ? 8px : 16px;
                     if Layout.compact : HorizontalLayout {
                         alignment: start;
-                        IconButton { size: 36px; icon-size: 20px; icon: @image-url("icons/menu.svg"); label: @tr("Меню"); clicked => { Ui.drawer-open = true; } }
+                        IconButton { private property <bool> dialog-open: Ui.create-playlist; changed dialog-open => { if !self.dialog-open { self.focus-button(); } } size: 36px; icon-size: 20px; icon: @image-url("icons/menu.svg"); label: @tr("Меню"); clicked => { Ui.drawer-open = true; } }
                     }
                     // Lists use the whole width; forms cap their own width inside.
                     VerticalLayout {

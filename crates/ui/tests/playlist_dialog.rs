@@ -1,7 +1,7 @@
-use eagle_ui::{Actions, DesktopWindow, Ui};
+use eagle_ui::{Actions, DesktopWindow, Motion, Ui};
 use slint::ComponentHandle;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
+use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -19,6 +19,7 @@ fn playlist_dialog_accepts_spaces_enter_and_escape() {
     ))))
     .unwrap();
     let window = DesktopWindow::new().unwrap();
+    window.global::<Motion>().set_reduced(true);
     window
         .global::<Actions>()
         .on_valid_playlist_name(|name| !name.trim().is_empty());
@@ -31,6 +32,7 @@ fn playlist_dialog_accepts_spaces_enter_and_escape() {
         .window()
         .set_size(slint::LogicalSize::new(1280., 880.));
     window.show().unwrap();
+    window.global::<Ui>().set_signed_in(true);
     window.global::<Ui>().set_panel_open(true);
     window.global::<Ui>().set_create_playlist(true);
     slint::platform::update_timers_and_animations();
@@ -72,9 +74,55 @@ fn playlist_dialog_accepts_spaces_enter_and_escape() {
     });
     assert!(!window.global::<Ui>().get_create_playlist());
     assert!(window.global::<Ui>().get_panel_open());
-    window.global::<Ui>().set_create_playlist(true);
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+    assert!(window.global::<Ui>().get_create_playlist());
     window
         .window()
         .dispatch_event(WindowEvent::KeyPressed { text: "E".into() });
-    assert_eq!(window.global::<Ui>().get_playlist_name(), "A BCDE");
+    assert_eq!(window.global::<Ui>().get_playlist_name(), "E");
+    window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Tab.into(),
+    });
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+    assert!(!window.global::<Ui>().get_create_playlist());
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+    assert!(window.global::<Ui>().get_create_playlist());
+    window.window().take_snapshot().unwrap();
+    for event in [
+        WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(8., 8.),
+        },
+        WindowEvent::PointerPressed {
+            position: slint::LogicalPosition::new(8., 8.),
+            button: PointerEventButton::Left,
+        },
+        WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(8., 8.),
+            button: PointerEventButton::Left,
+        },
+    ] {
+        window.window().dispatch_event(event);
+    }
+    assert!(!window.global::<Ui>().get_create_playlist());
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+    assert!(window.global::<Ui>().get_create_playlist());
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(760., 880.));
+    window.window().take_snapshot().unwrap();
+    window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+    assert!(window.global::<Ui>().get_drawer_open());
 }
