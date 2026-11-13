@@ -2484,9 +2484,13 @@ impl Worker {
                     View::Library => self.request(Command::Library)?,
                     View::Albums => self.request(Command::Albums)?,
                     View::Artists => self.request(Command::Artists)?,
-                    View::Search | View::Album | View::Playlist | View::Artist => {
-                        self.publish(Vec::new())
+                    View::Search => {
+                        // The UI keeps search results apart from the list it showed before, so
+                        // indexed deltas against that list cannot be applied to them.
+                        self.rows.clear();
+                        (self.emit)(Event::LibraryReset(Vec::new()));
                     }
+                    View::Album | View::Playlist | View::Artist => self.publish(Vec::new()),
                     View::Login | View::Settings => {}
                     View::Radio => {
                         self.publish_radio();
@@ -5877,6 +5881,63 @@ mod lifecycle_tests {
         let store = Store::open(&root).unwrap();
         assert!(store.track(&"yandex:1".parse().unwrap()).unwrap().is_some());
         drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn opening_search_resets_the_previous_list_instead_of_sending_deltas() {
+        let root =
+            std::env::temp_dir().join(format!("eagle-session-search-reset-{}", std::process::id()));
+        {
+            let store = Store::open(&root).unwrap();
+            store
+                .put_track(&Track {
+                    id: "yandex:1".parse().unwrap(),
+                    title: "Локальная медиатека".into(),
+                    artists: vec![],
+                    album: None,
+                    album_title: None,
+                    duration_ms: 1000,
+                    cover: None,
+                    availability: Availability::Available,
+                    isrc: None,
+                })
+                .unwrap();
+            seed_like(&store, "yandex:1");
+        }
+        let (tx, rx) = mpsc::channel();
+        let session = Session::start(root.clone(), move |event| {
+            let _ = tx.send(event);
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if matches!(event, Event::Library(_)) {
+                break;
+            }
+        }
+        session
+            .sender()
+            .send(Command::Open(View::Search))
+            .unwrap_or_else(|_| panic!("worker stopped"));
+        // The UI keeps search results apart from the list it showed before, so indexed
+        // deltas against that list cannot be applied to them.
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Event::Library(delta) => {
+                    panic!("indexed deltas sent to the search view: {delta:?}")
+                }
+                Event::LibraryReset(rows) => {
+                    assert!(rows.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(session);
+        while rx.recv_timeout(Duration::from_secs(2)).is_ok() {}
         std::fs::remove_dir_all(root).unwrap();
     }
 }
