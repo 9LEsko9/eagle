@@ -7231,13 +7231,20 @@ mod sync_tests {
         unresolved: &[&str],
     ) -> (Catalog, Arc<eagle_provider_sdk::testkit::FakeProvider>) {
         use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
-        let fakea = Arc::new(
+        unresolved_catalog_with(
+            unresolved,
             FakeProvider::new("fakea").with_tracks(
                 (1..=4)
                     .map(|n| fake_track("fakea", &n.to_string(), "Song", "Artist", 1000))
                     .collect(),
             ),
-        );
+        )
+    }
+    fn unresolved_catalog_with(
+        unresolved: &[&str],
+        fakea: eagle_provider_sdk::testkit::FakeProvider,
+    ) -> (Catalog, Arc<eagle_provider_sdk::testkit::FakeProvider>) {
+        let fakea = Arc::new(fakea);
         let providers = Arc::new(Providers::new(
             vec![fakea.clone() as Arc<dyn Provider>],
             &[],
@@ -7281,6 +7288,24 @@ mod sync_tests {
             c.store.unresolved_likes("gone", 10).unwrap(),
             vec!["gone:7".parse::<TrackId>().unwrap()]
         );
+    }
+    #[test]
+    fn network_error_stops_unresolved_likes_pass_and_keeps_them() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let (c, fakea) = unresolved_catalog_with(
+            &["fakea:3", "fakea:4"],
+            FakeProvider::new("fakea")
+                .with_tracks(
+                    (1..=4)
+                        .map(|n| fake_track("fakea", &n.to_string(), "Song", "Artist", 1000))
+                        .collect(),
+                )
+                .fail_track_with(|| ProviderError::Network),
+        );
+        sync_likes_of(&c, "fakea");
+        // The first failure ends the pass: the second id is not asked, nothing is lost.
+        assert_eq!(fakea.track_calls().len(), 1);
+        assert_eq!(c.store.unresolved_likes_count().unwrap(), 2);
     }
     #[test]
     fn like_goes_to_every_provider_that_has_the_song() {
@@ -7536,6 +7561,37 @@ mod like_delivery_tests {
         }
         drop(tx);
         catalog.join().unwrap();
+    }
+
+    #[test]
+    fn pending_likes_queue_flush_behind_requests_already_waiting() {
+        let fake = Arc::new(FakeProvider::new("fake"));
+        let mut h = harness("flush-order", &fake);
+        let (catalog_tx, catalog_rx) = mpsc::channel();
+        h.worker.catalog = Some(catalog_tx.clone());
+        catalog_tx
+            .send(CatalogRequest::Command(7, Command::Search("x".into())))
+            .unwrap();
+        h.tx.send(Message::Catalog(
+            0,
+            Box::new(Ok(CatalogReply::LikesPending)),
+        ))
+        .unwrap();
+        h.tx.send(Message::Command(Command::Shutdown)).unwrap();
+        let tx = h.tx.clone();
+        let worker = std::thread::spawn(move || h.worker.run(h.rx).map_err(|e| e.to_string()));
+        // The worker's own start-up requests also pass; only the order of these two matters.
+        let mut order = Vec::new();
+        while !order.contains(&"flush") {
+            match catalog_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                CatalogRequest::Command(7, Command::Search(_)) => order.push("search"),
+                CatalogRequest::FlushLikes { online: false } => order.push("flush"),
+                _ => {}
+            }
+        }
+        assert_eq!(order, ["search", "flush"]);
+        drop(tx);
+        worker.join().unwrap().unwrap();
     }
 
     #[test]

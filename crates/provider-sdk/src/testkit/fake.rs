@@ -29,6 +29,7 @@ pub struct FakeProvider {
     playlists: Vec<Playlist>,
     unavailable: Vec<&'static str>,
     failure: Option<Failure>,
+    track_failure: Option<Failure>,
     delay: Duration,
     state: Mutex<State>,
 }
@@ -75,6 +76,7 @@ impl FakeProvider {
             playlists: Vec::new(),
             unavailable: Vec::new(),
             failure: None,
+            track_failure: None,
             delay: Duration::ZERO,
             state: Mutex::new(State {
                 signed_in: true,
@@ -125,6 +127,15 @@ impl FakeProvider {
     ) -> Self {
         self.failure = Some(Box::new(failure));
         self.state_mut().failing = true;
+        self
+    }
+
+    /// Makes only `track` fail, with `failure`; the other methods keep working.
+    pub fn fail_track_with(
+        mut self,
+        failure: impl Fn() -> ProviderError + Send + Sync + 'static,
+    ) -> Self {
+        self.track_failure = Some(Box::new(failure));
         self
     }
 
@@ -446,6 +457,9 @@ impl Provider for FakeProvider {
     fn track(&self, id: &TrackId) -> Result<Track, ProviderError> {
         self.lock().track_calls.push(id.clone());
         self.guard()?;
+        if let Some(failure) = &self.track_failure {
+            return Err(failure());
+        }
         self.track_by_id(id).cloned().ok_or(ProviderError::NotFound)
     }
 
