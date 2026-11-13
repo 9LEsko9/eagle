@@ -26,6 +26,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Above this many inserts/removals a list change is sent as one reset.
 const RESET_THRESHOLD: usize = 32;
 /// Wait before retrying likes that a provider refused for rate limiting.
+fn likes_backfill_key(provider: &str) -> String {
+    format!("likes_backfill:{provider}")
+}
 const LIKE_RETRY_SECS: i64 = 300;
 
 /// The uid of the account owning this installation's rights, or empty when none is stored.
@@ -192,6 +195,12 @@ pub enum Command {
         provider: String,
         keep_saved: bool,
     },
+    /// The user's answer to `Event::LikesBackfillOffer`: send the likes the provider lacks, now
+    /// and whenever a new link appears (`accept`), or never.
+    LikesBackfill {
+        provider: String,
+        accept: bool,
+    },
     Album(TrackId),
     Playlist(TrackId),
     Artist(TrackId),
@@ -323,6 +332,12 @@ pub struct SessionSnapshot {
 pub enum Event {
     /// Every provider with its sign-in state; sent whenever any of them changes.
     Providers(Vec<ProviderStatus>),
+    /// `count` local likes could be sent to the connected `provider`; nothing is sent until the
+    /// user answers with `Command::LikesBackfill`.
+    LikesBackfillOffer {
+        provider: String,
+        count: usize,
+    },
     RadioState {
         ready: bool,
         busy: bool,
@@ -704,7 +719,7 @@ impl Worker {
             }
         });
         let order: Vec<String> = match store.setting("provider_order")? {
-            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Some(json) => crate::providers::parse_provider_order(&json),
             None => Vec::new(),
         };
         let providers = Arc::new(Providers::new(providers, &order).with_tokens(tokens));
@@ -1237,7 +1252,7 @@ impl Worker {
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
-                            Ok(CatalogReply::Synced) => {
+                            Ok(reply @ (CatalogReply::Synced | CatalogReply::SyncedOffer(..))) => {
                                 let liked = self
                                     .store
                                     .liked_track_ids()?
@@ -1260,6 +1275,9 @@ impl Worker {
                                 if self.view == View::Library {
                                     // View-bound, so a reply racing a navigation is discarded.
                                     self.request(Command::Library)?;
+                                }
+                                if let CatalogReply::SyncedOffer(provider, count) = reply {
+                                    (self.emit)(Event::LikesBackfillOffer { provider, count });
                                 }
                             }
                             Ok(CatalogReply::AlbumsSynced) => {
@@ -2293,6 +2311,7 @@ impl Worker {
             command @ (Command::Library
             | Command::Collections
             | Command::Login { .. }
+            | Command::LikesBackfill { .. }
             | Command::Like(_)) => self.request(command)?,
             Command::Logout {
                 provider,
@@ -2876,6 +2895,8 @@ enum CatalogReply {
         Option<String>,
     ),
     Synced,
+    /// Like `Synced`, and the provider's missing likes wait for the user's consent.
+    SyncedOffer(String, usize),
     AlbumsSynced,
     ArtistsSynced,
     Cards(Vec<Card>),
@@ -3104,7 +3125,7 @@ impl Catalog {
                     .filter_map(|id| id.parse().ok())
                     .collect();
                 match self.store.sync_provider_likes(provider_id, &ids) {
-                    Ok(_) => Ok((Some(CatalogReply::Synced), false)),
+                    Ok(_) => Ok((Some(self.backfill_after_sync(provider_id)), false)),
                     Err(error) => {
                         log::warn!(provider = provider_id, error = error.to_string().as_str(); "liked tracks sync failed");
                         Ok((None, false))
@@ -3321,6 +3342,32 @@ impl Catalog {
                 .put_setting(&liked_artists_key(id), serde_json::to_string(artists)?)?;
         }
         Ok(())
+    }
+    /// After a provider's likes were synced: sends the likes it lacks if the user agreed, offers
+    /// to if the user has not been asked and there is something to send, and does nothing if the
+    /// user declined.
+    fn backfill_after_sync(&self, provider: &str) -> CatalogReply {
+        let key = likes_backfill_key(provider);
+        let answer = self.store.setting(&key).unwrap_or_else(|error| {
+            log::warn!(provider = provider, error = error.to_string().as_str(); "backfill setting unreadable");
+            Some("no".into())
+        });
+        match answer.as_deref() {
+            Some("yes") => {
+                if let Err(error) = self.store.queue_likes_backfill(provider) {
+                    log::warn!(provider = provider, error = error.to_string().as_str(); "likes backfill failed");
+                }
+                self.flush_likes();
+                CatalogReply::Synced
+            }
+            Some(_) => CatalogReply::Synced,
+            None => match self.store.likes_backfill_candidates(provider) {
+                Ok(found) if !found.is_empty() => {
+                    CatalogReply::SyncedOffer(provider.to_owned(), found.len())
+                }
+                _ => CatalogReply::Synced,
+            },
+        }
     }
     /// Sends queued likes to their providers. A failed attempt stays queued unless its outcome is
     /// unknown (never resent by itself) or the provider rejected it for good.
@@ -3857,6 +3904,20 @@ impl Catalog {
                 } else {
                     CatalogReply::Providers
                 })
+            }
+            Command::LikesBackfill { provider, accept } => {
+                if self.providers.get(&provider).is_none() {
+                    return Err("провайдер недоступен".into());
+                }
+                self.store.put_setting(
+                    &likes_backfill_key(&provider),
+                    if accept { "yes" } else { "no" }.into(),
+                )?;
+                if accept {
+                    self.store.queue_likes_backfill(&provider)?;
+                    self.flush_likes();
+                }
+                Ok(CatalogReply::Unchanged)
             }
             Command::Like(id) => {
                 let liked = !self.store.is_liked(&id)?;
@@ -6243,7 +6304,12 @@ mod sync_tests {
                 Message::Catalog(10, reply) if matches!(*reply, Ok(CatalogReply::Liked(_, _))) => {
                     liked = true
                 }
-                Message::Catalog(_, reply) if matches!(*reply, Ok(CatalogReply::Synced)) => {
+                Message::Catalog(_, reply)
+                    if matches!(
+                        *reply,
+                        Ok(CatalogReply::Synced | CatalogReply::SyncedOffer(..))
+                    ) =>
+                {
                     assert!(liked);
                     break;
                 }
@@ -6473,7 +6539,6 @@ mod sync_tests {
                 .unwrap();
         }
         worker.account = "fake-uid".into();
-        worker.downloads.account("fake-uid".into());
         worker
             .store
             .write(|c| {
@@ -6495,6 +6560,8 @@ mod sync_tests {
             let job = worker.store.claim_download("fake-uid").unwrap().unwrap();
             assert!(worker.store.finish_saved_download(&job).unwrap());
         }
+        // Only now may the download worker look at this account's queue.
+        worker.downloads.account("fake-uid".into());
         (worker, tokens, seen)
     }
     fn saved(worker: &Worker) -> Vec<String> {
@@ -6574,6 +6641,120 @@ mod sync_tests {
     }
     fn pending_likes(c: &Catalog, provider: &str) -> usize {
         c.store.like_jobs(provider, i64::MAX).unwrap().len()
+    }
+    fn backfill_catalog() -> (Catalog, Arc<eagle_provider_sdk::testkit::FakeProvider>) {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let song = |provider: &str, n: u64| {
+            fake_track(
+                provider,
+                &n.to_string(),
+                &format!("Song {n}"),
+                "Artist",
+                1000 * n,
+            )
+        };
+        let fakea = Arc::new(
+            FakeProvider::new("fakea").with_tracks((1..=4).map(|n| song("fakea", n)).collect()),
+        );
+        let fakeb = Arc::new(
+            FakeProvider::new("fakeb").with_tracks((1..=4).map(|n| song("fakeb", n)).collect()),
+        );
+        let all: Vec<Arc<dyn Provider>> = vec![fakea.clone(), fakeb.clone()];
+        let providers = Arc::new(Providers::new(all, &[]));
+        for provider in [&fakea, &fakeb] {
+            providers.set_account(
+                provider.info().id,
+                Some(provider.login(Token::new("t".into())).unwrap()),
+            );
+        }
+        let c = catalog_with(providers);
+        c.store
+            .put_tracks(&[song("fakea", 4), song("fakeb", 4)])
+            .unwrap();
+        for n in 1..=3 {
+            let title = format!("Song {n}");
+            let both = [
+                fake_track("fakea", &n.to_string(), &title, "Artist", 1000 * n),
+                fake_track("fakeb", &n.to_string(), &title, "Artist", 1000 * n),
+            ];
+            c.store.put_tracks(&both).unwrap();
+            c.store.like(&both[0].id, true, &[]).unwrap();
+        }
+        (c, fakeb)
+    }
+    fn sync_likes_of(c: &Catalog, provider: &str) -> CatalogReply {
+        let mut state = SyncState {
+            step: 1,
+            done: c
+                .providers
+                .with_capability(|c| c.likes)
+                .map(|p| p.info().id.to_owned())
+                .filter(|id| id != provider)
+                .collect(),
+            ..SyncState::default()
+        };
+        let mut last = None;
+        while state.step != 3 {
+            if let (Some(reply), _) = c.sync_step(&mut state).unwrap() {
+                last = Some(reply);
+            }
+        }
+        last.unwrap()
+    }
+    #[test]
+    fn old_likes_are_offered_to_a_new_provider_and_sent_only_after_consent() {
+        let (c, fakeb) = backfill_catalog();
+        // fakea already has the likes; fakeb does not.
+        c.store
+            .sync_provider_likes(
+                "fakea",
+                &(1..=3)
+                    .map(|n| format!("fakea:{n}").parse().unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert!(matches!(
+            sync_likes_of(&c, "fakeb"),
+            CatalogReply::SyncedOffer(p, 3) if p == "fakeb"
+        ));
+        assert!(fakeb.set_liked_calls().is_empty());
+        assert_eq!(pending_likes(&c, "fakeb"), 0);
+
+        c.command(Command::LikesBackfill {
+            provider: "fakeb".into(),
+            accept: true,
+        })
+        .unwrap();
+        assert_eq!(fakeb.set_liked_calls().len(), 3);
+        assert_eq!(pending_likes(&c, "fakeb"), 0);
+        // Answered: no second offer, and a like made now goes out at once.
+        assert!(matches!(sync_likes_of(&c, "fakeb"), CatalogReply::Synced));
+    }
+    #[test]
+    fn declining_the_backfill_sends_nothing_and_is_not_asked_again() {
+        let (c, fakeb) = backfill_catalog();
+        c.command(Command::LikesBackfill {
+            provider: "fakeb".into(),
+            accept: false,
+        })
+        .unwrap();
+        assert!(matches!(sync_likes_of(&c, "fakeb"), CatalogReply::Synced));
+        assert!(fakeb.set_liked_calls().is_empty());
+        assert_eq!(pending_likes(&c, "fakeb"), 0);
+        // New likes still reach the provider.
+        let new_like: TrackId = "fakea:4".parse().unwrap();
+        c.command(Command::Like(new_like)).unwrap();
+        assert_eq!(
+            fakeb.set_liked_calls(),
+            vec![("fakeb:4".parse().unwrap(), true)]
+        );
+    }
+    #[test]
+    fn there_is_no_offer_without_likes_to_send() {
+        let (c, _) = backfill_catalog();
+        let (c2, _, _) = like_catalog(None);
+        assert!(matches!(sync_likes_of(&c2, "fakeb"), CatalogReply::Synced));
+        drop(c);
     }
     #[test]
     fn like_goes_to_every_provider_that_has_the_song() {

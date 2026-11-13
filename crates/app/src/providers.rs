@@ -24,6 +24,31 @@ pub struct ProviderStatus {
     pub capabilities: Capabilities,
 }
 
+/// Reads the `provider_order` setting into provider ids, first wins. The setting is a JSON map
+/// of id to fractional position (so a provider can be put between two others by one write and
+/// two devices' edits merge per provider); a plain list of ids is accepted as well.
+pub fn parse_provider_order(json: &str) -> Vec<String> {
+    if let Ok(positions) = serde_json::from_str::<HashMap<String, f64>>(json) {
+        let mut positions: Vec<_> = positions
+            .into_iter()
+            .filter(|(_, at)| at.is_finite())
+            .collect();
+        positions.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        return positions.into_iter().map(|(id, _)| id).collect();
+    }
+    serde_json::from_str(json).unwrap_or_default()
+}
+
+/// A position strictly between `before` and `after`; either side may be open.
+pub fn position_between(before: Option<f64>, after: Option<f64>) -> f64 {
+    match (before, after) {
+        (Some(a), Some(b)) => (a + b) / 2.0,
+        (Some(a), None) => a + 1.0,
+        (None, Some(b)) => b - 1.0,
+        (None, None) => 0.0,
+    }
+}
+
 pub struct Providers {
     /// Priority order: the first entry wins.
     all: Vec<Arc<dyn Provider>>,
@@ -205,6 +230,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn order_setting_is_a_map_of_fractional_positions_or_a_plain_list() {
+        let order = parse_provider_order(r#"{"fakea":2.0,"fakeb":1.5,"fakec":-1.0}"#);
+        assert_eq!(order, ["fakec", "fakeb", "fakea"]);
+        assert_eq!(
+            parse_provider_order(r#"["fakeb","fakea"]"#),
+            ["fakeb", "fakea"]
+        );
+        assert!(parse_provider_order("not json").is_empty());
+        let between = position_between(Some(1.5), Some(2.0));
+        assert!(1.5 < between && between < 2.0);
+        assert!(position_between(None, Some(0.0)) < 0.0);
+        assert!(position_between(Some(3.0), None) > 3.0);
+    }
     #[test]
     fn order_follows_setting_and_appends_new_providers() {
         let order = ["fakeb".to_owned()];

@@ -46,6 +46,12 @@ fn like_body(tx: &Transaction, track: &str) -> Result<String, Error> {
     Ok(serde_json::json!({"liked": true, "track": snapshot}).to_string())
 }
 
+const BACKFILL_SQL: &str = "SELECT MIN(g.track), l.at FROM liked l JOIN track_groups g ON g.grp=l.grp \
+     WHERE substr(g.track,1,length(?1)+1)=?1||':' \
+     AND NOT EXISTS(SELECT 1 FROM provider_liked_seen s JOIN track_groups g2 ON g2.track=s.track WHERE s.provider=?1 AND g2.grp=l.grp) \
+     AND NOT EXISTS(SELECT 1 FROM like_outbox o JOIN track_groups g3 ON g3.track=o.track WHERE o.provider=?1 AND g3.grp=l.grp) \
+     GROUP BY l.grp ORDER BY l.at, l.grp";
+
 const UNLIKE_BODY: &str = r#"{"liked":false}"#;
 
 /// Likes the track, or unlikes every member of its group (a tombstone per member, so that no
@@ -147,6 +153,38 @@ impl Store {
 
     /// Merges one provider's liked tracks (`ids`, newest first, already stored) into `liked`.
     ///
+    /// Liked groups that have a track of `provider` which the provider does not list and has no
+    /// queued job: the likes that could be sent to a newly connected service. Oldest first.
+    pub fn likes_backfill_candidates(&self, provider: &str) -> Result<Vec<(String, i64)>, Error> {
+        let c = self.read()?;
+        let mut stmt = c.prepare(BACKFILL_SQL)?;
+        Ok(stmt
+            .query_map([provider], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Queues a like job for every backfill candidate of `provider`, keeping the like's own
+    /// order (`at`) so the provider sees them oldest first. Returns how many were queued.
+    pub fn queue_likes_backfill(&self, provider: &str) -> Result<usize, Error> {
+        let provider = provider.to_owned();
+        self.write(move |c| {
+            let tx = c.transaction()?;
+            let candidates: Vec<(String, i64)> = {
+                let mut stmt = tx.prepare(BACKFILL_SQL)?;
+                stmt.query_map([&provider], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?
+            };
+            for (track, at) in &candidates {
+                tx.execute(
+                    "INSERT OR IGNORE INTO like_outbox VALUES(?1,?2,1,'pending',?3,0)",
+                    params![provider, track, at],
+                )?;
+            }
+            tx.commit()?;
+            Ok(candidates.len())
+        })
+    }
+
     /// New likes are added. A like that the provider listed last time and no longer lists is
     /// removed locally only if it has not been set again since that sync. A like the provider
     /// never listed, or a track whose unlike has not reached the provider yet, is left alone.

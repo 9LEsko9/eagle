@@ -677,6 +677,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             }
         }
         Event::Account => ui.global::<Ui>().set_signed_in(true),
+        // No dialog yet: until the user can answer, nothing is sent to the provider.
+        Event::LikesBackfillOffer { .. } => {}
         Event::Providers(all) => {
             let items: Vec<ProviderItem> = all
                 .into_iter()
