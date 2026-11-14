@@ -142,6 +142,44 @@ fn radio_batch(value: &Value) -> Result<RadioBatch, RadioError> {
         tracks: tracks(&value["sequence"]).map_err(|_| RadioError::Uncertain)?,
     })
 }
+/// The rotor `settingMoodEnergy` value for a mood direction of `RadioTuning::mood_direction`:
+/// bright and cheerful are `fun`, energetic and edgy `active`, gloomy and sad `sad`, quiet and
+/// calm `calm`. The service has no finer scale, so the direction is folded into four values.
+fn mood_setting(direction: usize) -> &'static str {
+    match direction {
+        0 | 1 => "fun",
+        2 | 3 => "active",
+        4 | 5 => "sad",
+        _ => "calm",
+    }
+}
+/// The rotor seeds of a wave: `user:onyourwave` (or `track:<id>` for a seed track) plus the
+/// `settingMoodEnergy` and `settingDiversity` settings that the tuning asks for. The default
+/// tuning sends no settings, which is the plain "My wave".
+fn radio_seeds(tuning: &RadioTuning) -> Result<Vec<String>, ProviderError> {
+    let tuning = tuning.normalized();
+    let mut seeds = vec![match &tuning.seed {
+        Some(seed) => {
+            if seed.provider() != "yandex"
+                || seed.local().is_empty()
+                || !seed.local().bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(ProviderError::InvalidId);
+            }
+            format!("track:{}", seed.local())
+        }
+        None => "user:onyourwave".to_owned(),
+    }];
+    if let Some(direction) = tuning.mood_direction() {
+        seeds.push(format!("settingMoodEnergy:{}", mood_setting(direction)));
+    }
+    match tuning.novelty_band() {
+        NoveltyBand::Familiar => seeds.push("settingDiversity:favorite".into()),
+        NoveltyBand::New => seeds.push("settingDiversity:discover".into()),
+        NoveltyBand::Balanced => {}
+    }
+    Ok(seeds)
+}
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| {
@@ -338,6 +376,8 @@ impl Yandex {
         capabilities.playlists_edit = true;
         capabilities.artist_page = true;
         capabilities.radio = true;
+        capabilities.radio_tuning = true;
+        capabilities.radio_seed = true;
         capabilities.offline = true;
         Self {
             info: ProviderInfo {
@@ -549,8 +589,12 @@ impl Yandex {
     }
 }
 impl Provider for Yandex {
-    fn radio_start(&self) -> Result<RadioSession, RadioError> {
-        let value = self.radio_post("/rotor/session/new", serde_json::json!({"seeds":["user:onyourwave"], "includeTracksInResponse":true, "incognito":true}))?;
+    fn radio_start(&self, tuning: &RadioTuning) -> Result<RadioSession, RadioError> {
+        let seeds = radio_seeds(tuning)?;
+        let value = self.radio_post(
+            "/rotor/session/new",
+            serde_json::json!({"seeds": seeds, "includeTracksInResponse": true, "incognito": true}),
+        )?;
         let id = value["radioSessionId"]
             .as_str()
             .filter(|s| valid_session(s))
@@ -1397,7 +1441,7 @@ mod tests {
         let next = r#"{"result":{"batchId":"batch-2","unknownSession":false,"sequence":[{"track":{"id":"7","title":"A","artists":[]}}]}}"#;
         let unknown = r#"{"result":{"unknownSession":true}}"#;
         let (provider, server) = mock_api(vec![start, next, unknown]);
-        let session = provider.radio_start().unwrap();
+        let session = provider.radio_start(&RadioTuning::default()).unwrap();
         let queue = [RadioQueueItem {
             track: "yandex:7".parse().unwrap(),
             album: Some("yandex:8".parse().unwrap()),
@@ -1413,6 +1457,8 @@ mod tests {
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("POST /rotor/session/new "));
         assert!(requests[0].contains("application/json"));
+        assert!(requests[0].contains(r#""seeds":["user:onyourwave"]"#));
+        assert!(!requests[0].contains("setting"));
         assert!(requests[1].starts_with("POST /rotor/session/fixture-session/tracks "));
         assert!(requests[1].contains("7:8"));
         assert!(!requests.iter().any(|r| r.contains("feedback")));
@@ -1424,6 +1470,74 @@ mod tests {
             provider.radio_next(&invalid, &[]),
             Err(RadioError::Provider(ProviderError::InvalidId))
         ));
+    }
+    #[test]
+    fn radio_start_sends_mood_and_diversity_settings_and_the_seed_track() {
+        let start = r#"{"result":{"radioSessionId":"fixture-session","batchId":"batch-1","sequence":[{"track":{"id":"7","title":"A","artists":[]}}]}}"#;
+        let (provider, server) = mock_api(vec![start, start]);
+        provider
+            .radio_start(&RadioTuning {
+                mood: Some((0.0, 0.9)),
+                novelty: 0.9,
+                seed: None,
+            })
+            .unwrap();
+        provider
+            .radio_start(&RadioTuning {
+                mood: None,
+                novelty: 0.1,
+                seed: Some("yandex:7".parse().unwrap()),
+            })
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains(
+            r#""seeds":["user:onyourwave","settingMoodEnergy:active","settingDiversity:discover"]"#
+        ));
+        assert!(
+            requests[1].contains(r#""seeds":["track:7","settingDiversity:favorite"]"#),
+            "{}",
+            requests[1]
+        );
+        assert!(requests.iter().all(|r| r.contains(r#""incognito":true"#)));
+    }
+    #[test]
+    fn radio_seeds_map_all_mood_directions_and_reject_foreign_seeds() {
+        let mood = |x: f32, y: f32| {
+            radio_seeds(&RadioTuning {
+                mood: Some((x, y)),
+                ..RadioTuning::default()
+            })
+            .unwrap()
+        };
+        assert_eq!(mood(0.0, 0.0), ["user:onyourwave"]);
+        assert_eq!(mood(0.05, 0.0), ["user:onyourwave"]);
+        let expected = [
+            ((1.0, 0.0), "fun"),
+            ((0.7, 0.7), "fun"),
+            ((0.0, 1.0), "active"),
+            ((-0.7, 0.7), "active"),
+            ((-1.0, 0.0), "sad"),
+            ((-0.7, -0.7), "sad"),
+            ((0.0, -1.0), "calm"),
+            ((0.7, -0.7), "calm"),
+        ];
+        for ((x, y), setting) in expected {
+            assert_eq!(
+                mood(x, y)[1],
+                format!("settingMoodEnergy:{setting}"),
+                "{x},{y}"
+            );
+        }
+        for seed in ["other:7", "yandex:abc", "yandex:7_8"] {
+            let tuning = RadioTuning {
+                seed: Some(seed.parse().unwrap()),
+                ..RadioTuning::default()
+            };
+            assert!(matches!(
+                radio_seeds(&tuning),
+                Err(ProviderError::InvalidId)
+            ));
+        }
     }
     #[test]
     fn playlist_entry_album_identity_overrides_track_album() {

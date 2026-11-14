@@ -32,6 +32,37 @@ mod tray;
 mod window_chrome;
 
 use eagle_app::session::{Command, CommandSender, Event};
+
+/// The field of dots on the wave pad: a hexagonal grid inside the reach of the knob, as
+/// fractions of the pad. `edge` fades the dots near the rim.
+pub fn pad_dots() -> Vec<PadDot> {
+    const REACH: f32 = 0.31;
+    const STEP: f32 = 0.034;
+    const ROW: f32 = STEP * 0.866;
+    let rows = (0.5 / ROW).ceil() as i32;
+    let mut dots = Vec::new();
+    for row in -rows..=rows {
+        let y = 0.5 + row as f32 * ROW;
+        let shift = if row.rem_euclid(2) == 1 {
+            STEP / 2.
+        } else {
+            0.
+        };
+        for col in -16..=16 {
+            let x = 0.5 + col as f32 * STEP + shift;
+            let distance = (x - 0.5).hypot(y - 0.5);
+            if distance > REACH - 0.012 {
+                continue;
+            }
+            dots.push(PadDot {
+                x,
+                y,
+                edge: ((REACH - distance) / 0.06).min(1.),
+            });
+        }
+    }
+    dots
+}
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU64;
 
@@ -1344,5 +1375,20 @@ mod tests {
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(10));
         slint::platform::update_timers_and_animations();
         assert_eq!(*positions.borrow(), before);
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    #[test]
+    fn dots_stay_inside_the_reach_and_fade_toward_the_rim() {
+        let dots = super::pad_dots();
+        assert!(dots.len() > 200);
+        for dot in &dots {
+            assert!((dot.x - 0.5).hypot(dot.y - 0.5) < 0.31);
+            assert!((0.0..=1.0).contains(&dot.edge));
+        }
+        assert!(dots.iter().any(|dot| dot.edge < 0.5));
+        assert!(dots.iter().any(|dot| dot.edge == 1.0));
     }
 }

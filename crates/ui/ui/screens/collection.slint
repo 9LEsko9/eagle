@@ -27,7 +27,7 @@ export component TrackMenu inherits Rectangle {
     private property <string> playlist-id;
     private property <string> revision;
     private property <length> anchor-y;
-    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0) - (Ui.route == Route.radio ? 1 : 0)) * 34px + 10px;
+    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0)) * 34px + 10px;
     public function open(item: TrackItem, row-top: length, index: int) {
         root.item = item;
         root.row-index = index;
@@ -56,7 +56,7 @@ export component TrackMenu inherits Rectangle {
             drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 5px;
-                if Ui.route != Route.radio : MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
+                MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
                 MenuItem { init => { self.focus-item(); } text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
@@ -96,13 +96,10 @@ export component CollectionScreen inherits VerticalLayout {
     private property <length> cover-size: Ui.panel-open && !Layout.narrow ? 112px : 148px;
     // Search results are dimmed while a new search is in flight.
     private property <bool> dimmed: Ui.route == Route.search && Loading.search;
-    // Radio and playlist buttons: which action was clicked, so only that button shows busy.
-    // -1 means no radio action; -2 means no playlist action; -1 for playlist means a menu edit.
-    private property <int> radio-action: -1;
+    // Playlist buttons: which action was clicked, so only that button shows busy.
+    // -2 means no playlist action; -1 means a menu edit.
     private property <int> playlist-action: -2;
     // Forget the clicked action once the work ends, so a later one cannot light up a stale button.
-    private property <bool> radio-busy: Ui.radio-busy;
-    changed radio-busy => { if !self.radio-busy { root.radio-action = -1; } }
     private property <bool> playlist-busy: Ui.playlist-busy;
     changed playlist-busy => { if !self.playlist-busy { root.playlist-action = -2; } }
     // Derived from the window, not from this screen's own width, to avoid a layout loop.
@@ -157,7 +154,7 @@ export component CollectionScreen inherits VerticalLayout {
                 height: title-text.height;
                 title-text := Text {
                     width: parent.width;
-                    text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : root.collection ? " " : Ui.route == Route.radio ? @tr("Моя волна") : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
+                    text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : root.collection ? " " : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
                     color: Theme.t.tx;
                     font-size: Layout.compact ? Type.title : Type.display;
                     font-weight: 700;
@@ -192,7 +189,7 @@ export component CollectionScreen inherits VerticalLayout {
                     height: 10px;
                 }
             }
-            if root.collection || Ui.route == Route.saved || Ui.route == Route.history || (Ui.route == Route.radio && Library.tracks.length > 0) : HorizontalLayout {
+            if root.collection || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 spacing: 10px;
                 padding-top: 16px;
                 alignment: start;
@@ -251,28 +248,6 @@ export component CollectionScreen inherits VerticalLayout {
         }
         if !(Loading.playlist && root.playlist-action == -1) : Text { text: Player.track-id == "" ? @tr("Запустите трек, чтобы добавить его в плейлист.") : Player.album-id == "" ? @tr("Для добавления нужна информация об альбоме трека.") : @tr("Порядок и удаление — в меню трека."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
     }
-    if Ui.route == Route.radio : VerticalLayout {
-        spacing: 6px;
-        HorizontalLayout {
-            alignment: start;
-            spacing: 8px;
-            TextButton {
-                text: Ui.radio-ready ? @tr("Новая волна") : @tr("Получить рекомендации");
-                primary: Library.tracks.length == 0;
-                outline: Library.tracks.length > 0;
-                enabled: !Ui.radio-busy;
-                busy: Loading.radio && root.radio-action == 0;
-                clicked => { root.radio-action = 0; Actions.radio-start(); }
-            }
-            if Ui.radio-ready : TextButton {
-                text: @tr("Ещё треки");
-                enabled: !Ui.radio-busy;
-                busy: Loading.radio && root.radio-action == 1;
-                clicked => { root.radio-action = 1; Actions.radio-more(); }
-            }
-        }
-        Text { text: Ui.radio-notice != "" ? Ui.radio-notice : @tr("Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
-    }
     if Ui.route == Route.search : VerticalLayout {
         spacing: 12px;
         search-timer := Timer {
@@ -310,11 +285,11 @@ export component CollectionScreen inherits VerticalLayout {
         }
     }
     // First load of a track list: header and placeholder rows, shown only after the loading delay.
-    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && (Loading.page || (Ui.route == Route.radio && Loading.radio)) : VerticalLayout {
+    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && Loading.page : VerticalLayout {
         TrackTableHeader { show-album: root.show-album; }
         SkeletonRows { show-album: root.show-album; }
     }
-    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && !Ui.busy && !(Ui.route == Route.radio && Ui.radio-busy) : Text {
+    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && !Ui.busy : Text {
         text: Ui.route == Route.search ? (Ui.search-query == "" ? @tr("Введите запрос и нажмите Enter") : @tr("Ничего не найдено"))
             : Ui.route == Route.library && Ui.signed-in ? @tr("Здесь появятся треки, которые вам нравятся.")
             : Ui.route == Route.library ? @tr("В медиатеке пока пусто. Войдите и найдите первый трек.")

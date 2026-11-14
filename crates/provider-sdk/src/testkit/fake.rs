@@ -7,7 +7,7 @@ use crate::AuthMethod;
 use crate::{
     Account, Album, Artist, ArtistPage, Availability, Capabilities, Encryption, Page, Playlist,
     PlaylistSnapshot, Provider, ProviderError, ProviderInfo, Quality, RadioBatch, RadioError,
-    RadioSession, SignedUrl, Stream, Token, Track, TrackId,
+    RadioSession, RadioTuning, SignedUrl, Stream, Token, Track, TrackId,
 };
 use std::{
     sync::{Mutex, MutexGuard, PoisonError},
@@ -42,6 +42,7 @@ struct State {
     resolve_calls: Vec<TrackId>,
     track_calls: Vec<TrackId>,
     set_liked_calls: Vec<(TrackId, bool)>,
+    radio_tunings: Vec<RadioTuning>,
     search_calls: usize,
 }
 
@@ -60,6 +61,8 @@ impl FakeProvider {
         capabilities.playlists_read = true;
         capabilities.artist_page = true;
         capabilities.radio = true;
+        capabilities.radio_tuning = true;
+        capabilities.radio_seed = true;
         capabilities.play_reporting = true;
         capabilities.offline = true;
         Self {
@@ -85,6 +88,7 @@ impl FakeProvider {
                 resolve_calls: Vec::new(),
                 track_calls: Vec::new(),
                 set_liked_calls: Vec::new(),
+                radio_tunings: Vec::new(),
                 search_calls: 0,
             }),
         }
@@ -168,6 +172,11 @@ impl FakeProvider {
     /// Arguments of `set_liked` calls, in call order.
     pub fn set_liked_calls(&self) -> Vec<(TrackId, bool)> {
         self.lock().set_liked_calls.clone()
+    }
+
+    /// Tunings passed to `radio_start`, in call order, including rejected ones.
+    pub fn radio_tunings(&self) -> Vec<RadioTuning> {
+        self.lock().radio_tunings.clone()
     }
 
     /// Number of `search` calls, including failed ones.
@@ -343,14 +352,27 @@ fn parse_id(value: &str) -> TrackId {
 }
 
 impl Provider for FakeProvider {
-    fn radio_start(&self) -> Result<RadioSession, RadioError> {
+    fn radio_start(&self, tuning: &RadioTuning) -> Result<RadioSession, RadioError> {
+        self.lock().radio_tunings.push(tuning.clone());
+        let capabilities = &self.info.capabilities;
+        if (tuning.seed.is_some() && !capabilities.radio_seed)
+            || (tuning.is_tuned() && !capabilities.radio_tuning)
+        {
+            return Err(ProviderError::Unavailable.into());
+        }
         self.guard()?;
+        let mut tracks = self.tracks.clone();
+        if let Some(seed) = &tuning.seed {
+            let position = tracks.iter().position(|track| &track.id == seed);
+            let Some(position) = position else {
+                return Err(ProviderError::NotFound.into());
+            };
+            // The seed track opens the wave, like a service that starts from it.
+            tracks.rotate_left(position);
+        }
         Ok(RadioSession {
             id: "fake-session".into(),
-            batch: RadioBatch {
-                id: None,
-                tracks: self.tracks.clone(),
-            },
+            batch: RadioBatch { id: None, tracks },
         })
     }
 
@@ -550,5 +572,56 @@ mod tests {
         assert!(fake.track(&known).is_ok());
         assert!(matches!(fake.track(&unknown), Err(ProviderError::NotFound)));
         assert_eq!(fake.track_calls(), vec![known, unknown]);
+    }
+
+    #[test]
+    fn radio_start_records_the_tuning_and_starts_from_the_seed() {
+        let fake = FakeProvider::new("fakea").with_tracks(vec![
+            fake_track("fakea", "1", "One", "Artist", 1000),
+            fake_track("fakea", "2", "Two", "Artist", 1000),
+            fake_track("fakea", "3", "Three", "Artist", 1000),
+        ]);
+        let seed: TrackId = "fakea:2".parse().unwrap();
+        let tuning = RadioTuning {
+            mood: Some((0.0, 1.0)),
+            novelty: 0.9,
+            seed: Some(seed.clone()),
+        };
+        let session = fake.radio_start(&tuning).unwrap();
+        let ids: Vec<_> = session.batch.tracks.iter().map(|t| t.id.local()).collect();
+        assert_eq!(ids, ["2", "3", "1"]);
+        assert_eq!(fake.radio_tunings(), vec![tuning]);
+        let unknown = RadioTuning {
+            seed: Some("fakea:9".parse().unwrap()),
+            ..RadioTuning::default()
+        };
+        assert!(matches!(
+            fake.radio_start(&unknown),
+            Err(RadioError::Provider(ProviderError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn radio_start_refuses_what_the_capabilities_do_not_declare() {
+        let mut capabilities = Capabilities::none();
+        capabilities.radio = true;
+        let fake = FakeProvider::new("fakea").with_capabilities(capabilities);
+        assert!(fake.radio_start(&RadioTuning::default()).is_ok());
+        let mood = RadioTuning {
+            mood: Some((1.0, 0.0)),
+            ..RadioTuning::default()
+        };
+        assert!(matches!(
+            fake.radio_start(&mood),
+            Err(RadioError::Provider(ProviderError::Unavailable))
+        ));
+        let seeded = RadioTuning {
+            seed: Some("fakea:1".parse().unwrap()),
+            ..RadioTuning::default()
+        };
+        assert!(matches!(
+            fake.radio_start(&seeded),
+            Err(RadioError::Provider(ProviderError::Unavailable))
+        ));
     }
 }
