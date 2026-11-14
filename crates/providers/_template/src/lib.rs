@@ -29,8 +29,10 @@ impl TemplateProvider {
                 id: ID,
                 // Replace: the name shown to users.
                 name: "Template",
-                // This template has no sign-in; use AuthMethod::Token for a token-based service.
-                auth: AuthMethod::None,
+                // This template has no sign-in. List `SignInMethod`s, preferred first, for a
+                // service with accounts: `Token { .. }` goes through `login`; `DeviceCode`,
+                // `Password` and `Browser` go through `sign_in_start` and `sign_in_continue`.
+                sign_in: &[],
                 capabilities,
             },
         }
@@ -92,6 +94,7 @@ impl Provider for TemplateProvider {
     fn account(&self) -> Result<Account, ProviderError> {
         Ok(Account {
             id: "template-user".into(),
+            name: None,
             subscription: true,
             capabilities: self.info.capabilities,
         })

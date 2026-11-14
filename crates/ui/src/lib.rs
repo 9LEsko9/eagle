@@ -15,6 +15,7 @@ use std::{
 };
 slint::include_modules!();
 mod bridge;
+mod browser;
 mod events;
 #[cfg(test)]
 mod grid_tests;

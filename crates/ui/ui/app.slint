@@ -8,7 +8,6 @@ import { CreatePlaylistDialog } from "components/create-playlist-dialog.slint";
 import { IconButton } from "components/icon-button.slint";
 import { CollectionScreen } from "screens/collection.slint";
 import { SettingsScreen } from "screens/settings.slint";
-import { LoginScreen } from "screens/login.slint";
 import { ArtistScreen } from "screens/artist.slint";
 import { PlayerBar } from "player/player-bar.slint";
 import { NowPlayingPanel, NowPlayingCard } from "player/now-playing-panel.slint";
@@ -63,7 +62,7 @@ component Sidebar inherits VerticalLayout {
             }
         }
     }
-    if !Ui.signed-in : NavItem { text: @tr("Войти"); active: Ui.route == Route.login; clicked => { root.go(Route.login); } }
+    if !Ui.signed-in : NavItem { text: @tr("Войти"); active: Ui.route == Route.settings; clicked => { root.go(Route.settings); } }
     NavItem { text: @tr("Настройки"); active: Ui.route == Route.settings; clicked => { root.go(Route.settings); } }
 }
 
@@ -119,7 +118,6 @@ export component DesktopWindow inherits Window {
                         vertical-stretch: 1;
                         if (Ui.route == Route.saved || Ui.route == Route.history || Ui.route == Route.library || Ui.route == Route.search || Ui.route == Route.album || Ui.route == Route.playlist || Ui.route == Route.albums || Ui.route == Route.artists || Ui.route == Route.radio) : CollectionScreen { }
                         if Ui.route == Route.artist : ArtistScreen { }
-                        if Ui.route == Route.login : LoginScreen { }
                         if Ui.route == Route.settings : SettingsScreen { }
                     }
                     if Ui.error != "" && !Ui.create-playlist : Rectangle {

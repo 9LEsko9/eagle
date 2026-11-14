@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
-    Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
+    Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, OfferPhase, Player,
+    PlayerColors, ProviderItem, QueueItem, Route, SignInKind, SignInMethodItem, SignInPhase,
+    Status, Storage, Theme, TrackItem, Ui,
 };
+use eagle_app::providers::ProviderStatus;
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
-    View,
+    SignInState, View,
 };
 use eagle_engine::{PositionAnchor, State};
 use slint::{ComponentHandle, Model, VecModel};
@@ -86,7 +88,6 @@ fn route(view: View) -> Route {
         View::Search => Route::Search,
         View::Album => Route::Album,
         View::Playlist => Route::Playlist,
-        View::Login => Route::Login,
         View::Settings => Route::Settings,
         View::Albums => Route::Albums,
         View::Artists => Route::Artists,
@@ -95,8 +96,159 @@ fn route(view: View) -> Route {
     }
 }
 
+/// The user's answer about sending local likes to a newly connected service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Offer {
+    /// This many likes could be sent; the user has not answered.
+    Asking(usize),
+    Sent,
+    Skipped,
+}
+
+/// «1 лайк», «2 лайка», «5 лайков».
+fn likes_phrase(count: usize) -> String {
+    let word = match (count % 100, count % 10) {
+        (11..=14, _) => "лайков",
+        (_, 1) => "лайк",
+        (_, 2..=4) => "лайка",
+        _ => "лайков",
+    };
+    format!("{count} {word}")
+}
+
+/// Everything the services section shows, kept so a change to one part rebuilds its row.
+#[derive(Default)]
+struct Services {
+    statuses: RefCell<Vec<ProviderStatus>>,
+    sign_in: RefCell<HashMap<String, SignInState>>,
+    offers: RefCell<HashMap<String, Offer>>,
+    /// Rows are updated in place, so a field being typed in survives every event.
+    rows: Rc<VecModel<ProviderItem>>,
+    attached: Cell<bool>,
+}
+
+/// A link without the scheme and the closing slash: `https://ya.ru/device` becomes `ya.ru/device`.
+fn link_label(url: &str) -> String {
+    let bare = url.split_once("://").map_or(url, |(_, rest)| rest);
+    bare.trim_end_matches('/').to_owned()
+}
+
+fn provider_item(
+    status: &ProviderStatus,
+    state: Option<&SignInState>,
+    offer: Option<Offer>,
+) -> ProviderItem {
+    let methods = status
+        .sign_in
+        .iter()
+        .filter_map(|method| {
+            use eagle_core::SignInMethod;
+            Some(match method {
+                SignInMethod::DeviceCode => SignInMethodItem {
+                    kind: SignInKind::DeviceCode,
+                    hint: Default::default(),
+                    help_url: Default::default(),
+                },
+                SignInMethod::Token { hint, help_url } => SignInMethodItem {
+                    kind: SignInKind::Token,
+                    hint: (*hint).into(),
+                    help_url: help_url.unwrap_or_default().into(),
+                },
+                SignInMethod::Password { login_hint } => SignInMethodItem {
+                    kind: SignInKind::Password,
+                    hint: (*login_hint).into(),
+                    help_url: Default::default(),
+                },
+                SignInMethod::Browser => SignInMethodItem {
+                    kind: SignInKind::Browser,
+                    hint: Default::default(),
+                    help_url: Default::default(),
+                },
+                // A method this build does not know is not offered.
+                _ => return None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut item = ProviderItem {
+        id: status.id.as_str().into(),
+        name: status.name.as_str().into(),
+        signed_in: status.signed_in,
+        account: status.account_name.clone().unwrap_or_default().into(),
+        methods: Rc::new(VecModel::from(methods)).into(),
+        phase: SignInPhase::Idle,
+        offer: OfferPhase::None,
+        ..Default::default()
+    };
+    match state {
+        None | Some(SignInState::Idle) => {}
+        Some(SignInState::Busy) => item.phase = SignInPhase::Busy,
+        Some(SignInState::Code { code, url, expired }) => {
+            item.phase = SignInPhase::Code;
+            item.code = code.as_str().into();
+            item.link = url.as_str().into();
+            item.link_label = link_label(url).into();
+            item.expired = *expired;
+        }
+        Some(SignInState::Browser { url }) => {
+            item.phase = SignInPhase::Browser;
+            item.link = url.as_str().into();
+        }
+        Some(SignInState::SecondFactor { hint }) => {
+            item.phase = SignInPhase::SecondFactor;
+            item.detail = hint.as_str().into();
+        }
+        Some(SignInState::Failed(text)) => {
+            item.phase = SignInPhase::Failed;
+            item.detail = text.as_str().into();
+        }
+    }
+    if status.signed_in {
+        match offer {
+            Some(Offer::Asking(count)) => {
+                item.offer = OfferPhase::Asking;
+                item.offer_text =
+                    format!("Отправить {} из eagle в этот сервис?", likes_phrase(count)).into();
+            }
+            Some(Offer::Sent) => item.offer = OfferPhase::Sent,
+            Some(Offer::Skipped) => item.offer = OfferPhase::Skipped,
+            None => {}
+        }
+    }
+    item
+}
+
+impl Services {
+    /// Shows the current statuses, sign-in states and answers.
+    fn publish(&self, ui: &DesktopWindow) {
+        if !self.attached.replace(true) {
+            ui.global::<Ui>().set_providers(self.rows.clone().into());
+        }
+        let statuses = self.statuses.borrow();
+        let states = self.sign_in.borrow();
+        let offers = self.offers.borrow();
+        let items = statuses
+            .iter()
+            .map(|status| {
+                provider_item(
+                    status,
+                    states.get(&status.id),
+                    offers.get(&status.id).copied(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if self.rows.row_count() == items.len() {
+            for (index, item) in items.into_iter().enumerate() {
+                self.rows.set_row_data(index, item);
+            }
+        } else {
+            self.rows.set_vec(items);
+        }
+    }
+}
+
 /// UI-thread state shared by event delivery and actions.
 struct Bridge {
+    services: Services,
     rows: Rc<VecModel<TrackItem>>,
     search_rows: RefCell<Vec<LibraryItem>>,
     search_cards: RefCell<Vec<Card>>,
@@ -868,8 +1020,26 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 }
             }
         }
-        // No dialog yet: until the user can answer, nothing is sent to the provider.
-        Event::LikesBackfillOffer { .. } => {}
+        // Until the user answers in the services section, nothing is sent to the provider.
+        Event::LikesBackfillOffer { provider, count } => {
+            bridge
+                .services
+                .offers
+                .borrow_mut()
+                .insert(provider, Offer::Asking(count));
+            bridge.services.publish(ui);
+        }
+        Event::ServicesIntro => {
+            // Only the start screen is replaced; a screen the user already opened stays.
+            if ui.global::<Ui>().get_route() == Route::Library {
+                let _ = bridge.sender.send(Command::Downloads);
+                let _ = bridge.sender.send(Command::Open(View::Settings));
+            }
+        }
+        Event::SignIn { provider, state } => {
+            bridge.services.sign_in.borrow_mut().insert(provider, state);
+            bridge.services.publish(ui);
+        }
         Event::Providers(all) => {
             let searchable = all
                 .iter()
@@ -888,27 +1058,14 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .collect::<Vec<_>>();
             ui.global::<Ui>()
                 .set_searchable_providers(Rc::new(VecModel::from(searchable)).into());
-            let items: Vec<ProviderItem> = all
-                .into_iter()
-                .map(|p| {
-                    let (token_auth, hint, help_url) = match &p.auth {
-                        eagle_core::AuthMethod::Token { hint, help_url } => {
-                            (true, *hint, help_url.unwrap_or_default())
-                        }
-                        _ => (false, "", ""),
-                    };
-                    ProviderItem {
-                        id: p.id.into(),
-                        name: p.name.into(),
-                        hint: hint.into(),
-                        help_url: help_url.into(),
-                        token_auth,
-                        signed_in: p.signed_in,
-                    }
-                })
-                .collect();
-            ui.global::<Ui>()
-                .set_providers(Rc::new(VecModel::from(items)).into());
+            // A service that signed out forgets the answer about its likes.
+            bridge
+                .services
+                .offers
+                .borrow_mut()
+                .retain(|id, _| all.iter().any(|p| p.signed_in && p.id == *id));
+            *bridge.services.statuses.borrow_mut() = all;
+            bridge.services.publish(ui);
         }
     }
 }
@@ -1305,6 +1462,56 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         });
     });
     let tx = sender.clone();
+    actions.on_sign_in_start(move |provider, method| {
+        let _ = tx.send(Command::SignInStart {
+            provider: provider.to_string(),
+            method: usize::try_from(method).unwrap_or_default(),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_password(move |provider, login, password| {
+        let _ = tx.send(Command::SignInPassword {
+            provider: provider.to_string(),
+            login: login.to_string(),
+            password: eagle_app::session::Token::new(password.to_string()),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_second_factor(move |provider, code| {
+        // Codes are shown as «000 000»; the provider gets the digits.
+        let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let _ = tx.send(Command::SignInSecondFactor {
+            provider: provider.to_string(),
+            code: eagle_app::session::Token::new(code),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_cancel(move |provider| {
+        let _ = tx.send(Command::SignInCancel {
+            provider: provider.to_string(),
+        });
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_likes_backfill(move |provider, accept| {
+        let _ = tx.send(Command::LikesBackfill {
+            provider: provider.to_string(),
+            accept,
+        });
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| {
+                bridge.services.offers.borrow_mut().insert(
+                    provider.to_string(),
+                    if accept { Offer::Sent } else { Offer::Skipped },
+                );
+                bridge.services.publish(&ui);
+            });
+        }
+    });
+    actions.on_open_url(|url| {
+        crate::browser::open(&url);
+    });
+    let tx = sender.clone();
     actions.on_logout(move |provider| {
         let _ = tx.send(Command::Logout {
             provider: provider.to_string(),
@@ -1337,7 +1544,6 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             Route::Search => View::Search,
             Route::Album => View::Album,
             Route::Playlist => View::Playlist,
-            Route::Login => View::Login,
             Route::Settings => View::Settings,
             Route::Albums => View::Albums,
             Route::Artists => View::Artists,
@@ -1359,6 +1565,7 @@ pub(super) fn initialize(
 ) {
     UI_BRIDGE.with(|bridge| {
         *bridge.borrow_mut() = Some(Rc::new(Bridge {
+            services: Services::default(),
             rows,
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1410,6 +1617,22 @@ pub(super) fn coalesce_hidden_position(
 pub(super) mod tests {
     use super::*;
     #[test]
+    fn likes_are_counted_in_russian() {
+        assert_eq!(likes_phrase(1), "1 лайк");
+        assert_eq!(likes_phrase(2), "2 лайка");
+        assert_eq!(likes_phrase(5), "5 лайков");
+        assert_eq!(likes_phrase(11), "11 лайков");
+        assert_eq!(likes_phrase(12), "12 лайков");
+        assert_eq!(likes_phrase(21), "21 лайк");
+        assert_eq!(likes_phrase(104), "104 лайка");
+        assert_eq!(likes_phrase(128), "128 лайков");
+    }
+    #[test]
+    fn link_label_drops_scheme_and_trailing_slash() {
+        assert_eq!(link_label("https://ya.ru/device"), "ya.ru/device");
+        assert_eq!(link_label("https://example.test/"), "example.test");
+    }
+    #[test]
     fn hidden_positions_update_anchor_without_scheduling_ui_work() {
         let anchor = Mutex::new(None);
         let position = PositionAnchor {
@@ -1438,6 +1661,7 @@ pub(super) mod tests {
         let root = std::env::temp_dir().join(format!("eagle-ui-search-{}", std::process::id()));
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let bridge = Bridge {
+            services: Services::default(),
             rows: Rc::new(VecModel::default()),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1542,6 +1766,7 @@ pub(super) mod tests {
             std::env::temp_dir().join(format!("eagle-ui-search-delta-{}", std::process::id()));
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let bridge = Bridge {
+            services: Services::default(),
             rows: Rc::new(VecModel::default()),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1666,6 +1891,7 @@ pub(super) mod tests {
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let rows = Rc::new(VecModel::default());
         let bridge = Bridge {
+            services: Services::default(),
             rows: rows.clone(),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),

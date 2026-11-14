@@ -9,10 +9,21 @@ use std::{
     time::{Duration, SystemTime},
 };
 const API: &str = "https://api.music.yandex.net";
+const OAUTH: &str = "https://oauth.yandex.ru";
+/// Verification page the device flow falls back to when the answer names none.
+const DEVICE_PAGE: &str = "https://ya.ru/device";
+/// Public identifiers of the Yandex Music client; the device flow needs both.
+const OAUTH_CLIENT_ID: &str = "23cabbbdc6cd418abb4b39c32c41195d";
+const OAUTH_CLIENT_SECRET: &str = "53bc75238f0c4d08a118e51fe9203300";
+/// Used when the OAuth answer omits `interval` or `expires_in`.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_CODE_LIFETIME: Duration = Duration::from_secs(300);
 pub struct Yandex {
     net: Arc<dyn Http>,
     #[cfg(test)]
     api_base: Option<String>,
+    #[cfg(test)]
+    oauth_base: Option<String>,
     token: RwLock<Option<Token>>,
     liked_ids: Mutex<Option<Vec<String>>>,
     /// Account uid, cached so likes and lists cost one request instead of two.
@@ -343,15 +354,20 @@ impl Yandex {
             info: ProviderInfo {
                 id: "yandex",
                 name: "Яндекс Музыка",
-                auth: AuthMethod::Token {
-                    hint: "OAuth-токен Яндекс Музыки",
-                    help_url: None,
-                },
+                sign_in: &[
+                    SignInMethod::DeviceCode,
+                    SignInMethod::Token {
+                        hint: "OAuth-токен Яндекс Музыки",
+                        help_url: None,
+                    },
+                ],
                 capabilities,
             },
             net,
             #[cfg(test)]
             api_base: None,
+            #[cfg(test)]
+            oauth_base: None,
             token: RwLock::new(None),
             liked_ids: Mutex::new(None),
             uid: Mutex::new(None),
@@ -424,6 +440,91 @@ impl Yandex {
             return Err(ProviderError::ApiChanged);
         }
         json.get("result").cloned().ok_or(ProviderError::ApiChanged)
+    }
+    /// POSTs a form to the OAuth server. A 4xx answer is returned with its body, because
+    /// that is where the server says "not confirmed yet" or "code expired".
+    fn oauth_post(
+        &self,
+        path: &str,
+        form: Vec<(String, String)>,
+    ) -> Result<(u16, Value), ProviderError> {
+        #[cfg(test)]
+        let base = self.oauth_base.as_deref().unwrap_or(OAUTH);
+        #[cfg(not(test))]
+        let base = OAUTH;
+        let mut request = Request::get(SignedUrl::new(format!("{base}{path}")));
+        request.method = "POST";
+        request.form = form;
+        request.error_body = true;
+        let response = self
+            .net
+            .request(Priority::Metadata, request, None)
+            .map_err(net_error)?;
+        let json =
+            serde_json::from_slice(&response.bytes).map_err(|_| ProviderError::ApiChanged)?;
+        Ok((response.status, json))
+    }
+    fn device_code_start(&self) -> Result<SignInStep, ProviderError> {
+        let (status, v) = self.oauth_post(
+            "/device/code",
+            vec![("client_id".into(), OAUTH_CLIENT_ID.into())],
+        )?;
+        if status != 200 {
+            return Err(ProviderError::ApiChanged);
+        }
+        let device_code = text(&v, "device_code")?;
+        let user_code = text(&v, "user_code")?;
+        if device_code.is_empty() || user_code.is_empty() {
+            return Err(ProviderError::ApiChanged);
+        }
+        let seconds = |key: &str, default: Duration| {
+            v[key]
+                .as_u64()
+                .filter(|seconds| *seconds > 0)
+                .map_or(default, Duration::from_secs)
+        };
+        Ok(SignInStep::ShowCode {
+            code: user_code.into(),
+            url: v["verification_url"]
+                .as_str()
+                .filter(|url| url.starts_with("https://"))
+                .unwrap_or(DEVICE_PAGE)
+                .into(),
+            interval: seconds("interval", DEFAULT_POLL_INTERVAL),
+            expires_in: seconds("expires_in", DEFAULT_CODE_LIFETIME),
+            flow: SignInFlow(Token::new(device_code.into())),
+        })
+    }
+    fn device_code_poll(&self, flow: &SignInFlow) -> Result<SignInStep, ProviderError> {
+        let (status, v) = self.oauth_post(
+            "/token",
+            vec![
+                ("grant_type".into(), "device_code".into()),
+                ("code".into(), flow.0.expose().into()),
+                ("client_id".into(), OAUTH_CLIENT_ID.into()),
+                ("client_secret".into(), OAUTH_CLIENT_SECRET.into()),
+            ],
+        )?;
+        if status == 200 {
+            let token = text(&v, "access_token")?;
+            if token.is_empty() {
+                return Err(ProviderError::ApiChanged);
+            }
+            return Ok(SignInStep::Done(Token::new(token.into())));
+        }
+        match v["error"].as_str() {
+            Some("authorization_pending" | "slow_down") => Ok(SignInStep::Pending),
+            Some("expired_token") => Ok(SignInStep::Expired),
+            Some("invalid_grant")
+                if v["error_description"]
+                    .as_str()
+                    .is_some_and(|text| text.to_lowercase().contains("expire")) =>
+            {
+                Ok(SignInStep::Expired)
+            }
+            Some(_) => Err(ProviderError::Auth),
+            None => Err(ProviderError::ApiChanged),
+        }
     }
     fn uid(&self) -> Result<String, ProviderError> {
         self.cached_uid(|| Ok(self.account()?.id))
@@ -617,6 +718,26 @@ impl Provider for Yandex {
         self.set_token(token)?;
         self.account()
     }
+    fn sign_in_start(
+        &self,
+        method: SignInMethod,
+        _input: SignInInput,
+    ) -> Result<SignInStep, ProviderError> {
+        match method {
+            SignInMethod::DeviceCode => self.device_code_start(),
+            _ => Err(ProviderError::Unavailable),
+        }
+    }
+    fn sign_in_continue(
+        &self,
+        flow: &SignInFlow,
+        code: Option<Token>,
+    ) -> Result<SignInStep, ProviderError> {
+        match code {
+            None => self.device_code_poll(flow),
+            Some(_) => Err(ProviderError::Unavailable),
+        }
+    }
     fn logout(&self) {
         if let Ok(mut token) = self.token.write() {
             *token = None;
@@ -632,6 +753,12 @@ impl Provider for Yandex {
         let v = self.api("/account/status", None)?;
         Ok(Account {
             id: ident(&v["account"]["uid"])?,
+            name: ["login", "displayName"]
+                .iter()
+                .filter_map(|key| v["account"][key].as_str())
+                .map(str::trim)
+                .find(|name| !name.is_empty())
+                .map(str::to_owned),
             subscription: v["plus"]["hasPlus"].as_bool().unwrap_or(false),
             capabilities: self.info.capabilities,
         })
@@ -1267,12 +1394,18 @@ mod tests {
         assert!(violations.is_empty(), "{violations:?}");
     }
     fn mock_api(responses: Vec<&'static str>) -> (Yandex, std::thread::JoinHandle<Vec<String>>) {
+        mock_api_status(responses.into_iter().map(|body| (200, body)).collect())
+    }
+    /// Like `mock_api`, with the HTTP status of every answer; OAuth base points at the mock too.
+    fn mock_api_status(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (Yandex, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for response in responses {
+            for (status, response) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1297,15 +1430,154 @@ mod tests {
                 stream.read_exact(&mut body).unwrap();
                 bytes.extend(body);
                 requests.push(String::from_utf8(bytes).unwrap());
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+                write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
             }
             requests
         });
         let mut provider = Yandex::new(Arc::new(Client::new().unwrap()));
         provider.api_base = Some(format!("http://{address}"));
+        provider.oauth_base = Some(format!("http://{address}"));
         *provider.token.write().unwrap() = Some(Token::new("fixture-token".into()));
         *provider.uid.lock().unwrap() = Some("42".into());
         (provider, worker)
+    }
+    #[test]
+    fn device_code_flow_shows_a_code_waits_and_returns_the_token() {
+        let (provider, server) = mock_api_status(vec![
+            (
+                200,
+                r#"{"device_code":"dev-1","user_code":"abc123","verification_url":"https://ya.ru/device","interval":7,"expires_in":240}"#,
+            ),
+            (400, r#"{"error":"authorization_pending"}"#),
+            (200, r#"{"access_token":"tok-1","token_type":"bearer"}"#),
+        ]);
+        let SignInStep::ShowCode {
+            code,
+            url,
+            interval,
+            expires_in,
+            flow,
+        } = provider
+            .sign_in_start(SignInMethod::DeviceCode, SignInInput::None)
+            .unwrap()
+        else {
+            panic!("expected ShowCode");
+        };
+        assert_eq!(code, "abc123");
+        assert_eq!(url, "https://ya.ru/device");
+        assert_eq!(interval, Duration::from_secs(7));
+        assert_eq!(expires_in, Duration::from_secs(240));
+        assert!(matches!(
+            provider.sign_in_continue(&flow, None),
+            Ok(SignInStep::Pending)
+        ));
+        let SignInStep::Done(token) = provider.sign_in_continue(&flow, None).unwrap() else {
+            panic!("expected Done");
+        };
+        assert_eq!(token.expose(), "tok-1");
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("POST /device/code "));
+        assert!(requests[0].contains("client_id=23cabbbdc6cd418abb4b39c32c41195d"));
+        assert!(requests[1].starts_with("POST /token "));
+        assert!(requests[1].contains("grant_type=device_code"));
+        assert!(requests[1].contains("code=dev-1"));
+        assert!(requests[1].contains("client_secret="));
+    }
+    #[test]
+    fn device_code_poll_maps_oauth_errors() {
+        let (provider, server) = mock_api_status(vec![
+            (400, r#"{"error":"expired_token"}"#),
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"Code has expired"}"#,
+            ),
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"Wrong code"}"#,
+            ),
+            (400, r#"{"error":"access_denied"}"#),
+            (400, r#"not json"#),
+            (200, r#"{"token_type":"bearer"}"#),
+        ]);
+        let flow = SignInFlow(Token::new("dev-1".into()));
+        assert!(matches!(
+            provider.sign_in_continue(&flow, None),
+            Ok(SignInStep::Expired)
+        ));
+        assert!(matches!(
+            provider.sign_in_continue(&flow, None),
+            Ok(SignInStep::Expired)
+        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                provider.sign_in_continue(&flow, None),
+                Err(ProviderError::Auth)
+            ));
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                provider.sign_in_continue(&flow, None),
+                Err(ProviderError::ApiChanged)
+            ));
+        }
+        server.join().unwrap();
+    }
+    #[test]
+    fn device_code_start_falls_back_to_defaults_and_rejects_bad_answers() {
+        let (provider, server) = mock_api_status(vec![
+            (200, r#"{"device_code":"d","user_code":"u"}"#),
+            (400, r#"{"error":"invalid_client"}"#),
+            (200, r#"{"user_code":"u"}"#),
+        ]);
+        let Ok(SignInStep::ShowCode {
+            url,
+            interval,
+            expires_in,
+            ..
+        }) = provider.sign_in_start(SignInMethod::DeviceCode, SignInInput::None)
+        else {
+            panic!("expected ShowCode");
+        };
+        assert_eq!(url, "https://ya.ru/device");
+        assert_eq!(interval, Duration::from_secs(5));
+        assert_eq!(expires_in, Duration::from_secs(300));
+        for _ in 0..2 {
+            assert!(matches!(
+                provider.sign_in_start(SignInMethod::DeviceCode, SignInInput::None),
+                Err(ProviderError::ApiChanged)
+            ));
+        }
+        server.join().unwrap();
+    }
+    #[test]
+    fn unsupported_sign_in_methods_do_not_touch_the_network() {
+        let provider = Yandex::new(Arc::new(Client::new().unwrap()));
+        for method in [
+            SignInMethod::Browser,
+            SignInMethod::Password { login_hint: "" },
+        ] {
+            assert!(matches!(
+                provider.sign_in_start(method, SignInInput::None),
+                Err(ProviderError::Unavailable)
+            ));
+        }
+        let flow = SignInFlow(Token::new("d".into()));
+        assert!(matches!(
+            provider.sign_in_continue(&flow, Some(Token::new("1".into()))),
+            Err(ProviderError::Unavailable)
+        ));
+    }
+    #[test]
+    fn account_name_prefers_login_over_display_name() {
+        let (provider, server) = mock_api(vec![
+            r#"{"result":{"account":{"uid":42,"login":"anna.k","displayName":"Anna"},"plus":{"hasPlus":true}}}"#,
+            r#"{"result":{"account":{"uid":42,"login":" ","displayName":"Anna"}}}"#,
+            r#"{"result":{"account":{"uid":42}}}"#,
+        ]);
+        assert_eq!(provider.account().unwrap().name.as_deref(), Some("anna.k"));
+        assert_eq!(provider.account().unwrap().name.as_deref(), Some("Anna"));
+        assert_eq!(provider.account().unwrap().name, None);
+        server.join().unwrap();
     }
     #[test]
     fn category_search_requests_and_pagination() {

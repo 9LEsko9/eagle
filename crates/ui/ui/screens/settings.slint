@@ -5,6 +5,7 @@ import { Ui, Actions, Route, Player, Status, Storage } from "../globals/bridge.s
 import { TextButton } from "../components/button.slint";
 import { Segmented, Switch, Field } from "../components/controls.slint";
 import { Artwork } from "../components/cover.slint";
+import { ServicesSection } from "../components/services.slint";
 import { PlayPause } from "../components/play-pause.slint";
 
 component SectionTitle inherits Text {
@@ -146,6 +147,8 @@ export component SettingsScreen inherits Flickable {
                     min-width: 0px;
                     alignment: start;
                     spacing: 0px;
+                    SectionTitle { text: @tr("Сервисы"); }
+                    ServicesSection { }
                     SectionTitle { text: @tr("Оформление"); }
                     SettingRow {
                         title: @tr("Тема");
@@ -263,12 +266,6 @@ export component SettingsScreen inherits Flickable {
                         title: @tr("Запускать при входе в систему");
                         hint: @tr("Системная регистрация автозапуска");
                         Switch { label: @tr("Автозапуск"); checked: Ui.autostart; toggled => { Actions.autostart(!Ui.autostart); } }
-                    }
-                    SectionTitle { text: @tr("Аккаунты"); }
-                    for provider in Ui.providers : SettingRow {
-                        title: provider.name;
-                        hint: provider.signed-in ? @tr("Вход выполнен") : @tr("Не подключено");
-                        if !provider.signed-in : TextButton { text: @tr("Войти"); outline: true; clicked => { Actions.open(Route.login); } }
                     }
                     Text {
                         text: @tr("При закрытии окна приложение выходит.");
