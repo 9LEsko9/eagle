@@ -669,14 +669,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>().set_drawer_open(drawer);
             let theme = ui.global::<Theme>().get_t();
             let background = [theme.bg.red(), theme.bg.green(), theme.bg.blue()];
-            let (bar, panel) =
-                eagle_palette::player_surfaces([38, 70, 83], background, eagle_palette::Tint::Soft);
+            let surface = [theme.surf.red(), theme.surf.green(), theme.surf.blue()];
+            let (bar, panel) = eagle_palette::player_surfaces(
+                [38, 70, 83],
+                background,
+                surface,
+                eagle_palette::Tint::Soft,
+            );
             let color = |c: [u8; 3]| slint::Color::from_rgb_u8(c[0], c[1], c[2]);
             ui.global::<Player>().set_colors(PlayerColors {
                 bg: color(panel.background),
                 bar: color(bar.background),
                 tx: color(panel.text),
                 tx2: color(panel.secondary),
+                ln: color(bar.line),
+                accent: color(panel.accent),
             });
             index.set(n + 1);
         },

@@ -113,6 +113,68 @@ component AppearancePreview inherits Rectangle {
     }
 }
 
+// Half of a theme tile: paper (0), graphite (1) or OLED (2), with a mini track list and bar.
+component MiniHalf inherits Rectangle {
+    in property <int> kind;
+    clip: true;
+    background: root.kind == 0 ? #fafaf7 : root.kind == 2 ? #000000 : #121214;
+    Rectangle { x: 8px; y: 10px; width: parent.width * 0.6; height: 4px; border-radius: 2px; background: root.kind == 0 ? #151517 : #f2f2f4; }
+    Rectangle { x: 8px; y: 20px; width: parent.width * 0.4; height: 4px; border-radius: 2px; background: root.kind == 0 ? #d6d6d0 : root.kind == 2 ? #2a2a2e : #3a3a40; }
+    Rectangle { x: 0; y: parent.height - 22px; width: parent.width; height: 22px; background: root.kind == 0 ? #f0f0eb : root.kind == 2 ? #0f0f11 : #1a1a1d; }
+}
+
+// Theme card as in the mockup: a 72 px preview, a 2 px ring when chosen, and a caption.
+component ThemeTile inherits Rectangle {
+    in property <string> name;
+    in property <int> kind;
+    in property <bool> auto;
+    in property <bool> selected;
+    callback clicked();
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+    min-width: 0px;
+    accessible-role: button;
+    accessible-label: name;
+    accessible-action-default => { root.clicked(); }
+    VerticalLayout {
+        spacing: 6px;
+        Rectangle {
+            height: 80px;
+            if root.selected : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                border-radius: 16px;
+                border-width: 2px;
+                border-color: Theme.t.tx;
+            }
+            Rectangle {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: 72px;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Theme.t.ln;
+                clip: true;
+                HorizontalLayout {
+                    MiniHalf { horizontal-stretch: 1; kind: root.kind; }
+                    if root.auto : MiniHalf { horizontal-stretch: 1; kind: 1; }
+                }
+            }
+        }
+        Text {
+            text: root.name;
+            color: Theme.t.tx;
+            font-size: Type.small;
+            font-weight: root.selected ? 700 : 500;
+            horizontal-alignment: center;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
 export component SettingsScreen inherits Flickable {
     private property <string> remove-id;
     private property <string> move-destination;
@@ -121,7 +183,7 @@ export component SettingsScreen inherits Flickable {
     private property <length> content-width: Layout.width
         - (Layout.compact ? 0px : 208px)
         - (Ui.panel-open && !Layout.narrow ? 336px : 0px)
-        - (Layout.compact ? 40px : Layout.wide ? 96px : 64px);
+        - (Layout.compact ? 40px : 80px);
     // Wide: settings and a sticky preview side by side, the pair centred in the free space.
     private property <bool> split: content-width >= 960px;
     viewport-height: body.preferred-height + 24px;
@@ -147,18 +209,44 @@ export component SettingsScreen inherits Flickable {
                     alignment: start;
                     spacing: 0px;
                     SectionTitle { text: @tr("Оформление"); }
-                    SettingRow {
-                        title: @tr("Тема");
-                        hint: @tr("«Авто» следует системной светлой или тёмной теме");
-                        Segmented {
-                            options: [@tr("Авто"), @tr("Графит"), @tr("Бумага"), @tr("OLED")];
-                            selected: Theme.mode == ThemeMode.graphite ? 1 : Theme.mode == ThemeMode.paper ? 2 : Theme.mode == ThemeMode.oled ? 3 : 0;
-                            picked(i) => {
-                                Theme.mode = i == 1 ? ThemeMode.graphite : i == 2 ? ThemeMode.paper : i == 3 ? ThemeMode.oled : ThemeMode.auto;
-                                Actions.preferences-changed();
+                    VerticalLayout {
+                        padding-top: 12px;
+                        padding-bottom: 16px;
+                        spacing: 4px;
+                        min-height: 60px;
+                        Text { text: @tr("Тема"); color: Theme.t.tx; font-size: Type.body; font-weight: 500; }
+                        Text { text: @tr("«Авто» следует системной светлой или тёмной теме"); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+                        HorizontalLayout {
+                            padding-top: 10px;
+                            spacing: 10px;
+                            ThemeTile {
+                                name: @tr("Авто");
+                                kind: 0;
+                                auto: true;
+                                selected: Theme.mode == ThemeMode.auto;
+                                clicked => { Theme.mode = ThemeMode.auto; Actions.preferences-changed(); }
+                            }
+                            ThemeTile {
+                                name: @tr("Графит");
+                                kind: 1;
+                                selected: Theme.mode == ThemeMode.graphite;
+                                clicked => { Theme.mode = ThemeMode.graphite; Actions.preferences-changed(); }
+                            }
+                            ThemeTile {
+                                name: @tr("Бумага");
+                                kind: 0;
+                                selected: Theme.mode == ThemeMode.paper;
+                                clicked => { Theme.mode = ThemeMode.paper; Actions.preferences-changed(); }
+                            }
+                            ThemeTile {
+                                name: "OLED";
+                                kind: 2;
+                                selected: Theme.mode == ThemeMode.oled;
+                                clicked => { Theme.mode = ThemeMode.oled; Actions.preferences-changed(); }
                             }
                         }
                     }
+                    Rectangle { height: 1px; background: Theme.t.ln; }
                     SettingRow {
                         title: @tr("Цвет плеера");
                         hint: @tr("Плеер и панель окрашиваются в оттенок обложки");
@@ -178,7 +266,7 @@ export component SettingsScreen inherits Flickable {
                     }
                     SettingRow {
                         title: @tr("Обложки в списках");
-                        hint: @tr("Миниатюры у треков и в очереди");
+                        hint: @tr("На десктопе обложка видна только в плеере");
                         Switch { label: @tr("Обложки в списках"); checked: Ui.list-covers; toggled => { Ui.list-covers = !Ui.list-covers; Actions.list-covers-changed(); Actions.preferences-changed(); } }
                     }
                     SettingRow {

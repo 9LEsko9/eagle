@@ -94,12 +94,12 @@ export component PlayerBar inherits Rectangle {
         }
         // Transport and progress.
         VerticalLayout {
-            width: clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 600px);
+            width: clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 560px);
             alignment: center;
             spacing: 0px;
             HorizontalLayout {
                 alignment: center;
-                spacing: 14px;
+                spacing: 18px;
                 if !root.tight : VerticalLayout {
                     alignment: center;
                     IconButton { icon: @image-url("../icons/shuffle.svg"); label: @tr("Перемешивание"); show-mark: true; active: Player.shuffle; fg: Player.colors.tx2; active-fg: Player.colors.tx; clicked => { Actions.toggle-shuffle(); } }
@@ -133,7 +133,7 @@ export component PlayerBar inherits Rectangle {
                     horizontal-stretch: 1;
                     label: @tr("Позиция");
                     fg: Player.colors.tx;
-                    track: Player.colors.tx.with-alpha(0.16);
+                    track: Player.colors.ln;
                     bubble-text: Player.colors.bar;
                     length: Player.length;
                     value: Player.length > 0 ? Player.shown / Player.length : 0;

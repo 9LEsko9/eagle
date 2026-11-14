@@ -106,6 +106,10 @@ pub struct PlayerColors {
     pub background: [u8; 3],
     pub text: [u8; 3],
     pub secondary: [u8; 3],
+    /// Hairline and progress track, a step from the surface towards the cover.
+    pub line: [u8; 3],
+    /// Accent for the liked heart: the cover, darkened 35 % on light themes.
+    pub accent: [u8; 3],
 }
 fn luminance(rgb: [u8; 3]) -> f64 {
     let linear = rgb.map(|c| {
@@ -122,36 +126,122 @@ pub fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
-/// Mix in encoded sRGB, then choose readable ink for both text roles (WCAG AA).
-pub fn player_colors(cover: [u8; 3], background: [u8; 3], tint: Tint) -> PlayerColors {
-    let k = match tint {
+/// Mix in encoded sRGB: `k` of the way from `cover` to `base`.
+fn mix(cover: [u8; 3], base: [u8; 3], k: f64) -> [u8; 3] {
+    std::array::from_fn(|i| (f64::from(cover[i]) * (1. - k) + f64::from(base[i]) * k).round() as u8)
+}
+/// Ink of the light and dark themes; the secondary ink is the same colour mixed with the cover.
+const INK_DARK: [u8; 3] = [0xF7, 0xF6, 0xF3];
+const INK_PAPER: [u8; 3] = [0x15, 0x15, 0x17];
+const WHITE: [u8; 3] = [255; 3];
+/// Bar tint of the player footer, by level: Off keeps the theme background.
+fn bar_mix(tint: Tint) -> f64 {
+    match tint {
         Tint::Off => 1.,
         Tint::Soft => 0.94,
         Tint::Bright => 0.88,
-    };
-    colors_with_mix(cover, background, k)
+    }
 }
-/// The larger now-playing panel uses the tint levels from the desktop design.
-pub fn panel_colors(cover: [u8; 3], background: [u8; 3], tint: Tint) -> PlayerColors {
-    let k = match tint {
+/// The larger now-playing panel uses its own tint levels from the desktop design.
+fn panel_mix(tint: Tint, background: [u8; 3], light: bool) -> f64 {
+    match tint {
         Tint::Off => 1.,
-        Tint::Soft if luminance(background) > 0.5 => 0.86,
-        Tint::Bright if luminance(background) > 0.5 => 0.70,
+        Tint::Soft if light => 0.86,
+        Tint::Bright if light => 0.70,
         Tint::Soft if background == [0; 3] => 0.84,
         Tint::Bright if background == [0; 3] => 0.66,
         Tint::Soft => 0.78,
         Tint::Bright => 0.60,
+    }
+}
+/// Black or white, whichever reads better on `bar`.
+fn readable_ink(bar: [u8; 3]) -> [u8; 3] {
+    if contrast(bar, WHITE) >= contrast(bar, [0; 3]) {
+        WHITE
+    } else {
+        [0; 3]
+    }
+}
+/// Fades from `ink` towards `bar` until the secondary text reads on it.
+fn fade_to_readable(bar: [u8; 3], ink: [u8; 3]) -> [u8; 3] {
+    (0..=100)
+        .rev()
+        .map(|step| {
+            let fade = f64::from(step) / 100.;
+            std::array::from_fn(|i| {
+                (f64::from(bar[i]) * fade + f64::from(ink[i]) * (1. - fade)).round() as u8
+            })
+        })
+        .find(|&c| contrast(bar, c) >= 4.5)
+        .unwrap_or(ink)
+}
+/// Builds one player surface from the mockup: the cover mixed into `base` at `k`, the
+/// theme ink for text and the cover-tinted secondary ink. A colour that would fail
+/// WCAG AA falls back to a readable ink.
+fn themed_colors(cover: [u8; 3], base: [u8; 3], k: f64, light: bool) -> PlayerColors {
+    let (ink, secondary_ink, secondary_weight, line_offset) = if light {
+        (INK_PAPER, INK_PAPER, 0.25, 0.26)
+    } else {
+        (INK_DARK, WHITE, 0.3, 0.23)
     };
-    colors_with_mix(cover, background, k)
+    let bar = mix(cover, base, k);
+    let line = mix(cover, base, (k - line_offset).max(0.3));
+    let text = if contrast(bar, ink) >= 4.5 {
+        ink
+    } else {
+        readable_ink(bar)
+    };
+    let tinted = mix(secondary_ink, cover, secondary_weight);
+    let secondary = if contrast(bar, tinted) >= 4.5 {
+        tinted
+    } else {
+        fade_to_readable(bar, text)
+    };
+    PlayerColors {
+        background: bar,
+        text,
+        secondary,
+        line,
+        accent: if light {
+            mix(cover, [0; 3], 0.35)
+        } else {
+            cover
+        },
+    }
+}
+/// Footer bar colours for the theme background.
+pub fn player_colors(cover: [u8; 3], background: [u8; 3], tint: Tint) -> PlayerColors {
+    themed_colors(
+        cover,
+        background,
+        bar_mix(tint),
+        luminance(background) > 0.5,
+    )
+}
+/// The larger now-playing panel. With the tint off it sits on the theme surface.
+pub fn panel_colors(
+    cover: [u8; 3],
+    background: [u8; 3],
+    surface: [u8; 3],
+    tint: Tint,
+) -> PlayerColors {
+    let light = luminance(background) > 0.5;
+    let base = if matches!(tint, Tint::Off) {
+        surface
+    } else {
+        background
+    };
+    themed_colors(cover, base, panel_mix(tint, background, light), light)
 }
 /// Use a single readable ink pair on both player surfaces.
 pub fn player_surfaces(
     cover: [u8; 3],
     background: [u8; 3],
+    surface: [u8; 3],
     tint: Tint,
 ) -> (PlayerColors, PlayerColors) {
     let mut bar = player_colors(cover, background, tint);
-    let mut panel = panel_colors(cover, background, tint);
+    let mut panel = panel_colors(cover, background, surface, tint);
     let secondary = [panel.secondary, bar.secondary, panel.text]
         .into_iter()
         .find(|&color| {
@@ -162,42 +252,23 @@ pub fn player_surfaces(
     panel.secondary = secondary;
     (bar, panel)
 }
-fn colors_with_mix(cover: [u8; 3], background: [u8; 3], k: f64) -> PlayerColors {
-    let bar = std::array::from_fn(|i| {
-        (f64::from(cover[i]) * (1. - k) + f64::from(background[i]) * k).round() as u8
-    });
-    let text = if contrast(background, [255; 3]) >= contrast(background, [0; 3]) {
-        [255; 3]
-    } else {
-        [0; 3]
-    };
-    let secondary = (0..=100)
-        .rev()
-        .map(|step| {
-            let fade = f64::from(step) / 100.;
-            std::array::from_fn(|i| {
-                (f64::from(bar[i]) * fade + f64::from(text[i]) * (1. - fade)).round() as u8
-            })
-        })
-        .find(|&c| contrast(bar, c) >= 4.5)
-        .unwrap_or(text);
-    PlayerColors {
-        background: bar,
-        text,
-        secondary,
-    }
-}
 #[cfg(test)]
 mod contrast_tests {
     use super::*;
     #[test]
     fn all_themes_and_tints_keep_both_text_roles_readable() {
-        for background in [[18, 18, 20], [250, 250, 247], [0; 3]] {
+        let themes = [
+            ([18, 18, 20], [26, 26, 29]),
+            ([250, 250, 247], [241, 241, 236]),
+            ([0; 3], [14, 14, 17]),
+        ];
+        for (background, surface) in themes {
             for tint in [Tint::Off, Tint::Soft, Tint::Bright] {
                 for r in (0..=255).step_by(17) {
                     for g in (0..=255).step_by(17) {
                         for b in (0..=255).step_by(17) {
-                            let (colors, panel) = player_surfaces([r, g, b], background, tint);
+                            let (colors, panel) =
+                                player_surfaces([r, g, b], background, surface, tint);
                             assert!(contrast(colors.background, colors.text) >= 4.5);
                             assert!(contrast(colors.background, colors.secondary) >= 4.5);
                             assert!(contrast(panel.background, panel.text) >= 4.5);
@@ -208,6 +279,23 @@ mod contrast_tests {
                 }
             }
         }
+    }
+    #[test]
+    fn dark_and_paper_inks_follow_the_design() {
+        let cover = [0x26, 0x46, 0x53];
+        let dark = player_colors(cover, [18, 18, 20], Tint::Off);
+        assert_eq!(dark.text, INK_DARK);
+        let paper = player_colors(cover, [250, 250, 247], Tint::Off);
+        assert_eq!(paper.text, INK_PAPER);
+        assert_eq!(paper.secondary, mix(INK_PAPER, cover, 0.25));
+    }
+    #[test]
+    fn panel_with_tint_off_sits_on_the_surface() {
+        let surface = [26, 26, 29];
+        let panel = panel_colors([38, 70, 83], [18, 18, 20], surface, Tint::Off);
+        assert_eq!(panel.background, surface);
+        let bar = player_colors([38, 70, 83], [18, 18, 20], Tint::Off);
+        assert_eq!(bar.background, [18, 18, 20]);
     }
 }
 

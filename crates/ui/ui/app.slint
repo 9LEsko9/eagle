@@ -24,19 +24,22 @@ component Sidebar inherits VerticalLayout {
     width: 208px;
     padding-left: 16px;
     padding-right: 16px;
-    padding-top: 24px;
+    padding-top: 28px;
     padding-bottom: 20px;
     spacing: 2px;
     HorizontalLayout {
         padding-left: 10px;
-        height: 52px;
+        height: 40px;
         Text { text: "eagle"; color: Theme.t.tx; font-size: 19px; font-weight: 600; letter-spacing: -0.6px; vertical-alignment: top; }
     }
-    NavItem { text: @tr("Медиатека"); active: (Ui.route == Route.library || Ui.route == Route.albums || Ui.route == Route.artists); clicked => { root.go(Route.library); } }
-    NavItem { text: @tr("Сохранённое"); active: Ui.route == Route.saved; clicked => { root.go(Route.saved); } }
-    NavItem { text: @tr("История"); active: Ui.route == Route.history; clicked => { root.go(Route.history); } }
-    if Ui.signed-in : NavItem { text: @tr("Моя волна"); active: Ui.route == Route.radio; clicked => { root.go(Route.radio); } }
+    Rectangle { height: 20px; }
+    if Ui.signed-in : NavItem { text: @tr("Слушать"); active: Ui.route == Route.radio; clicked => { root.go(Route.radio); } }
     NavItem { text: @tr("Поиск"); active: Ui.route == Route.search; clicked => { root.go(Route.search); } }
+    NavItem {
+        text: @tr("Медиатека");
+        active: Ui.route == Route.library || Ui.route == Route.albums || Ui.route == Route.artists || Ui.route == Route.saved || Ui.route == Route.history;
+        clicked => { root.go(Route.library); }
+    }
     if Ui.signed-in : HorizontalLayout {
         padding-left: 10px;
         height: 46px;
@@ -58,7 +61,6 @@ component Sidebar inherits VerticalLayout {
             }
         }
     }
-    if !Ui.signed-in : NavItem { text: @tr("Войти"); active: Ui.route == Route.login; clicked => { root.go(Route.login); } }
     NavItem { text: @tr("Настройки"); active: Ui.route == Route.settings; clicked => { root.go(Route.settings); } }
 }
 
@@ -100,8 +102,8 @@ export component DesktopWindow inherits Window {
                 if !Layout.compact : Sidebar { }
                 VerticalLayout {
                     min-width: 0px;
-                    padding-left: Layout.compact ? 20px : Layout.wide ? 48px : 32px;
-                    padding-right: Layout.compact ? 20px : Layout.wide ? 48px : 32px;
+                    padding-left: Layout.compact ? 20px : 40px;
+                    padding-right: Layout.compact ? 20px : 40px;
                     padding-top: Layout.compact ? 12px : 40px;
                     padding-bottom: 0px;
                     spacing: Layout.compact ? 8px : 16px;

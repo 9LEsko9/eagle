@@ -15,8 +15,8 @@ export component Chips inherits HorizontalLayout {
         min-width: label.preferred-width + 28px;
         border-radius: 16px;
         background: index == root.selected ? Theme.t.tx : touch.has-hover ? Theme.hover : transparent;
-        border-width: index == root.selected ? 0px : 1px;
-        border-color: Theme.t.ln;
+        border-width: 1px;
+        border-color: index == root.selected ? Theme.t.tx : Theme.t.ln;
         private property <float> scale: touch.pressed ? 0.96 : 1;
         animate background { duration: Motion.fast; }
         animate scale { duration: Motion.fast; easing: cubic-bezier(0.2, 0, 0, 1); }
