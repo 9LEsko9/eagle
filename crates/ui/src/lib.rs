@@ -1338,6 +1338,11 @@ mod tests {
             move || *deleted.borrow_mut() = true
         });
         slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Действия со списком")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        slint::platform::update_timers_and_animations();
         ElementHandle::find_by_accessible_label(&ui, "Удалить плейлист")
             .next()
             .unwrap()

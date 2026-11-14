@@ -10,7 +10,7 @@ export struct WaveTrack { id: string, title: string, artist: string, cover: imag
 // A dot of the pad's field, as fractions of the pad; `edge` fades the dots at the rim.
 export struct PadDot { x: float, y: float, edge: float }
 export struct WaveColors { pad: color, ring: color, tx: color, tx2: color, dot: color, card: color }
-export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color }
+export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color, ln: color, accent: color }
 export struct QueueItem { id: string, title: string, artist: string, current: bool }
 export struct DownloadItem { id: string, track: string, quality: string, status: string, error: string, pausable: bool, retryable: bool, cancellable: bool, saved: bool }
 // One connectable service. `token-auth` providers get a token field; `hint` is its placeholder.
@@ -33,6 +33,7 @@ export global Player {
     in property <string> quality;
     in property <string> track-id;
     in property <string> album-id;
+    in property <string> album;
     in property <string> artist-id;
     in property <string> source;
     in property <string> title;

@@ -29,7 +29,7 @@ export component SeekSlider inherits Rectangle {
     private property <bool> hot: touch.has-hover || dragging || focus.has-focus;
     // Busy and not being dragged: no value, no knob; the track shows activity instead.
     private property <bool> indeterminate: root.busy && !root.dragging;
-    private property <length> thick: hot ? 5px : 3px;
+    private property <length> thick: hot ? 6px : 3px;
     animate thick { duration: Motion.fast; }
     accessible-role: slider;
     accessible-label: label;

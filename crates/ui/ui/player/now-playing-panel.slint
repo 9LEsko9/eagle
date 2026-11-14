@@ -12,6 +12,81 @@ export global Source {
     }
 }
 
+// Covers as a strip: the current cover in the middle, its neighbours scaled and faded
+// on either side. The strip is clipped to the square, so neighbours show only while it
+// slides. A track change starts one step away and settles back with `Motion.swipe`.
+component CoverStrip inherits Rectangle {
+    // Identifies the track; a change starts the slide.
+    in property <string> key;
+    in property <image> cover;
+    in property <image> next;
+    in property <bool> has-next;
+    // Scale of the current cover: 1 while playing, 0.86 while paused.
+    in property <float> scale: 1;
+    in property <color> placeholder;
+    in property <color> outline;
+    // The cover that was current before the latest change of `cover`.
+    private property <image> before;
+    private property <image> latest;
+    private property <length> step: root.width + 16px;
+    private property <length> slide: 0px;
+    private property <bool> pending;
+    clip: true;
+    changed cover => {
+        // The bridge clears the cover while a track loads; only real covers take a place in the strip.
+        if root.cover.width > 0 {
+            root.before = root.latest;
+            root.latest = root.cover;
+        }
+    }
+    changed key => {
+        root.pending = true;
+        root.slide = root.step;
+    }
+    // Lets the step land without animating, then the slide settles back.
+    Timer {
+        interval: 1ms;
+        running: root.pending;
+        triggered => { root.pending = false; root.slide = 0px; }
+    }
+    animate slide { duration: root.pending ? 0ms : Motion.swipe; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
+    prev := Artwork {
+        visible: root.before.width > 0;
+        width: root.width * 0.86;
+        height: self.width;
+        x: (root.width - self.width) / 2 - root.step + root.slide;
+        y: (root.height - self.height) / 2;
+        opacity: 0.3;
+        radius: 12px;
+        image: root.before;
+        placeholder: root.placeholder;
+        outline: root.outline;
+    }
+    current := Artwork {
+        width: root.width * root.scale;
+        height: self.width;
+        animate width { duration: Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+        x: (root.width - self.width) / 2 + root.slide;
+        y: (root.height - self.height) / 2;
+        radius: 12px;
+        image: root.cover;
+        placeholder: root.placeholder;
+        outline: root.outline;
+    }
+    following := Artwork {
+        visible: root.has-next;
+        width: root.width * 0.86;
+        height: self.width;
+        x: (root.width - self.width) / 2 + root.step + root.slide;
+        y: (root.height - self.height) / 2;
+        opacity: 0.3;
+        radius: 12px;
+        image: root.next;
+        placeholder: root.placeholder;
+        outline: root.outline;
+    }
+}
+
 // The card itself. It slides 24 px and fades in; nothing around it is re-laid out per frame.
 export component NowPlayingCard inherits Rectangle {
     in property <bool> floating;
@@ -36,11 +111,11 @@ export component NowPlayingCard inherits Rectangle {
         VerticalLayout {
             padding-left: 20px;
             padding-right: 20px;
-            padding-top: 14px;
+            padding-top: 18px;
             padding-bottom: 12px;
             spacing: 0px;
             HorizontalLayout {
-                height: 36px;
+                height: 32px;
                 Text { text: @tr("Сейчас играет"); color: Player.colors.tx2; font-size: Type.small; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
                 VerticalLayout {
                     alignment: center;
@@ -48,21 +123,16 @@ export component NowPlayingCard inherits Rectangle {
                 }
             }
             Rectangle { height: 10px; }
-            Rectangle {
+            cover-strip := CoverStrip {
                 height: root.art;
+                key: Player.track-id;
+                cover: Player.cover;
+                next: Library.queue.length > 0 ? Library.queue[0].cover : Player.cover;
+                has-next: Library.queue.length > 0;
                 // Artwork settles back slightly while paused.
-                private property <float> s: Player.status == Status.paused ? 0.88 : 1;
-                animate s { duration: Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
-                Artwork {
-                    width: parent.width * parent.s;
-                    height: self.width;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    radius: 12px;
-                    image: Player.cover;
-                    placeholder: Player.colors.tx.with-alpha(0.08);
-                    outline: Player.colors.tx.with-alpha(0.1);
-                }
+                scale: Player.status == Status.paused ? 0.86 : 1;
+                placeholder: Player.colors.tx.with-alpha(0.08);
+                outline: Player.colors.tx.with-alpha(0.1);
             }
             Rectangle { height: 18px; }
             HorizontalLayout {
@@ -72,7 +142,12 @@ export component NowPlayingCard inherits Rectangle {
                     spacing: 2px;
                     alignment: center;
                     Text { text: Player.title == "" ? @tr("Ничего не играет") : Player.title; color: Player.colors.tx; font-size: Type.lead; font-weight: 700; letter-spacing: -0.3px; overflow: elide; }
-                    Text { text: Player.artist; color: Player.colors.tx2; font-size: Type.body; overflow: elide; }
+                    Text {
+                        text: Player.album == "" ? Player.artist : Player.artist + " · " + Player.album;
+                        color: Player.colors.tx2;
+                        font-size: Type.body;
+                        overflow: elide;
+                    }
                 }
                 VerticalLayout {
                     alignment: center;
@@ -85,7 +160,7 @@ export component NowPlayingCard inherits Rectangle {
                         pulse: true;
                         active: Player.liked;
                         fg: Player.colors.tx2;
-                        active-fg: Player.colors.tx;
+                        active-fg: Player.colors.accent;
                         clicked => { Actions.like(Player.track-id); }
                     }
                 }
@@ -98,37 +173,37 @@ export component NowPlayingCard inherits Rectangle {
                 vertical-alignment: bottom;
             }
             Text {
-                text: @tr("Играет далее"); color: Player.colors.tx2; font-size: Type.small;
+                text: @tr("Далее"); color: Player.colors.tx2; font-size: Type.small;
                 font-weight: 600; height: 40px; vertical-alignment: center;
             }
             if Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
             ListView {
                 vertical-stretch: 1;
                 for item in Library.queue : Rectangle {
-                    height: 48px;
+                    height: 44px;
                     background: touch.has-hover ? Player.colors.tx.with-alpha(0.08) : transparent;
                     touch := TouchArea { mouse-cursor: pointer; clicked => { Actions.jump-to(item.occurrence); } }
                     HorizontalLayout {
-                    spacing: 10px;
-                    if Ui.list-covers : VerticalLayout {
-                        alignment: center;
-                        Artwork {
-                            width: 36px;
-                            height: 36px;
-                            radius: 5px;
-                            image: item.cover;
-                            placeholder: Player.colors.tx.with-alpha(0.08);
-                            outline: Player.colors.tx.with-alpha(0.1);
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Artwork {
+                                width: 32px;
+                                height: 32px;
+                                radius: 5px;
+                                image: item.cover;
+                                placeholder: Player.colors.tx.with-alpha(0.08);
+                                outline: Player.colors.tx.with-alpha(0.1);
+                            }
                         }
-                    }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        min-width: 0px;
-                        spacing: 1px;
-                        alignment: center;
-                        Text { text: item.title; color: Player.colors.tx; font-size: Type.meta; font-weight: 500; overflow: elide; }
-                        Text { text: item.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
-                    }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            spacing: 1px;
+                            alignment: center;
+                            Text { text: item.title; color: Player.colors.tx; font-size: Type.meta; font-weight: 500; overflow: elide; }
+                            Text { text: item.artist; color: Player.colors.tx2; font-size: Type.small; overflow: elide; }
+                        }
                     }
                 }
             }

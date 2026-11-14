@@ -5,17 +5,20 @@ import { Library, Ui, Actions, Route, TrackItem, Player } from "../globals/bridg
 import { TrackRowView, TrackColumns } from "../components/track-row.slint";
 import { TextButton, MenuItem } from "../components/button.slint";
 import { Artwork } from "../components/cover.slint";
+import { IconButton } from "../components/icon-button.slint";
 import { Field } from "../components/controls.slint";
 import { Chips, CardGrid } from "../components/cards.slint";
 import { SkeletonRows, SkeletonGrid } from "../components/skeleton.slint";
 import { SkeletonBar, Spinner } from "../components/spinner.slint";
 import { Loading } from "../globals/loading.slint";
 
-// Медиатека sections: liked tracks, albums, artists.
+// Медиатека sections: liked tracks, albums, artists, saved and history. Each chip is an existing route.
 export component LibraryTabs inherits Chips {
-    options: [@tr("Треки"), @tr("Альбомы"), @tr("Исполнители")];
-    selected: Ui.route == Route.albums ? 1 : Ui.route == Route.artists ? 2 : 0;
-    picked(i) => { Actions.open(i == 1 ? Route.albums : i == 2 ? Route.artists : Route.library); }
+    options: [@tr("Треки"), @tr("Альбомы"), @tr("Исполнители"), @tr("Сохранённое"), @tr("История")];
+    selected: Ui.route == Route.albums ? 1 : Ui.route == Route.artists ? 2 : Ui.route == Route.saved ? 3 : Ui.route == Route.history ? 4 : 0;
+    picked(i) => {
+        Actions.open(i == 1 ? Route.albums : i == 2 ? Route.artists : i == 3 ? Route.saved : i == 4 ? Route.history : Route.library);
+    }
 }
 
 // Shared «ещё» menu for a track list. The anchor is computed from the row's place in
@@ -103,13 +106,17 @@ export component CollectionScreen inherits VerticalLayout {
     private property <bool> playlist-busy: Ui.playlist-busy;
     changed playlist-busy => { if !self.playlist-busy { root.playlist-action = -2; } }
     // Derived from the window, not from this screen's own width, to avoid a layout loop.
-    private property <length> list-width: Layout.width
+    private property <length> list-width: min(900px, Layout.width
         - (Layout.compact ? 0px : 208px)
         - (Ui.panel-open && !Layout.narrow ? 336px : 0px)
-        - (Layout.compact ? 40px : Layout.wide ? 96px : 64px);
+        - (Layout.compact ? 40px : 80px));
     // The album column appears once the list has room for it (mockup: hidden beside the panel).
     private property <bool> show-album: root.list-width >= 700px && Ui.route != Route.album;
-    spacing: Layout.compact ? 20px : 28px;
+    // Mockup: content is at most 900 px wide.
+    max-width: 900px;
+    spacing: Layout.compact ? 20px : 32px;
+    // Playlist actions besides «Слушать» and «Перемешать» live in the «…» menu.
+    private property <int> header-actions: (Ui.signed-in ? 1 : 0) + (Library.deletable && !Ui.confirm-delete ? 1 : 0) + (Library.likeable ? 1 : 0);
     HorizontalLayout {
         vertical-stretch: 0;
         spacing: 24px;
@@ -195,13 +202,37 @@ export component CollectionScreen inherits VerticalLayout {
                 alignment: start;
                 TextButton { text: @tr("Слушать"); icon: @image-url("../icons/play.svg"); primary: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(false); } }
                 TextButton { text: @tr("Перемешать"); outline: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(true); } }
-                if Ui.signed-in : TextButton { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); } }
-                if Library.deletable && !Ui.confirm-delete : TextButton { text: @tr("Удалить плейлист"); outline: true; enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; } }
-                if Library.likeable : TextButton {
-                    text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию");
-                    icon: Library.liked ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                    outline: true;
-                    clicked => { Actions.like-collection(); }
+                if root.header-actions > 0 : Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    actions-menu := PopupWindow {
+                        x: 36px - 210px;
+                        y: 42px;
+                        width: 210px;
+                        height: root.header-actions * 34px + 10px;
+                        Rectangle {
+                            background: Theme.t.surf;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: Theme.t.ln;
+                            drop-shadow-blur: 16px;
+                            drop-shadow-color: #00000040;
+                            drop-shadow-offset-y: 4px;
+                            VerticalLayout {
+                                padding: 5px;
+                                if Ui.signed-in : MenuItem { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); actions-menu.close(); } }
+                                if Library.deletable && !Ui.confirm-delete : MenuItem { text: @tr("Удалить плейлист"); enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; actions-menu.close(); } }
+                                if Library.likeable : MenuItem { text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию"); clicked => { Actions.like-collection(); actions-menu.close(); } }
+                            }
+                        }
+                    }
+                    IconButton {
+                        size: 36px;
+                        icon-size: 18px;
+                        icon: @image-url("../icons/more.svg");
+                        label: @tr("Действия со списком");
+                        clicked => { actions-menu.show(); }
+                    }
                 }
             }
             if Library.deletable && Ui.confirm-delete : VerticalLayout {
@@ -214,7 +245,7 @@ export component CollectionScreen inherits VerticalLayout {
                     TextButton { text: @tr("Удалить"); primary: true; enabled: !Ui.playlist-busy; busy: Loading.playlist; clicked => { Actions.delete-playlist(); } }
                 }
             }
-            if root.library : HorizontalLayout {
+            if root.library || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 padding-top: 14px;
                 LibraryTabs { }
             }

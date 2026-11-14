@@ -723,6 +723,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         .map_or_else(String::new, ToString::to_string)
                         .into(),
                 );
+                player.set_album(track.album_title.as_deref().unwrap_or_default().into());
                 player.set_artist_id(
                     track
                         .artists
@@ -752,6 +753,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             } else {
                 player.set_track_id("".into());
                 player.set_album_id("".into());
+                player.set_album("".into());
                 player.set_artist_id("".into());
                 player.set_title("".into());
                 player.set_artist("".into());
@@ -1008,20 +1010,24 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
 thread_local! { static COVER_COLOR: RefCell<[u8; 3]> = const { RefCell::new([128; 3]) }; }
 pub(super) fn apply_colors(ui: &DesktopWindow) {
     let tokens = ui.global::<Theme>().get_t();
-    let background = [tokens.bg.red(), tokens.bg.green(), tokens.bg.blue()];
+    let rgb = |c: slint::Color| [c.red(), c.green(), c.blue()];
+    let background = rgb(tokens.bg);
+    let surface = rgb(tokens.surf);
     let tint = match ui.global::<Theme>().get_tint() {
         0 => eagle_palette::Tint::Off,
         2 => eagle_palette::Tint::Bright,
         _ => eagle_palette::Tint::Soft,
     };
-    let (bar, panel) =
-        COVER_COLOR.with(|c| eagle_palette::player_surfaces(*c.borrow(), background, tint));
+    let (bar, panel) = COVER_COLOR
+        .with(|c| eagle_palette::player_surfaces(*c.borrow(), background, surface, tint));
     let color = |rgb: [u8; 3]| slint::Color::from_rgb_u8(rgb[0], rgb[1], rgb[2]);
     ui.global::<Player>().set_colors(PlayerColors {
         bg: color(panel.background),
         bar: color(bar.background),
         tx: color(panel.text),
         tx2: color(panel.secondary),
+        ln: color(bar.line),
+        accent: color(panel.accent),
     });
     let pad = COVER_COLOR.with(|c| eagle_palette::wave_pad(*c.borrow(), background));
     ui.global::<Wave>().set_colors(WaveColors {
