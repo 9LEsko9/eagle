@@ -172,7 +172,10 @@ fn downloads_restart_then_survive_offline_reopen() {
         .put_setting("account:fixture", "fixture".into())
         .unwrap();
     let base = fixture::provider();
-    let tracks = base.likes(None).unwrap().items;
+    let mut tracks = base.likes(None).unwrap().items;
+    for track in &mut tracks {
+        track.cover = Some("https://fixture.invalid/art".into());
+    }
     assert_eq!(tracks.len(), 100);
     let covers = root.join("covers");
     std::fs::create_dir_all(&covers).unwrap();

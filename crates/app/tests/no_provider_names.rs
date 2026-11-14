@@ -3,11 +3,12 @@
 //! production code. Tests, examples and `providers::builtin` (the one registration point) may.
 use std::{fs, path::Path};
 
-const NAMES: [&str; 2] = ["yandex", "vk"];
+const NAMES: [&str; 3] = ["yandex", "vk", "soundcloud"];
 /// (file suffix, line fragment) that is allowed on purpose.
-const ALLOWED: [(&str, &str); 3] = [
+const ALLOWED: [(&str, &str); 4] = [
     // The single place where compiled-in providers are listed.
     ("app/src/providers.rs", "eagle_yandex::Yandex"),
+    ("app/src/providers.rs", "eagle_soundcloud::SoundCloud"),
     // v9 migration moves the legacy per-provider settings keys of the only provider that had them.
     ("store/src/lib.rs", "account_uid:yandex"),
     ("store/src/lib.rs", "account:yandex"),

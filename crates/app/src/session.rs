@@ -426,6 +426,7 @@ pub struct Collection {
 }
 #[derive(Clone)]
 pub struct SessionSnapshot {
+    pub providers: Vec<crate::providers::ProviderStatus>,
     pub view: View,
     pub rows: Vec<LibraryItem>,
     pub cards: Vec<Card>,
@@ -1148,6 +1149,7 @@ impl Worker {
     }
     fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
+            providers: self.providers.statuses(),
             view: self.view,
             rows: self.rows.clone(),
             cards: self.cards.clone(),
@@ -1800,7 +1802,11 @@ impl Worker {
             .all()
             .iter()
             .any(|p| p.info().needs_sign_in());
-        let signed_in = self.providers.signed_in().any(|p| p.info().needs_sign_in());
+        let signed_in = self
+            .providers
+            .all()
+            .iter()
+            .any(|p| self.providers.account(p.info().id).is_some());
         if needs_account && !signed_in {
             (self.emit)(Event::ServicesIntro);
         }
@@ -1828,7 +1834,20 @@ impl Worker {
                 }
             }
         }
-        self.providers.sign_out(provider.as_ref())?;
+        let sign_out = self.providers.sign_out(provider.as_ref());
+        if let Some(search_id) = self.search_ui_id {
+            self.view_generation += 1;
+            self.rows.clear();
+            self.cards.clear();
+            self.busy = false;
+            (self.emit)(Event::Busy(false));
+            (self.emit)(Event::SearchResults {
+                id: search_id,
+                rows: Vec::new(),
+                cards: Vec::new(),
+            });
+        }
+        sign_out?;
         let account_setting = account_key(id);
         self.store.write(move |c| {
             c.execute("DELETE FROM settings WHERE key=?1", [account_setting])?;
@@ -4393,6 +4412,9 @@ impl Catalog {
                 let mut restored = false;
                 let mut changed = false;
                 for provider in self.providers.all() {
+                    if !provider.info().needs_sign_in() {
+                        continue;
+                    }
                     let Ok(account) = self.providers.restore(provider.as_ref()) else {
                         continue;
                     };
@@ -7972,6 +7994,22 @@ mod sync_tests {
             .map(|job| job.track.to_string())
             .collect()
     }
+    #[test]
+    fn logout_invalidates_in_flight_search() {
+        let (mut worker, _, _) = logout_worker("search");
+        worker.search_ui_id = Some(42);
+        let generation = worker.view_generation;
+        worker
+            .command(Command::Logout {
+                provider: "fakeb".into(),
+                keep_saved: true,
+            })
+            .unwrap();
+        assert!(worker.view_generation > generation);
+        assert!(worker.rows.is_empty());
+        assert!(worker.cards.is_empty());
+    }
+
     #[test]
     fn logout_forgets_one_provider_and_keeps_likes_and_the_others_data() {
         let (mut worker, tokens, seen) = logout_worker("forget");

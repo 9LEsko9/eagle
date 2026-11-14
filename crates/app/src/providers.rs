@@ -10,7 +10,10 @@ use std::{collections::HashMap, sync::Arc, sync::RwLock};
 
 /// Providers compiled into eagle. Adding one is a new crate plus one line here.
 pub fn builtin(net: Arc<Client>) -> Vec<Arc<dyn Provider>> {
-    vec![Arc::new(eagle_yandex::Yandex::new(net))]
+    vec![
+        Arc::new(eagle_yandex::Yandex::new(net.clone())),
+        Arc::new(eagle_soundcloud::SoundCloud::new(net)),
+    ]
 }
 
 /// What the UI needs to show one provider: whether to offer sign-in and what works.
@@ -23,6 +26,8 @@ pub struct ProviderStatus {
     /// Name of the signed-in account, when the provider reports one.
     pub account_name: Option<String>,
     pub signed_in: bool,
+    /// Whether a personal account is connected (independent of guest availability).
+    pub account_connected: bool,
     /// Effective capabilities; all off while signed out.
     pub capabilities: Capabilities,
 }
@@ -93,6 +98,9 @@ impl Providers {
     /// Signs in with the saved token, or with whatever session the provider already holds,
     /// and records the account. A failure marks the provider signed out.
     pub fn restore(&self, provider: &dyn Provider) -> Result<Account, ProviderError> {
+        if !provider.info().needs_sign_in() {
+            return Err(ProviderError::Unavailable);
+        }
         let id = provider.info().id;
         let result = match self.tokens.load(id) {
             Ok(Some(token)) => provider.restore(token),
@@ -130,6 +138,7 @@ impl Providers {
                     sign_in: p.info().sign_in.to_vec(),
                     account_name: self.account(p.info().id).and_then(|account| account.name),
                     signed_in,
+                    account_connected: self.account(p.info().id).is_some(),
                     capabilities: if signed_in {
                         self.effective(p.as_ref())
                     } else {
@@ -162,7 +171,9 @@ impl Providers {
     }
     /// A provider that needs no sign-in always counts as signed in.
     pub fn is_signed_in(&self, provider: &dyn Provider) -> bool {
-        !provider.info().needs_sign_in() || self.account(provider.info().id).is_some()
+        !provider.info().needs_sign_in()
+            || provider.guest_capabilities() != Capabilities::none()
+            || self.account(provider.info().id).is_some()
     }
     /// What the provider can do now: its own capabilities narrowed by the account's.
     pub fn effective(&self, provider: &dyn Provider) -> Capabilities {
@@ -170,6 +181,9 @@ impl Providers {
         match self.account(info.id) {
             Some(account) => info.capabilities.intersect(&account.capabilities),
             None if !info.needs_sign_in() => info.capabilities,
+            None if provider.guest_capabilities() != Capabilities::none() => {
+                provider.guest_capabilities()
+            }
             None => Capabilities::none(),
         }
     }
@@ -193,7 +207,9 @@ impl Providers {
     /// The provider whose account owns this installation's rights (offline, downloads, play
     /// reports, radio): the first one that has an account to sign in to.
     pub fn account_provider(&self) -> Option<&Arc<dyn Provider>> {
-        self.all.iter().find(|p| p.info().needs_sign_in())
+        self.all
+            .iter()
+            .find(|p| p.info().needs_sign_in() && p.guest_capabilities() == Capabilities::none())
     }
 }
 
@@ -216,6 +232,48 @@ pub(crate) fn liked_artists_key(provider_id: &str) -> String {
 mod tests {
     use super::*;
     use eagle_provider_sdk::testkit::FakeProvider;
+
+    #[test]
+    fn builtin_registry_lists_both_services_when_signed_out() {
+        let providers = Providers::new(builtin(Arc::new(Client::new().unwrap())), &[]);
+        let statuses = providers.statuses();
+        assert!(
+            statuses
+                .iter()
+                .any(|status| status.id == "yandex" && !status.signed_in)
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|status| status.id == "soundcloud" && status.signed_in)
+        );
+        assert!(!statuses[0].sign_in.is_empty());
+        assert!(!statuses[1].sign_in.is_empty());
+        assert!(!statuses[1].account_connected);
+    }
+
+    #[test]
+    fn guest_restore_does_not_read_saved_tokens() {
+        struct NoLoad;
+        impl TokenStore for NoLoad {
+            fn load(&self, _: &str) -> Result<Option<Token>, ProviderError> {
+                panic!("guest must not read credentials")
+            }
+            fn save(&self, _: &str, _: &Token) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), ProviderError> {
+                Ok(())
+            }
+        }
+        let guest = Arc::new(FakeProvider::new("fakea").without_auth());
+        let providers = Providers::new(vec![guest.clone()], &[]).with_tokens(Arc::new(NoLoad));
+        assert!(matches!(
+            providers.restore(guest.as_ref()),
+            Err(ProviderError::Unavailable)
+        ));
+        assert!(providers.is_signed_in(guest.as_ref()));
+    }
 
     fn fakes() -> Vec<Arc<dyn Provider>> {
         vec![

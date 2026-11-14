@@ -440,6 +440,10 @@ pub trait Provider: Send + Sync {
     }
 
     fn info(&self) -> &ProviderInfo;
+    /// Capabilities available without an account for optional-token providers.
+    fn guest_capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
     fn login(&self, token: Token) -> Result<Account, ProviderError>;
     /// Signs in with a token the host already holds; must not persist it anywhere.
     fn restore(&self, token: Token) -> Result<Account, ProviderError> {

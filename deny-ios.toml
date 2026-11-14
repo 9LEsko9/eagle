@@ -107,3 +107,8 @@ allow = ["BSL-1.0"]
 [[licenses.exceptions]]
 name = "libfuzzer-sys"
 allow = ["NCSA"]
+
+[[licenses.exceptions]]
+name = "eagle-soundcloud"
+version = "=0.1.0"
+allow = ["GPL-3.0-or-later"]
