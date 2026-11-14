@@ -191,9 +191,9 @@ impl Providers {
             .find(|p| self.is_signed_in(p.as_ref()) && f(&self.effective(p.as_ref())))
     }
     /// The provider whose account owns this installation's rights (offline, downloads, play
-    /// reports, radio): the first one that signs in with a token.
+    /// reports, radio): the first one that has an account to sign in to.
     pub fn account_provider(&self) -> Option<&Arc<dyn Provider>> {
-        self.all.iter().find(|p| p.info().accepts_token())
+        self.all.iter().find(|p| p.info().needs_sign_in())
     }
 }
 

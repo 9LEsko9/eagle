@@ -34,6 +34,9 @@ mod window_chrome;
 
 use eagle_app::session::{Command, CommandSender, Event};
 
+use std::cell::RefCell;
+use std::sync::atomic::AtomicU64;
+
 /// The field of dots on the wave pad: a hexagonal grid inside the reach of the knob, as
 /// fractions of the pad. `edge` fades the dots near the rim.
 pub fn pad_dots() -> Vec<PadDot> {
@@ -64,8 +67,6 @@ pub fn pad_dots() -> Vec<PadDot> {
     }
     dots
 }
-use std::cell::RefCell;
-use std::sync::atomic::AtomicU64;
 
 #[derive(Clone, Default)]
 struct QueueEditorState {

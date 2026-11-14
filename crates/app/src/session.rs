@@ -1446,13 +1446,13 @@ impl Worker {
                                 self.downloads.account(self.account.clone());
                                 (self.emit)(Event::Account);
                                 (self.emit)(Event::Providers(self.providers.statuses()));
-                                self.show_services_once()?;
+                                self.show_services_once();
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
                             Ok(CatalogReply::Providers) => {
                                 (self.emit)(Event::Providers(self.providers.statuses()));
-                                self.show_services_once()?;
+                                self.show_services_once();
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
@@ -1667,8 +1667,6 @@ impl Worker {
             _ => "",
         }
     }
-    /// Forgets one provider's session. Its likes and playlists stay; offline saves of the
-    /// account that owns them are removed unless `keep_saved`.
     fn sign_in_event(&self, provider: &str, state: SignInState) {
         (self.emit)(Event::SignIn {
             provider: provider.to_owned(),
@@ -1774,14 +1772,29 @@ impl Worker {
     }
     /// The first time the app starts with nothing signed in, shows Settings, where the
     /// services are the first section. Later starts keep the screen the user left.
-    fn show_services_once(&mut self) -> Result<()> {
+    /// A failure of the settings store only skips the intro; it never stops the syncs.
+    fn show_services_once(&mut self) {
         if std::mem::replace(&mut self.services_checked, true) {
-            return Ok(());
+            return;
         }
-        if self.store.setting("services_intro")?.is_some() {
-            return Ok(());
+        let stored = self
+            .store
+            .setting("services_intro")
+            .and_then(|seen| match seen {
+                Some(_) => Ok(true),
+                None => self
+                    .store
+                    .put_setting("services_intro", "1".into())
+                    .map(|()| false),
+            });
+        match stored {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(error) => {
+                log::warn!(error = error.to_string().as_str(); "services intro skipped");
+                return;
+            }
         }
-        self.store.put_setting("services_intro", "1".into())?;
         let needs_account = self
             .providers
             .all()
@@ -1791,8 +1804,9 @@ impl Worker {
         if needs_account && !signed_in {
             (self.emit)(Event::ServicesIntro);
         }
-        Ok(())
     }
+    /// Forgets one provider's session. Its likes and playlists stay; offline saves of the
+    /// account that owns them are removed unless `keep_saved`.
     fn logout(&mut self, provider_id: &str, keep_saved: bool) -> Result<()> {
         let provider = self
             .providers
@@ -3858,8 +3872,11 @@ impl Catalog {
             }
             CatalogRequest::Dislike(id) => {
                 let provider = self.provider_for(&id)?;
-                if self.providers.effective(provider.as_ref()).dislikes {
-                    provider.set_disliked(&id, true)?;
+                // A hint for the wave, not the user's data: a failure is logged, not shown.
+                if self.providers.effective(provider.as_ref()).dislikes
+                    && let Err(error) = provider.set_disliked(&id, true)
+                {
+                    log::warn!(provider = id.provider(), error = error.to_string().as_str(); "dislike not sent");
                 }
                 Ok(CatalogReply::Unchanged)
             }
@@ -4591,8 +4608,9 @@ impl Catalog {
                     .get(&provider)
                     .ok_or("провайдер недоступен")?
                     .clone();
-                if !provider.info().accepts_token() {
-                    return Err("этот провайдер не требует входа токеном".into());
+                // Every sign-in method ends with a token: typed, or handed out by a flow.
+                if !provider.info().needs_sign_in() {
+                    return Err("этот провайдер не требует входа".into());
                 }
                 let account = self.providers.sign_in(provider.as_ref(), token)?;
                 self.resolve_unresolved_likes(provider.as_ref());

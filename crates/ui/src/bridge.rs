@@ -1579,9 +1579,12 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     });
     let tx = sender.clone();
     actions.on_sign_in_start(move |provider, method| {
+        let Ok(method) = usize::try_from(method) else {
+            return;
+        };
         let _ = tx.send(Command::SignInStart {
             provider: provider.to_string(),
-            method: usize::try_from(method).unwrap_or_default(),
+            method,
         });
     });
     let tx = sender.clone();

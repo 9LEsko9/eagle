@@ -500,6 +500,9 @@ impl Yandex {
             .net
             .request(Priority::Metadata, request, None)
             .map_err(net_error)?;
+        if response.status == 429 {
+            return Err(ProviderError::RateLimited);
+        }
         let json =
             serde_json::from_slice(&response.bytes).map_err(|_| ProviderError::ApiChanged)?;
         Ok((response.status, json))
@@ -553,7 +556,9 @@ impl Yandex {
             return Ok(SignInStep::Done(Token::new(token.into())));
         }
         match v["error"].as_str() {
-            Some("authorization_pending" | "slow_down") => Ok(SignInStep::Pending),
+            Some("authorization_pending") => Ok(SignInStep::Pending),
+            // The host widens the interval on `RateLimited` and keeps polling.
+            Some("slow_down") => Err(ProviderError::RateLimited),
             Some("expired_token") => Ok(SignInStep::Expired),
             Some("invalid_grant")
                 if v["error_description"]
@@ -1542,6 +1547,8 @@ mod tests {
             (400, r#"{"error":"access_denied"}"#),
             (400, r#"not json"#),
             (200, r#"{"token_type":"bearer"}"#),
+            (400, r#"{"error":"slow_down"}"#),
+            (429, r#"Too Many Requests"#),
         ]);
         let flow = SignInFlow(Token::new("dev-1".into()));
         assert!(matches!(
@@ -1562,6 +1569,12 @@ mod tests {
             assert!(matches!(
                 provider.sign_in_continue(&flow, None),
                 Err(ProviderError::ApiChanged)
+            ));
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                provider.sign_in_continue(&flow, None),
+                Err(ProviderError::RateLimited)
             ));
         }
         server.join().unwrap();

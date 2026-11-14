@@ -33,8 +33,9 @@ Read-only проверка аккаунта: `GET /rotor/stations/dashboard` в�
   в памяти (`SignInFlow`) и не логируется.
 - `POST https://oauth.yandex.ru/token`, форма `grant_type=device_code`, `code=<device_code>`,
   `client_id`, `client_secret`. Ответ 200 содержит `access_token`: это и есть токен, который хост
-  передаёт в `login`. Ответ 400 с `{"error": "authorization_pending"}` (также `slow_down`) значит
-  «ещё не подтверждено» (`Pending`). `{"error": "expired_token"}` или `invalid_grant` с «expire»
+  передаёт в `login`. Ответ 400 с `{"error": "authorization_pending"}` значит
+  «ещё не подтверждено» (`Pending`); `slow_down` и ответ 429 — `ProviderError::RateLimited`,
+  после чего хост увеличивает интервал на пять секунд и продолжает опрос. `{"error": "expired_token"}` или `invalid_grant` с «expire»
   в `error_description` значит, что код устарел (`Expired`). Любая другая ошибка — `ProviderError::Auth`,
   непонятный ответ — `ApiChanged`.
 - Ответ 400 приходит с телом, поэтому запрос выставляет `Request::error_body`; `Http` возвращает

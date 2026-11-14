@@ -22,7 +22,12 @@ use std::{
 /// A browser sign-in that nobody finishes is given up after this long.
 const BROWSER_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Shortest wait between two polls, whatever the provider asks for.
+#[cfg(not(test))]
+const MIN_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
+/// Added to the interval each time the service asks to poll slower (RFC 8628 `slow_down`).
+const SLOW_DOWN: Duration = Duration::from_secs(5);
 /// How often a waiting flow looks at its cancel flag.
 const CANCEL_SLICE: Duration = Duration::from_millis(50);
 
@@ -196,6 +201,14 @@ fn run(
             return;
         }
         match step {
+            // While the user confirms, a lost answer or a request to slow down is not the end
+            // of the flow: the next poll is tried until the code expires.
+            Err(ProviderError::Network) if poll.is_some() => {}
+            Err(ProviderError::RateLimited) if poll.is_some() => {
+                if let Some(waiting) = &mut poll {
+                    waiting.interval += SLOW_DOWN;
+                }
+            }
             Err(error) => {
                 report(SignInUpdate::Failed(failure_text(&error, false)));
                 return;
@@ -395,6 +408,145 @@ mod tests {
         let polls = provider.sign_in_polls();
         thread::sleep(Duration::from_millis(100));
         assert_eq!(provider.sign_in_polls(), polls);
+    }
+
+    /// Answers a scripted sequence of polls after showing a code.
+    struct Flaky {
+        polls: std::sync::Mutex<Vec<std::result::Result<SignInStep, ProviderError>>>,
+        info: eagle_core::ProviderInfo,
+    }
+    impl Provider for Flaky {
+        fn info(&self) -> &eagle_core::ProviderInfo {
+            &self.info
+        }
+        fn login(&self, _: Token) -> std::result::Result<eagle_core::Account, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn account(&self) -> std::result::Result<eagle_core::Account, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn search(
+            &self,
+            _: &str,
+            _: u32,
+        ) -> std::result::Result<eagle_core::Page<eagle_core::Track>, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn track(
+            &self,
+            _: &eagle_core::TrackId,
+        ) -> std::result::Result<eagle_core::Track, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn album(
+            &self,
+            _: &eagle_core::TrackId,
+        ) -> std::result::Result<eagle_core::Album, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn playlist(
+            &self,
+            _: &eagle_core::TrackId,
+        ) -> std::result::Result<eagle_core::Playlist, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn playlists(
+            &self,
+            _: Option<&str>,
+        ) -> std::result::Result<eagle_core::Page<eagle_core::Playlist>, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn likes(
+            &self,
+            _: Option<&str>,
+        ) -> std::result::Result<eagle_core::Page<eagle_core::Track>, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn set_liked(
+            &self,
+            _: &eagle_core::TrackId,
+            _: bool,
+        ) -> std::result::Result<(), ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn set_disliked(
+            &self,
+            _: &eagle_core::TrackId,
+            _: bool,
+        ) -> std::result::Result<(), ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn resolve_stream(
+            &self,
+            _: &eagle_core::TrackId,
+            _: eagle_core::Quality,
+        ) -> std::result::Result<eagle_core::Stream, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+        fn sign_in_start(
+            &self,
+            _: SignInMethod,
+            _: SignInInput,
+        ) -> std::result::Result<SignInStep, ProviderError> {
+            Ok(SignInStep::ShowCode {
+                code: "c".into(),
+                url: "https://example.test".into(),
+                interval: Duration::ZERO,
+                expires_in: Duration::from_secs(60),
+                flow: SignInFlow(Token::new("f".into())),
+            })
+        }
+        fn sign_in_continue(
+            &self,
+            _: &SignInFlow,
+            _: Option<Token>,
+        ) -> std::result::Result<SignInStep, ProviderError> {
+            let mut polls = self.polls.lock().unwrap();
+            if polls.is_empty() {
+                Ok(SignInStep::Pending)
+            } else {
+                polls.remove(0)
+            }
+        }
+    }
+
+    #[test]
+    fn network_errors_while_waiting_are_retried_but_other_errors_end_the_flow() {
+        let flaky = |polls| {
+            Arc::new(Flaky {
+                polls: std::sync::Mutex::new(polls),
+                info: eagle_core::ProviderInfo {
+                    id: "flaky",
+                    name: "flaky",
+                    sign_in: &[SignInMethod::DeviceCode],
+                    capabilities: eagle_core::Capabilities::none(),
+                },
+            })
+        };
+        let run = |provider: Arc<Flaky>| {
+            let (tx, rx) = mpsc::channel();
+            spawn(
+                provider,
+                start(SignInMethod::DeviceCode),
+                Arc::default(),
+                move |update| tx.send(update).is_ok(),
+            )
+            .unwrap();
+            assert!(matches!(
+                rx.recv_timeout(WAIT).unwrap(),
+                SignInUpdate::Code { .. }
+            ));
+            rx.recv_timeout(WAIT).unwrap()
+        };
+        let done = run(flaky(vec![
+            Err(ProviderError::Network),
+            Ok(SignInStep::Pending),
+            Err(ProviderError::Network),
+            Ok(SignInStep::Done(Token::new("t".into()))),
+        ]));
+        assert!(matches!(done, SignInUpdate::Done(_)));
+        let failed = run(flaky(vec![Err(ProviderError::Auth)]));
+        assert!(matches!(failed, SignInUpdate::Failed(_)));
     }
 
     #[test]
