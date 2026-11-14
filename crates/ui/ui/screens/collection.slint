@@ -5,14 +5,20 @@ import { Library, Ui, Actions, Route, TrackItem, Player } from "../globals/bridg
 import { TrackRowView, TrackColumns } from "../components/track-row.slint";
 import { TextButton, MenuItem } from "../components/button.slint";
 import { Artwork } from "../components/cover.slint";
+import { IconButton } from "../components/icon-button.slint";
 import { Field } from "../components/controls.slint";
 import { Chips, CardGrid } from "../components/cards.slint";
+import { SkeletonRows, SkeletonGrid } from "../components/skeleton.slint";
+import { SkeletonBar, Spinner } from "../components/spinner.slint";
+import { Loading } from "../globals/loading.slint";
 
-// Медиатека sections: liked tracks, albums, artists.
+// Медиатека sections: liked tracks, albums, artists, saved and history. Each chip is an existing route.
 export component LibraryTabs inherits Chips {
-    options: [@tr("Треки"), @tr("Альбомы"), @tr("Исполнители")];
-    selected: Ui.route == Route.albums ? 1 : Ui.route == Route.artists ? 2 : 0;
-    picked(i) => { Actions.open(i == 1 ? Route.albums : i == 2 ? Route.artists : Route.library); }
+    options: [@tr("Треки"), @tr("Альбомы"), @tr("Исполнители"), @tr("Сохранённое"), @tr("История")];
+    selected: Ui.route == Route.albums ? 1 : Ui.route == Route.artists ? 2 : Ui.route == Route.saved ? 3 : Ui.route == Route.history ? 4 : 0;
+    picked(i) => {
+        Actions.open(i == 1 ? Route.albums : i == 2 ? Route.artists : i == 3 ? Route.saved : i == 4 ? Route.history : Route.library);
+    }
 }
 
 // Shared «ещё» menu for a track list. The anchor is computed from the row's place in
@@ -24,7 +30,7 @@ export component TrackMenu inherits Rectangle {
     private property <string> playlist-id;
     private property <string> revision;
     private property <length> anchor-y;
-    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0) - (Ui.route == Route.radio ? 1 : 0)) * 34px + 10px;
+    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0)) * 34px + 10px;
     public function open(item: TrackItem, row-top: length, index: int) {
         root.item = item;
         root.row-index = index;
@@ -36,6 +42,8 @@ export component TrackMenu inherits Rectangle {
             : row-top + 43px;
         popup.show();
     }
+    // Fired before an edit is sent, so the owning screen can show progress on the hint line.
+    callback edited();
     popup := PopupWindow {
         x: root.width - self.width - TrackColumns.inset - TrackColumns.time;
         y: root.anchor-y;
@@ -51,13 +59,13 @@ export component TrackMenu inherits Rectangle {
             drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 5px;
-                if Ui.route != Route.radio : MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
+                MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
                 MenuItem { init => { self.focus-item(); } text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
-                if root.editable : MenuItem { text: @tr("Переместить выше"); enabled: root.item.album-id != "" && root.row-index > 0 && !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 1); popup.close(); } }
-                if root.editable : MenuItem { text: @tr("Переместить ниже"); enabled: root.item.album-id != "" && root.row-index + 1 < Library.tracks.length && !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 2); popup.close(); } }
-                if root.editable : MenuItem { text: @tr("Удалить из плейлиста"); enabled: !Ui.playlist-busy; clicked => { Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 0); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Переместить выше"); enabled: root.item.album-id != "" && root.row-index > 0 && !Ui.playlist-busy; clicked => { root.edited(); Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 1); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Переместить ниже"); enabled: root.item.album-id != "" && root.row-index + 1 < Library.tracks.length && !Ui.playlist-busy; clicked => { root.edited(); Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 2); popup.close(); } }
+                if root.editable : MenuItem { text: @tr("Удалить из плейлиста"); enabled: !Ui.playlist-busy; clicked => { root.edited(); Actions.edit-playlist(root.playlist-id, root.revision, root.row-index, 0); popup.close(); } }
             }
         }
     }
@@ -85,16 +93,30 @@ export component CollectionScreen inherits VerticalLayout {
     private property <bool> collection: Ui.route == Route.album || Ui.route == Route.playlist;
     private property <bool> library: Ui.route == Route.library || Ui.route == Route.albums || Ui.route == Route.artists;
     private property <bool> grid: Ui.route == Route.albums || Ui.route == Route.artists || (Ui.route == Route.search && Ui.search-kind != 0);
-    private property <bool> has-cover: collection && Library.cover.width > 0 && !Layout.compact;
+    // The cover slot is reserved for the whole collection page, so the title does not jump
+    // when the image arrives; Artwork shows its placeholder until then.
+    private property <bool> has-cover: collection && !Layout.compact;
     private property <length> cover-size: Ui.panel-open && !Layout.narrow ? 112px : 148px;
+    // Search results are dimmed while a new search is in flight.
+    private property <bool> dimmed: Ui.route == Route.search && Loading.search;
+    // Playlist buttons: which action was clicked, so only that button shows busy.
+    // -2 means no playlist action; -1 means a menu edit.
+    private property <int> playlist-action: -2;
+    // Forget the clicked action once the work ends, so a later one cannot light up a stale button.
+    private property <bool> playlist-busy: Ui.playlist-busy;
+    changed playlist-busy => { if !self.playlist-busy { root.playlist-action = -2; } }
     // Derived from the window, not from this screen's own width, to avoid a layout loop.
-    private property <length> list-width: Layout.width
+    private property <length> list-width: min(900px, Layout.width
         - (Layout.compact ? 0px : 208px)
         - (Ui.panel-open && !Layout.narrow ? 336px : 0px)
-        - (Layout.compact ? 40px : Layout.wide ? 96px : 64px);
+        - (Layout.compact ? 40px : 80px));
     // The album column appears once the list has room for it (mockup: hidden beside the panel).
     private property <bool> show-album: root.list-width >= 700px && Ui.route != Route.album;
-    spacing: Layout.compact ? 20px : 28px;
+    // Mockup: content is at most 900 px wide.
+    max-width: 900px;
+    spacing: Layout.compact ? 20px : 32px;
+    // Playlist actions besides «Слушать» and «Перемешать» live in the «…» menu.
+    private property <int> header-actions: (Ui.signed-in ? 1 : 0) + (Library.deletable && !Ui.confirm-delete ? 1 : 0) + (Library.likeable ? 1 : 0);
     HorizontalLayout {
         vertical-stretch: 0;
         spacing: 24px;
@@ -105,7 +127,7 @@ export component CollectionScreen inherits VerticalLayout {
         VerticalLayout {
             spacing: 0px;
             alignment: end;
-            if root.collection && Library.title != "" : HorizontalLayout {
+            if root.collection : HorizontalLayout {
                 alignment: start;
                 spacing: 6px;
                 Text {
@@ -134,38 +156,83 @@ export component CollectionScreen inherits VerticalLayout {
                     }
                 }
             }
-            Text {
-                text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : Ui.route == Route.radio ? @tr("Моя волна") : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
-                color: Theme.t.tx;
-                font-size: Layout.compact ? Type.title : Type.display;
-                font-weight: 700;
-                letter-spacing: -0.8px;
-                overflow: elide;
-                height: self.preferred-height + 10px;
-                vertical-alignment: center;
+            // A blank title on a collection page keeps the height; a skeleton bar covers it while loading.
+            Rectangle {
+                height: title-text.height;
+                title-text := Text {
+                    width: parent.width;
+                    text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : root.collection ? " " : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
+                    color: Theme.t.tx;
+                    font-size: Layout.compact ? Type.title : Type.display;
+                    font-weight: 700;
+                    letter-spacing: -0.8px;
+                    overflow: elide;
+                    height: self.preferred-height + 10px;
+                    vertical-alignment: center;
+                }
+                if root.collection && Library.title == "" && Loading.page : SkeletonBar {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: min(280px, parent.width);
+                    height: Layout.compact ? 20px : 28px;
+                }
             }
             // Fixed height so the header does not jump while a list loads.
-            Text {
-                height: self.preferred-height;
-                text: Ui.route == Route.search ? " " : root.grid
+            Rectangle {
+                height: count-text.height;
+                count-text := Text {
+                    width: parent.width;
+                    height: self.preferred-height;
+                    text: Ui.route == Route.search ? " " : root.grid
                     ? (Library.cards.length == 0 || Ui.route == Route.search ? " " : Ui.route == Route.albums ? @tr("{n} альбом" | "{n} альбомов" % Library.cards.length) : @tr("{n} исполнитель" | "{n} исполнителей" % Library.cards.length))
                     : Library.tracks.length == 0 ? " " : @tr("{n} трек" | "{n} треков" % Library.tracks.length) + (Library.length >= 60 ? ", " + @tr("{n} минута" | "{n} минут" % floor(Library.length / 60)) : "");
-                color: Theme.t.tx2;
-                font-size: Type.meta;
+                    color: Theme.t.tx2;
+                    font-size: Type.meta;
+                }
+                if root.collection && Library.tracks.length == 0 && Loading.page : SkeletonBar {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: 140px;
+                    height: 10px;
+                }
             }
-            if root.collection || Ui.route == Route.saved || Ui.route == Route.history || (Ui.route == Route.radio && Library.tracks.length > 0) : HorizontalLayout {
+            if root.collection || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 spacing: 10px;
                 padding-top: 16px;
                 alignment: start;
                 TextButton { text: @tr("Слушать"); icon: @image-url("../icons/play.svg"); primary: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(false); } }
                 TextButton { text: @tr("Перемешать"); outline: true; enabled: Library.tracks.length > 0; clicked => { Actions.play-all(true); } }
-                if Ui.signed-in : TextButton { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); } }
-                if Library.deletable && !Ui.confirm-delete : TextButton { text: @tr("Удалить плейлист"); outline: true; enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; } }
-                if Library.likeable : TextButton {
-                    text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию");
-                    icon: Library.liked ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                    outline: true;
-                    clicked => { Actions.like-collection(); }
+                if root.header-actions > 0 : Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    actions-menu := PopupWindow {
+                        x: 36px - 210px;
+                        y: 42px;
+                        width: 210px;
+                        height: root.header-actions * 34px + 10px;
+                        Rectangle {
+                            background: Theme.t.surf;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: Theme.t.ln;
+                            drop-shadow-blur: 16px;
+                            drop-shadow-color: #00000040;
+                            drop-shadow-offset-y: 4px;
+                            VerticalLayout {
+                                padding: 5px;
+                                if Ui.signed-in : MenuItem { text: @tr("Сохранить список"); enabled: Library.tracks.length > 0; clicked => { Actions.save-all(); actions-menu.close(); } }
+                                if Library.deletable && !Ui.confirm-delete : MenuItem { text: @tr("Удалить плейлист"); enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = true; actions-menu.close(); } }
+                                if Library.likeable : MenuItem { text: Library.liked ? @tr("В коллекции") : @tr("В коллекцию"); clicked => { Actions.like-collection(); actions-menu.close(); } }
+                            }
+                        }
+                    }
+                    IconButton {
+                        size: 36px;
+                        icon-size: 18px;
+                        icon: @image-url("../icons/more.svg");
+                        label: @tr("Действия со списком");
+                        clicked => { actions-menu.show(); }
+                    }
                 }
             }
             if Library.deletable && Ui.confirm-delete : VerticalLayout {
@@ -175,10 +242,10 @@ export component CollectionScreen inherits VerticalLayout {
                 HorizontalLayout {
                     alignment: start; spacing: 8px;
                     TextButton { text: @tr("Отмена"); outline: true; enabled: !Ui.playlist-busy; clicked => { Ui.confirm-delete = false; } }
-                    TextButton { text: @tr("Удалить"); primary: true; enabled: !Ui.playlist-busy; clicked => { Actions.delete-playlist(); } }
+                    TextButton { text: @tr("Удалить"); primary: true; enabled: !Ui.playlist-busy; busy: Loading.playlist; clicked => { Actions.delete-playlist(); } }
                 }
             }
-            if root.library : HorizontalLayout {
+            if root.library || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 padding-top: 14px;
                 LibraryTabs { }
             }
@@ -189,20 +256,28 @@ export component CollectionScreen inherits VerticalLayout {
         HorizontalLayout {
             alignment: start;
             spacing: 8px;
-            TextButton { text: @tr("Добавить текущий трек"); outline: true; enabled: !Ui.playlist-busy && Player.track-id != "" && Player.album-id != ""; clicked => { Actions.add-track-to-playlist(Library.header-id, Library.playlist-revision, Player.track-id, Player.album-id); } }
-            TextButton { text: @tr("Обновить"); enabled: !Ui.playlist-busy; clicked => { Actions.refresh-playlist(Library.header-id); } }
+            TextButton {
+                text: @tr("Добавить текущий трек");
+                outline: true;
+                enabled: !Ui.playlist-busy && Player.track-id != "" && Player.album-id != "";
+                busy: Loading.playlist && root.playlist-action == 0;
+                clicked => { root.playlist-action = 0; Actions.add-track-to-playlist(Library.header-id, Library.playlist-revision, Player.track-id, Player.album-id); }
+            }
+            TextButton {
+                text: @tr("Обновить");
+                enabled: !Ui.playlist-busy;
+                busy: Loading.playlist && root.playlist-action == 1;
+                clicked => { root.playlist-action = 1; Actions.refresh-playlist(Library.header-id); }
+            }
         }
-        Text { text: Ui.playlist-busy ? @tr("Сохраняем изменения…") : Player.track-id == "" ? @tr("Запустите трек, чтобы добавить его в плейлист.") : Player.album-id == "" ? @tr("Для добавления нужна информация об альбоме трека.") : @tr("Порядок и удаление — в меню трека."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
-    }
-    if Ui.route == Route.radio : VerticalLayout {
-        spacing: 6px;
-        HorizontalLayout {
+        // Saving from the track menu shows a spinner here; other hints stay as they were.
+        if Loading.playlist && root.playlist-action == -1 : HorizontalLayout {
             alignment: start;
             spacing: 8px;
-            TextButton { text: Ui.radio-ready ? @tr("Новая волна") : @tr("Получить рекомендации"); primary: Library.tracks.length == 0; outline: Library.tracks.length > 0; enabled: !Ui.radio-busy; clicked => { Actions.radio-start(); } }
-            if Ui.radio-ready : TextButton { text: @tr("Ещё треки"); enabled: !Ui.radio-busy; clicked => { Actions.radio-more(); } }
+            Spinner { size: 14px; }
+            Text { text: @tr("Сохраняем изменения…"); color: Theme.t.tx2; font-size: Type.meta; }
         }
-        Text { text: Ui.radio-busy ? @tr("Подбираем музыку…") : Ui.radio-notice != "" ? Ui.radio-notice : @tr("Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+        if !(Loading.playlist && root.playlist-action == -1) : Text { text: Player.track-id == "" ? @tr("Запустите трек, чтобы добавить его в плейлист.") : Player.album-id == "" ? @tr("Для добавления нужна информация об альбоме трека.") : @tr("Порядок и удаление — в меню трека."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
     }
     if Ui.route == Route.search : VerticalLayout {
         spacing: 12px;
@@ -213,9 +288,16 @@ export component CollectionScreen inherits VerticalLayout {
         }
         Field {
             init => { self.focus-input(); }
-            changed text => { Actions.search-changed(self.text); search-timer.stop(); if self.text != "" { search-timer.restart(); } }
+            // `restart()` only restarts a running timer, so a stopped one is started instead.
+            changed text => {
+                Actions.search-changed(self.text);
+                if self.text == "" { search-timer.stop(); }
+                else if search-timer.running { search-timer.restart(); }
+                else { search-timer.start(); }
+            }
             icon: @image-url("../icons/search.svg");
             placeholder: @tr("Поиск музыки");
+            busy: Loading.search;
             text <=> Ui.search-query;
             accepted(text) => { search-timer.stop(); Actions.search(text); }
         }
@@ -235,13 +317,17 @@ export component CollectionScreen inherits VerticalLayout {
         }
         Text {
             height: Type.meta + 8px;
-            text: !Ui.search-valid ? @tr("Введите запрос") : Ui.search-pending ? @tr("Ищем…") : root.grid ? (Library.cards.length == 0 ? @tr("Ничего не найдено") : "" + Library.cards.length) : Library.tracks.length == 0 ? @tr("Ничего не найдено") : @tr("{n} трек" | "{n} треков" % Library.tracks.length);
+            text: !Ui.search-valid ? @tr("Введите запрос") : Ui.search-pending ? " " : root.grid ? (Library.cards.length == 0 ? @tr("Ничего не найдено") : "" + Library.cards.length) : Library.tracks.length == 0 ? @tr("Ничего не найдено") : @tr("{n} трек" | "{n} треков" % Library.tracks.length);
             color: Theme.t.tx2; font-size: Type.meta;
         }
     }
-    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 : Text {
-        text: Ui.busy ? @tr("Загрузка…")
-            : Ui.route == Route.search ? (Ui.search-query == "" ? @tr("Введите запрос и нажмите Enter") : @tr("Ничего не найдено"))
+    // First load of a track list: header and placeholder rows, shown only after the loading delay.
+    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && Loading.page : VerticalLayout {
+        TrackTableHeader { show-album: root.show-album; }
+        SkeletonRows { show-album: root.show-album; }
+    }
+    if !root.grid && Ui.route != Route.search && Library.tracks.length == 0 && !Ui.busy : Text {
+        text: Ui.route == Route.search ? (Ui.search-query == "" ? @tr("Введите запрос и нажмите Enter") : @tr("Ничего не найдено"))
             : Ui.route == Route.library && Ui.signed-in ? @tr("Здесь появятся треки, которые вам нравятся.")
             : Ui.route == Route.library ? @tr("В медиатеке пока пусто. Войдите и найдите первый трек.")
             : @tr("Здесь пока нет треков.");
@@ -249,49 +335,76 @@ export component CollectionScreen inherits VerticalLayout {
         font-size: Type.body;
         wrap: word-wrap;
     }
-    if root.grid && Ui.route != Route.search && Library.cards.length == 0 : Text {
-        text: Ui.busy ? @tr("Загрузка…")
-            : Ui.route == Route.search ? @tr("Ничего не найдено")
-            : Ui.route == Route.albums ? @tr("Здесь появятся альбомы, добавленные в коллекцию.")
+    if root.grid && Ui.route != Route.search && Library.cards.length == 0 && !Ui.busy : Text {
+        text: Ui.route == Route.albums ? @tr("Здесь появятся альбомы, добавленные в коллекцию.")
             : @tr("Здесь появятся исполнители, которые вам нравятся.");
         color: Theme.t.tx2;
         font-size: Type.body;
         wrap: word-wrap;
     }
-    if root.grid && Library.cards.length > 0 : flick := Flickable {
+    if root.grid && Ui.route != Route.search && Library.cards.length == 0 && Loading.page : SkeletonGrid {
+        round: Ui.route == Route.artists;
+    }
+    // Search: placeholder rows or cards until the first results arrive.
+    if !root.grid && Ui.route == Route.search && Library.tracks.length == 0 && Loading.search : VerticalLayout {
+        TrackTableHeader { show-album: root.show-album; }
+        SkeletonRows { show-album: root.show-album; }
+    }
+    if root.grid && Ui.route == Route.search && Library.cards.length == 0 && Loading.search : SkeletonGrid {
+        round: Ui.search-kind == 1;
+    }
+    // Results fade in once they appear and dim while a new search runs over stale results.
+    if root.grid && Library.cards.length > 0 : Rectangle {
         vertical-stretch: 1;
-        viewport-height: cards.height + 24px;
-        cards := CardGrid {
-            width: flick.width;
-            cards: Library.cards;
-            top: -flick.viewport-y;
-            view-height: flick.height;
-            anchor-changed(top) => { flick.viewport-y = -top; }
+        private property <bool> appeared;
+        opacity: !appeared ? 0 : (root.dimmed ? 0.5 : 1);
+        animate opacity { duration: Motion.base; }
+        init => { appeared = true; }
+        flick := Flickable {
+            width: parent.width;
+            height: parent.height;
+            viewport-height: cards.height + 24px;
+            cards := CardGrid {
+                width: flick.width;
+                cards: Library.cards;
+                top: -flick.viewport-y;
+                view-height: flick.height;
+                anchor-changed(top) => { flick.viewport-y = -top; }
+            }
         }
     }
-    if !root.grid && (Ui.route == Route.search || Library.tracks.length > 0) : VerticalLayout {
+    if !root.grid && ((Ui.route == Route.search && !(Loading.search && Library.tracks.length == 0)) || Library.tracks.length > 0) : Rectangle {
         vertical-stretch: 1;
-        spacing: 6px;
-        TrackTableHeader { show-album: root.show-album; }
-        menu := TrackMenu {
-            editable: Library.editable;
-            vertical-stretch: 1;
-            list := ListView {
-                private property <string> search-query: Ui.search-query;
-                changed search-query => { if Ui.route == Route.search { self.viewport-y = 0px; } }
-                private property <length> row-pitch: TrackColumns.row-height;
-                changed row-pitch => { Actions.visible-rows(floor(-self.viewport-y / self.row-pitch), ceil(self.visible-height / self.row-pitch) + 1); }
-                width: parent.width;
-                height: parent.height;
-                // Rows report the on-screen range so artwork loads and unloads with scrolling.
-                init => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
-                changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
-                changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
-                for item[index] in Library.tracks : TrackRowView {
-                    item: item;
-                    number: index + 1;
-                    show-album: root.show-album;
-                    menu(item) => { menu.open(item, self.y + list.viewport-y, index); }
+        private property <bool> appeared;
+        opacity: !appeared ? 0 : (root.dimmed ? 0.5 : 1);
+        animate opacity { duration: Motion.base; }
+        init => { appeared = true; }
+        VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            spacing: 6px;
+            TrackTableHeader { show-album: root.show-album; }
+            menu := TrackMenu {
+                editable: Library.editable;
+                vertical-stretch: 1;
+                edited => { root.playlist-action = -1; }
+                list := ListView {
+                    private property <string> search-query: Ui.search-query;
+                    changed search-query => { if Ui.route == Route.search { self.viewport-y = 0px; } }
+                    private property <length> row-pitch: TrackColumns.row-height;
+                    changed row-pitch => { Actions.visible-rows(floor(-self.viewport-y / self.row-pitch), ceil(self.visible-height / self.row-pitch) + 1); }
+                    width: parent.width;
+                    height: parent.height;
+                    // Rows report the on-screen range so artwork loads and unloads with scrolling.
+                    init => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                    changed viewport-y => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                    changed visible-height => { Actions.visible-rows(floor(-self.viewport-y / TrackColumns.row-height), ceil(self.visible-height / TrackColumns.row-height) + 1); }
+                    for item[index] in Library.tracks : TrackRowView {
+                        item: item;
+                        number: index + 1;
+                        show-album: root.show-album;
+                        menu(item) => { menu.open(item, self.y + list.viewport-y, index); }
+                    }
                 }
             }
         }

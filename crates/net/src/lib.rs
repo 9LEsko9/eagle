@@ -176,6 +176,7 @@ impl Client {
             let method = request.method;
             let range = request.range;
             let limit = request.limit;
+            let error_body = request.error_body;
             let counters = self.counters.clone();
             let sink = sink.clone();
             let cancel_job = cancellation.clone();
@@ -243,10 +244,18 @@ impl Client {
                             } else {
                                 req.call()
                             };
-                            let response = response.map_err(|e| match e {
-                                ureq::Error::Status(s, _) => Error::Status(s),
-                                _ => Error::Network,
-                            })?;
+                            let response = match response {
+                                Ok(response) => response,
+                                Err(ureq::Error::Status(status, response))
+                                    if error_body && (400..500).contains(&status) =>
+                                {
+                                    response
+                                }
+                                Err(ureq::Error::Status(status, _)) => {
+                                    return Err(Error::Status(status));
+                                }
+                                Err(_) => return Err(Error::Network),
+                            };
                             let status = response.status();
                             if matches!(status, 301 | 302 | 303 | 307 | 308) {
                                 // Only credential-free GETs follow CDN redirects; never downgrade TLS.

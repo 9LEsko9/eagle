@@ -235,6 +235,7 @@ mod tests {
         for p in providers.all() {
             let account = Account {
                 id: "1".into(),
+                name: None,
                 subscription: true,
                 capabilities: p.info().capabilities,
             };

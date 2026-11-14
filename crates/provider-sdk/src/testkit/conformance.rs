@@ -3,7 +3,10 @@
 
 //! Conformance checks a provider runs from its own tests against recorded or fake responses.
 
-use crate::{Page, Provider, ProviderError, ProviderInfo, Quality, RadioError, Track, TrackId};
+use crate::{
+    Page, Provider, ProviderError, ProviderInfo, Quality, RadioError, RadioTuning, SignInInput,
+    SignInMethod, SignInStep, Track, TrackId,
+};
 use std::{fmt, time::SystemTime};
 
 /// Upper bound for followed `next` cursors; longer chains are reported as endless.
@@ -60,8 +63,101 @@ pub fn run(provider: &dyn Provider, fixtures: &Fixtures) -> Vec<Violation> {
     check_capabilities(provider, fixtures, &mut out);
     check_pagination(provider, &mut out);
     check_stream(provider, fixtures, &mut out);
+    check_unsupported_sign_in(provider, &mut out);
     if info.capabilities.isrc {
         check_isrc(provider, fixtures, &mut out);
+    }
+    out
+}
+
+/// Methods `sign_in_start` handles; `Token` goes through `login` instead.
+fn started_methods() -> [SignInMethod; 3] {
+    [
+        SignInMethod::DeviceCode,
+        SignInMethod::Password { login_hint: "" },
+        SignInMethod::Browser,
+    ]
+}
+
+fn declares(info: &ProviderInfo, method: SignInMethod) -> bool {
+    info.sign_in
+        .iter()
+        .any(|declared| std::mem::discriminant(declared) == std::mem::discriminant(&method))
+}
+
+/// A method the provider does not declare must answer `Unavailable` without the network.
+fn check_unsupported_sign_in(provider: &dyn Provider, out: &mut Vec<Violation>) {
+    for method in started_methods() {
+        if declares(provider.info(), method) {
+            continue;
+        }
+        let result = provider.sign_in_start(method, SignInInput::None);
+        if !matches!(result, Err(ProviderError::Unavailable)) {
+            out.push(Violation {
+                check: "sign_in.unsupported",
+                detail: format!("{method:?} не заявлен, но sign_in_start не вернул Unavailable"),
+            });
+        }
+    }
+}
+
+/// Starts the declared device-code and browser flows. It talks to the service (or to recorded
+/// answers), so `run` does not include it; call it from a test that provides the responses.
+/// `DeviceCode` must answer `ShowCode` with a code, a link and a positive interval and lifetime.
+pub fn check_sign_in(provider: &dyn Provider) -> Vec<Violation> {
+    let mut out = Vec::new();
+    for method in provider.info().sign_in.iter().copied() {
+        match method {
+            SignInMethod::DeviceCode => match provider.sign_in_start(method, SignInInput::None) {
+                Ok(SignInStep::ShowCode {
+                    code,
+                    url,
+                    interval,
+                    expires_in,
+                    ..
+                }) => {
+                    if code.trim().is_empty() || url.trim().is_empty() {
+                        out.push(Violation {
+                            check: "sign_in.device_code",
+                            detail: "ShowCode без кода или ссылки".into(),
+                        });
+                    }
+                    if interval.is_zero() || expires_in.is_zero() {
+                        out.push(Violation {
+                            check: "sign_in.device_code",
+                            detail: "interval и expires_in должны быть больше нуля".into(),
+                        });
+                    }
+                }
+                Ok(step) => out.push(Violation {
+                    check: "sign_in.device_code",
+                    detail: format!("DeviceCode заявлен, но sign_in_start вернул {step:?}"),
+                }),
+                Err(err) => out.push(Violation {
+                    check: "sign_in.device_code",
+                    detail: format!("DeviceCode заявлен, но sign_in_start вернул ошибку: {err}"),
+                }),
+            },
+            SignInMethod::Browser => match provider.sign_in_start(method, SignInInput::None) {
+                Ok(SignInStep::OpenBrowser { url, interval, .. }) => {
+                    if url.trim().is_empty() || interval.is_zero() {
+                        out.push(Violation {
+                            check: "sign_in.browser",
+                            detail: "OpenBrowser без ссылки или с нулевым interval".into(),
+                        });
+                    }
+                }
+                Ok(step) => out.push(Violation {
+                    check: "sign_in.browser",
+                    detail: format!("Browser заявлен, но sign_in_start вернул {step:?}"),
+                }),
+                Err(err) => out.push(Violation {
+                    check: "sign_in.browser",
+                    detail: format!("Browser заявлен, но sign_in_start вернул ошибку: {err}"),
+                }),
+            },
+            _ => {}
+        }
     }
     out
 }
@@ -161,8 +257,20 @@ fn check_capabilities(provider: &dyn Provider, fixtures: &Fixtures, out: &mut Ve
         }
     }
     if caps.radio {
-        let result = provider.radio_start().map(drop).map_err(radio_error);
+        let result = provider
+            .radio_start(&RadioTuning::default())
+            .map(drop)
+            .map_err(radio_error);
         report_capability("capability.radio", result, fixtures, out);
+        if caps.radio_tuning {
+            let tuning = RadioTuning {
+                mood: Some((0.0, 1.0)),
+                novelty: 0.9,
+                seed: None,
+            };
+            let result = provider.radio_start(&tuning).map(drop).map_err(radio_error);
+            report_capability("capability.radio_tuning", result, fixtures, out);
+        }
     }
 }
 
@@ -388,8 +496,8 @@ mod tests {
         ) -> Result<Page<Track>, ProviderError> {
             self.inner.artist_tracks(id, cursor)
         }
-        fn radio_start(&self) -> Result<RadioSession, RadioError> {
-            self.inner.radio_start()
+        fn radio_start(&self, tuning: &crate::RadioTuning) -> Result<RadioSession, RadioError> {
+            self.inner.radio_start(tuning)
         }
         fn radio_next(
             &self,
@@ -486,9 +594,92 @@ mod tests {
         let info = ProviderInfo {
             id: "fakea",
             name: " ",
-            auth: crate::AuthMethod::None,
+            sign_in: &[],
             capabilities: Capabilities::none(),
         };
         assert!(has(&check_info(&info), "info.name"));
+    }
+
+    #[test]
+    fn device_code_provider_shows_a_code_and_passes() {
+        let provider = FakeProvider::new("fakea")
+            .with_tracks(catalog("fakea"))
+            .with_device_code(1);
+        assert!(check_sign_in(&provider).is_empty());
+        let violations = run(&provider, &fixtures("fakea", true));
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn declared_device_code_that_is_not_started_is_reported() {
+        let provider = FakeProvider::new("fakea").with_sign_in_methods(&[SignInMethod::DeviceCode]);
+        let violations = check_sign_in(&provider);
+        assert!(has(&violations, "sign_in.device_code"), "{violations:?}");
+    }
+
+    #[test]
+    fn zero_interval_device_code_is_reported() {
+        let provider = FakeProvider::new("fakea")
+            .with_device_code(0)
+            .with_sign_in_timing(Duration::ZERO, Duration::from_secs(60));
+        let violations = check_sign_in(&provider);
+        assert!(has(&violations, "sign_in.device_code"), "{violations:?}");
+    }
+
+    #[test]
+    fn undeclared_sign_in_method_must_be_unavailable() {
+        struct Eager(FakeProvider);
+        impl Provider for Eager {
+            fn info(&self) -> &ProviderInfo {
+                self.0.info()
+            }
+            fn sign_in_start(
+                &self,
+                _method: SignInMethod,
+                _input: SignInInput,
+            ) -> Result<SignInStep, ProviderError> {
+                Ok(SignInStep::Pending)
+            }
+            fn login(&self, token: Token) -> Result<Account, ProviderError> {
+                self.0.login(token)
+            }
+            fn account(&self) -> Result<Account, ProviderError> {
+                self.0.account()
+            }
+            fn search(&self, query: &str, page: u32) -> Result<Page<Track>, ProviderError> {
+                self.0.search(query, page)
+            }
+            fn track(&self, id: &TrackId) -> Result<Track, ProviderError> {
+                self.0.track(id)
+            }
+            fn album(&self, id: &TrackId) -> Result<Album, ProviderError> {
+                self.0.album(id)
+            }
+            fn playlist(&self, id: &TrackId) -> Result<Playlist, ProviderError> {
+                self.0.playlist(id)
+            }
+            fn playlists(&self, cursor: Option<&str>) -> Result<Page<Playlist>, ProviderError> {
+                self.0.playlists(cursor)
+            }
+            fn likes(&self, cursor: Option<&str>) -> Result<Page<Track>, ProviderError> {
+                self.0.likes(cursor)
+            }
+            fn set_liked(&self, id: &TrackId, liked: bool) -> Result<(), ProviderError> {
+                self.0.set_liked(id, liked)
+            }
+            fn set_disliked(&self, id: &TrackId, disliked: bool) -> Result<(), ProviderError> {
+                self.0.set_disliked(id, disliked)
+            }
+            fn resolve_stream(
+                &self,
+                id: &TrackId,
+                quality: Quality,
+            ) -> Result<Stream, ProviderError> {
+                self.0.resolve_stream(id, quality)
+            }
+        }
+        let provider = Eager(FakeProvider::new("fakea").with_tracks(catalog("fakea")));
+        let violations = run(&provider, &fixtures("fakea", true));
+        assert!(has(&violations, "sign_in.unsupported"), "{violations:?}");
     }
 }

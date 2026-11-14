@@ -12,6 +12,8 @@ export component SeekSlider inherits Rectangle {
     in property <color> bubble-text: Theme.t.bg;
     in property <float> length;
     in property <bool> live;
+    // Indeterminate: the track loads or buffers.
+    in property <bool> busy;
     callback changed(float);
     pure function clock(seconds: float) -> string {
         return floor(seconds / 60) + ":" + (mod(floor(seconds), 60) < 10 ? "0" : "") + mod(floor(seconds), 60);
@@ -25,7 +27,9 @@ export component SeekSlider inherits Rectangle {
     private property <float> drag;
     private property <float> v: dragging ? drag : min(1, max(0, value));
     private property <bool> hot: touch.has-hover || dragging || focus.has-focus;
-    private property <length> thick: hot ? 5px : 3px;
+    // Busy and not being dragged: no value, no knob; the track shows activity instead.
+    private property <bool> indeterminate: root.busy && !root.dragging;
+    private property <length> thick: hot ? 6px : 3px;
     animate thick { duration: Motion.fast; }
     accessible-role: slider;
     accessible-label: label;
@@ -39,7 +43,8 @@ export component SeekSlider inherits Rectangle {
         width: parent.width;
         height: root.thick;
         border-radius: root.thick / 2;
-        background: root.track;
+        // Reduced motion: a static dim track stands for the load.
+        background: root.indeterminate && Motion.reduced ? root.fg.with-alpha(0.3) : root.track;
     }
     Rectangle {
         x: 0;
@@ -48,9 +53,20 @@ export component SeekSlider inherits Rectangle {
         height: root.thick;
         border-radius: root.thick / 2;
         background: root.fg;
+        visible: !root.indeterminate;
+    }
+    // Busy: a segment 30% wide slides across the track, clamped to its ends.
+    if root.indeterminate && !Motion.reduced : Rectangle {
+        private property <length> start: (mod(animation-tick() / 1100ms, 1) * 1.3 - 0.3) * parent.width;
+        x: max(0px, self.start);
+        width: max(0px, min(parent.width, self.start + parent.width * 0.3) - max(0px, self.start));
+        y: (parent.height - root.thick) / 2;
+        height: root.thick;
+        border-radius: root.thick / 2;
+        background: root.fg.with-alpha(0.55);
     }
     Rectangle {
-        width: root.hot ? (root.dragging ? 14px : 12px) : 0px;
+        width: root.hot && !root.indeterminate ? (root.dragging ? 14px : 12px) : 0px;
         height: self.width;
         border-radius: self.width / 2;
         x: parent.width * root.v - self.width / 2;
@@ -58,7 +74,7 @@ export component SeekSlider inherits Rectangle {
         background: root.fg;
         animate width { duration: Motion.fast; }
     }
-    if root.length > 0 && (touch.has-hover || root.dragging) : Rectangle {
+    if root.length > 0 && (touch.has-hover || root.dragging) && !root.busy : Rectangle {
         private property <float> f: root.dragging ? root.drag : root.at(touch.mouse-x);
         width: label-text.preferred-width + 12px;
         height: 20px;

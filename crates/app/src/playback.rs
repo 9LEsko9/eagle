@@ -309,7 +309,7 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
         .with_tokens(Arc::new(crate::tokens::Keyring));
     // A missing saved token surfaces later, when a stream is requested.
     for provider in providers.all() {
-        if matches!(provider.info().auth, eagle_core::AuthMethod::Token { .. }) {
+        if provider.info().needs_sign_in() {
             let _ = providers.restore(provider.as_ref());
         }
     }

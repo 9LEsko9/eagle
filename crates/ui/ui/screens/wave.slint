@@ -1,0 +1,490 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// «Моя волна»: a pad that tunes the mood, a novelty slider, and the feed of what plays.
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Type, Motion, Layout } from "../globals/theme.slint";
+import { Player, Ui, Actions, Status, Wave, WaveTrack } from "../globals/bridge.slint";
+import { TextButton } from "../components/button.slint";
+import { IconButton } from "../components/icon-button.slint";
+import { SeekSlider } from "../components/slider.slint";
+import { Artwork } from "../components/cover.slint";
+import { SkeletonPulse } from "../components/spinner.slint";
+import { Loading } from "../globals/loading.slint";
+
+// Words and geometry of the mood. The eight directions run counter-clockwise from the right:
+// светлое, весёлое, энергичное, дерзкое, мрачное, грустное, тихое, спокойное.
+global WaveText {
+    public pure function strength(x: float, y: float) -> float {
+        return min(1, sqrt(x * x + y * y));
+    }
+    // -1 near the centre (any mood), else 0..7.
+    public pure function direction(x: float, y: float) -> int {
+        if (sqrt(x * x + y * y) < 0.13) {
+            return -1;
+        }
+        return mod(round(atan2(y, x) / 45deg) + 8, 8);
+    }
+    public pure function title(x: float, y: float) -> string {
+        if (direction(x, y) < 0) {
+            return @tr("Любое настроение");
+        }
+        if (strength(x, y) < 0.45) {
+            return @tr("Слегка ") + Wave.moods[direction(x, y)];
+        }
+        if (strength(x, y) > 0.85) {
+            return @tr("Очень ") + Wave.moods[direction(x, y)];
+        }
+        return Wave.moods-capital[direction(x, y)];
+    }
+    public pure function subtitle(x: float, y: float, novelty: float) -> string {
+        if (direction(x, y) < 0) {
+            return novelty-word(novelty);
+        }
+        return novelty-word(novelty) + " · " + @tr("сила ") + round(strength(x, y) * 100) + "%";
+    }
+    public pure function novelty-word(novelty: float) -> string {
+        if (novelty < 0.36) {
+            return @tr("больше знакомого");
+        }
+        if (novelty > 0.64) {
+            return @tr("больше нового");
+        }
+        return @tr("знакомое и новое поровну");
+    }
+    public pure function clock(seconds: float) -> string {
+        return floor(max(0, seconds) / 60) + ":" + (mod(floor(max(0, seconds)), 60) < 10 ? "0" : "") + mod(floor(max(0, seconds)), 60);
+    }
+}
+
+// Small caption above a block of the feed.
+component Caption inherits Text {
+    color: Theme.t.tx2;
+    font-size: Type.tiny;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+}
+
+// The round pad. A field of dots swells around the knob; the knob moves the mood.
+component MoodPad inherits Rectangle {
+    private property <float> kx: 0.5 + Wave.reach * Wave.mood-x;
+    private property <float> ky: 0.5 - Wave.reach * Wave.mood-y;
+    private property <int> near: WaveText.direction(Wave.mood-x, Wave.mood-y);
+    private property <duration> field-time: touch.pressed ? (Motion.reduced ? 0ms : 60ms) : Motion.slow;
+    function move-to(x: length, y: length) {
+        // Pointer position as a fraction of the pad, centred and scaled so that the ring is 1.
+        if (root.width <= 0px) {
+            return;
+        }
+        let mx = (x / root.width - 0.5) / Wave.reach;
+        let my = -(y / root.height - 0.5) / Wave.reach;
+        let len = sqrt(mx * mx + my * my);
+        let scale = len > 1 ? 1 / len : 1;
+        root.set-mood(mx * scale, my * scale);
+    }
+    function set-mood(x: float, y: float) {
+        Wave.mood-x = x;
+        Wave.mood-y = y;
+        Actions.wave-tune(x, y, Wave.novelty);
+    }
+    function nudge(dx: float, dy: float) {
+        let x = Wave.mood-x + dx;
+        let y = Wave.mood-y + dy;
+        let len = sqrt(x * x + y * y);
+        let scale = len > 1 ? 1 / len : 1;
+        root.set-mood(x * scale, y * scale);
+    }
+    background: Wave.colors.pad;
+    border-radius: 24px;
+    clip: true;
+    animate background { duration: Motion.slow; }
+    accessible-role: slider;
+    accessible-label: @tr("Пульт настроения: ") + WaveText.title(Wave.mood-x, Wave.mood-y);
+    accessible-description: @tr("Стрелки двигают точку");
+    accessible-value: WaveText.title(Wave.mood-x, Wave.mood-y);
+    forward-focus: focus;
+    // Reach of the knob.
+    Rectangle {
+        width: Wave.reach * 2 * root.width;
+        height: self.width;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: Wave.colors.ring;
+    }
+    for dot in Wave.dots : Rectangle {
+        private property <float> g: exp(-((dot.x - root.kx) * (dot.x - root.kx) + (dot.y - root.ky) * (dot.y - root.ky)) / 0.012);
+        width: (2.6px + 7.5px * g) * min(1, root.width / 460px);
+        height: self.width;
+        x: dot.x * root.width - self.width / 2;
+        y: dot.y * root.height - self.height / 2;
+        border-radius: self.width / 2;
+        background: Wave.colors.dot;
+        opacity: (0.2 + 0.72 * g) * dot.edge;
+        animate width { duration: root.field-time; }
+        animate opacity { duration: root.field-time; }
+    }
+    for name[i] in Wave.moods : Text {
+        private property <angle> a: i * 45deg;
+        private property <length> reach: (Wave.reach + 0.035) * root.width;
+        text: name;
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: root.width / 2 + reach * cos(a) + self.width * (-0.5 + 0.5 * cos(a));
+        y: root.height / 2 - reach * sin(a) + self.height * (-0.5 - 0.5 * sin(a));
+        font-size: max(10px, Type.small * min(1, root.width / 440px));
+        font-weight: i == root.near ? 700 : 500;
+        color: i == root.near ? Wave.colors.tx : Wave.colors.tx2;
+        animate color { duration: Motion.base; }
+    }
+    // Knob.
+    Rectangle {
+        width: 28px;
+        height: 28px;
+        x: root.kx * root.width - 14px;
+        y: root.ky * root.height - 14px;
+        border-radius: 14px;
+        background: Wave.colors.pad;
+        border-width: 3px;
+        border-color: Wave.colors.dot;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: #00000024;
+        animate x { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
+        animate y { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
+        Rectangle {
+            width: touch.pressed && !Motion.reduced ? 14px : 10px;
+            height: self.width;
+            x: (parent.width - self.width) / 2 - 3px;
+            y: (parent.height - self.height) / 2 - 3px;
+            border-radius: self.width / 2;
+            background: Wave.colors.dot;
+            animate width { duration: Motion.fast; }
+        }
+    }
+    Rectangle {
+        border-radius: 24px;
+        border-width: focus.has-focus ? 2px : 0px;
+        border-color: Theme.t.tx;
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.LeftArrow { root.nudge(-0.1, 0); return accept; }
+            if e.text == Key.RightArrow { root.nudge(0.1, 0); return accept; }
+            if e.text == Key.UpArrow { root.nudge(0, 0.1); return accept; }
+            if e.text == Key.DownArrow { root.nudge(0, -0.1); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                Wave.dragging = true;
+                focus.focus();
+                root.move-to(self.mouse-x, self.mouse-y);
+            }
+            if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                Wave.dragging = false;
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.move-to(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+}
+
+// Mood pad, caption, novelty slider and presets.
+component Console inherits VerticalLayout {
+    // The pad takes the free height (two columns); otherwise it is a fixed square.
+    in property <bool> fill;
+    spacing: 14px;
+    pad-cell := Rectangle {
+        vertical-stretch: root.fill ? 1 : 0;
+        min-height: root.fill ? 160px : min(root.width, 440px);
+        max-height: root.fill ? 100000px : min(root.width, 440px);
+        MoodPad {
+            x: 0px;
+            y: 0px;
+            width: min(parent.width, parent.height);
+            height: self.width;
+        }
+    }
+    VerticalLayout {
+        vertical-stretch: 0;
+        spacing: 2px;
+        Caption { text: @tr("НАСТРОЕНИЕ"); }
+        Text {
+            text: WaveText.title(Wave.mood-x, Wave.mood-y);
+            color: Theme.t.tx;
+            font-size: Type.title;
+            font-weight: 700;
+            letter-spacing: -0.4px;
+            overflow: elide;
+            accessible-role: text;
+        }
+        Text { text: WaveText.subtitle(Wave.mood-x, Wave.mood-y, Wave.novelty); color: Theme.t.tx2; font-size: Type.meta; overflow: elide; }
+    }
+    VerticalLayout {
+        vertical-stretch: 0;
+        spacing: 4px;
+        HorizontalLayout {
+            Text { text: @tr("Знакомое"); color: Theme.t.tx2; font-size: Type.small; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: @tr("Новое"); color: Theme.t.tx2; font-size: Type.small; }
+        }
+        SeekSlider {
+            label: @tr("Знакомое или новое");
+            fg: Wave.colors.dot;
+            track: Theme.t.ln;
+            live: true;
+            value: Wave.novelty;
+            changed(v) => {
+                Wave.novelty = v;
+                Actions.wave-tune(Wave.mood-x, Wave.mood-y, v);
+            }
+        }
+    }
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 8px;
+        alignment: start;
+        accessible-role: groupbox;
+        accessible-label: @tr("Быстрые настройки");
+        for preset in [
+            { name: @tr("Как обычно"), x: 0.0, y: 0.0, n: 0.5 },
+            { name: @tr("Открытия"), x: 0.354, y: 0.354, n: 0.9 },
+            { name: @tr("Фокус"), x: 0.495, y: -0.495, n: 0.3 },
+            { name: @tr("Разгон"), x: 0.0, y: 0.95, n: 0.5 },
+            { name: @tr("Под дождь"), x: -0.53, y: -0.53, n: 0.4 },
+        ] : TextButton {
+            text: preset.name;
+            height: 32px;
+            primary: abs(preset.x - Wave.mood-x) < 0.1 && abs(preset.y - Wave.mood-y) < 0.1 && abs(preset.n - Wave.novelty) < 0.06;
+            outline: !self.primary;
+            clicked => {
+                Wave.mood-x = preset.x;
+                Wave.mood-y = preset.y;
+                Wave.novelty = preset.n;
+                Actions.wave-tune(preset.x, preset.y, preset.n);
+            }
+        }
+    }
+}
+
+// A track of the feed: «Было» or «Дальше».
+component FeedLine inherits Rectangle {
+    in property <WaveTrack> track;
+    in property <length> art: 34px;
+    in property <bool> strong;
+    height: root.art + 12px;
+    HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Artwork { width: root.art; height: root.art; radius: root.strong ? 7px : 6px; image: root.track.cover; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text { text: root.track.title; color: Theme.t.tx; font-size: root.strong ? Type.body : Type.meta; font-weight: root.strong ? 600 : 500; overflow: elide; }
+            Text { text: root.track.artist; color: Theme.t.tx2; font-size: Type.small; overflow: elide; }
+        }
+        if root.track.mark != "" : VerticalLayout {
+            alignment: center;
+            Text { text: root.track.mark; color: Theme.t.tx2; font-size: Type.small; }
+        }
+    }
+}
+
+// Placeholder while the wave is being fetched.
+component Bone inherits Rectangle {
+    background: Theme.skeleton;
+    border-radius: 6px;
+}
+
+component Feed inherits VerticalLayout {
+    // Shown only after the shared loading delay, so a quick start does not flash a skeleton.
+    private property <bool> starting: Loading.radio && !Wave.active;
+    spacing: 0px;
+    if Wave.active && Wave.played.length > 0 : VerticalLayout {
+        spacing: 0px;
+        Caption { text: @tr("БЫЛО"); height: 22px; }
+        for track in Wave.played : FeedLine { track: track; opacity: 0.5; }
+    }
+    if Wave.active : Rectangle {
+        // The card of the current track.
+        height: card.preferred-height + 32px;
+        Rectangle {
+            y: 12px;
+            height: parent.height - 32px;
+            border-radius: 24px;
+            background: Wave.colors.card;
+            animate background { duration: Motion.slow; }
+        }
+        card := VerticalLayout {
+            y: 12px;
+            height: parent.height - 32px;
+            padding: 22px;
+            spacing: 20px;
+            HorizontalLayout {
+                spacing: 22px;
+                Rectangle {
+                    width: 152px;
+                    height: 152px;
+                    drop-shadow-blur: 30px;
+                    drop-shadow-offset-y: 10px;
+                    drop-shadow-color: #00000024;
+                    Artwork { image: Player.cover; radius: 14px; }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    alignment: end;
+                    Caption { text: @tr("СЕЙЧАС"); }
+                    Text { text: Player.title; color: Theme.t.tx; font-size: 26px * Type.scale; font-weight: 700; letter-spacing: -0.6px; wrap: word-wrap; accessible-role: text; }
+                    Rectangle { height: 4px; }
+                    Text { text: Player.artist; color: Theme.t.tx2; font-size: 15px * Type.scale; overflow: elide; }
+                }
+            }
+            if Wave.why != "" : Text { text: Wave.why; color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 20px;
+                    border-width: 1px;
+                    border-color: Theme.t.ln;
+                    IconButton {
+                        size: 38px;
+                        x: 0px;
+                        y: 0px;
+                        icon: @image-url("../icons/heart.svg");
+                        active-icon: @image-url("../icons/heart-filled.svg");
+                        icon-size: 18px;
+                        label: @tr("Нравится");
+                        pulse: true;
+                        active: Player.liked;
+                        clicked => { Actions.like(Player.track-id); }
+                    }
+                }
+                TextButton { height: 40px; outline: true; icon: @image-url("../icons/close.svg"); text: @tr("Не то"); clicked => { Actions.wave-not-this(); } }
+                TextButton { height: 40px; outline: true; icon: @image-url("../icons/plus.svg"); text: @tr("Ещё такого"); clicked => { Actions.wave-more-like-this(); } }
+            }
+        }
+    }
+    if Wave.active && Wave.has-next : VerticalLayout {
+        spacing: 0px;
+        HorizontalLayout {
+            Caption { text: @tr("ДАЛЬШЕ"); height: 22px; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: @tr("через ") + WaveText.clock(Player.length - Player.shown); color: Theme.t.tx2; font-size: Type.small; vertical-alignment: center; }
+        }
+        FeedLine { track: Wave.next; art: 40px; strong: true; }
+    }
+    if root.starting : SkeletonPulse {
+        height: 214px;
+        Rectangle {
+            height: 214px;
+            border-radius: 24px;
+            background: Wave.colors.card;
+            VerticalLayout {
+                padding: 22px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 22px;
+                    Bone { width: 152px; height: 152px; border-radius: 14px; }
+                    VerticalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        Bone { width: 70px; height: 10px; }
+                        Bone { height: 22px; }
+                        Bone { width: 120px; height: 14px; }
+                    }
+                }
+            }
+        }
+    }
+    if !Wave.active && !root.starting : Rectangle {
+        height: hint.preferred-height + 44px;
+        border-radius: 24px;
+        background: Wave.colors.card;
+        hint := VerticalLayout {
+            padding: 22px;
+            spacing: 6px;
+            Text { text: @tr("Волна ещё не играет"); color: Theme.t.tx; font-size: Type.lead; font-weight: 700; wrap: word-wrap; }
+            Text { text: @tr("Выберите настроение и нажмите «Слушать волну». Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+        }
+    }
+    Rectangle { height: 10px; }
+    Text {
+        text: Ui.radio-notice != "" ? Ui.radio-notice : Wave.note;
+        color: Theme.t.tx2;
+        font-size: Type.small;
+        wrap: word-wrap;
+        min-height: 18px;
+        accessible-role: text;
+    }
+}
+
+export component WaveScreen inherits VerticalLayout {
+    // Decided from the window, not from this screen's own width: that would loop through the layout.
+    private property <length> content: Layout.width - (Layout.compact ? 40px : (Layout.wide ? 96px : 64px) + 208px) - (Ui.panel-open && !Layout.narrow ? 336px : 0px);
+    private property <bool> wide: root.content >= 900px;
+    spacing: Layout.compact ? 16px : 24px;
+    HorizontalLayout {
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            spacing: 6px;
+            Text { text: @tr("Моя волна"); color: Theme.t.tx; font-size: Layout.compact ? Type.title : Type.display; font-weight: 700; letter-spacing: -0.8px; overflow: elide; accessible-role: text; }
+            Text { text: @tr("Тяни точку к настроению — волна подстроится со следующего трека"); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: end;
+            TextButton {
+                height: 40px;
+                primary: true;
+                busy: Ui.radio-busy && !Wave.active;
+                icon: Wave.active && Player.status == Status.playing ? @image-url("../icons/pause.svg") : @image-url("../icons/play.svg");
+                text: Wave.active && Player.status == Status.playing ? @tr("Пауза") : @tr("Слушать волну");
+                clicked => {
+                    if Wave.active {
+                        Actions.toggle-play();
+                    } else {
+                        Actions.radio-start();
+                    }
+                }
+            }
+        }
+    }
+    if root.wide : HorizontalLayout {
+        spacing: 40px;
+        vertical-stretch: 1;
+        Console {
+            fill: true;
+            horizontal-stretch: 0;
+            preferred-width: 500px;
+            min-width: 320px;
+            max-width: 500px;
+        }
+        ScrollView {
+            horizontal-stretch: 1;
+            min-width: 320px;
+            Feed { width: parent.width; }
+        }
+    }
+    if !root.wide : ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 24px;
+            padding-bottom: 8px;
+            Console { fill: false; }
+            Feed { }
+        }
+    }
+}

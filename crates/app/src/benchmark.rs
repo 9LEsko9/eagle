@@ -22,7 +22,7 @@ impl Provider for Fixture {
         static INFO: ProviderInfo = ProviderInfo {
             id: "fixture",
             name: "fixture",
-            auth: AuthMethod::None,
+            sign_in: &[],
             capabilities: capabilities(),
         };
         &INFO

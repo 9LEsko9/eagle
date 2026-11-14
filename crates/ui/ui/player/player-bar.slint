@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Type, Motion, Layout } from "../globals/theme.slint";
-import { Player, Ui, Actions, Status, Route } from "../globals/bridge.slint";
+import { Player, Ui, Actions, Status, Route, Wave } from "../globals/bridge.slint";
+import { Loading } from "../globals/loading.slint";
 import { Cover } from "../components/cover.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { PlayPause } from "../components/play-pause.slint";
@@ -9,6 +10,8 @@ import { SeekSlider } from "../components/slider.slint";
 export component PlayerBar inherits Rectangle {
     private property <bool> tight: Layout.width < 835px;
     private property <float> unmuted: 0.7;
+    // The wave screen is open and the wave is what plays.
+    private property <bool> on-wave: Ui.route == Route.radio && Wave.active;
     pure function clock(seconds: float) -> string {
         return floor(seconds / 60) + ":" + (mod(floor(seconds), 60) < 10 ? "0" : "") + mod(floor(seconds), 60);
     }
@@ -64,7 +67,7 @@ export component PlayerBar inherits Rectangle {
                     height: artist-text.preferred-height;
                     artist-text := Text {
                         width: parent.width;
-                        text: Player.status == Status.loading ? @tr("Загрузка…") : Player.status == Status.buffering ? @tr("Буферизация…") : Player.artist;
+                        text: root.on-wave ? @tr("Моя волна · ") + Player.artist : Player.artist;
                         color: artist-touch.has-hover ? Player.colors.tx : Player.colors.tx2;
                         font-size: Type.meta;
                         overflow: elide;
@@ -94,19 +97,20 @@ export component PlayerBar inherits Rectangle {
         }
         // Transport and progress.
         VerticalLayout {
-            width: clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 600px);
+            width: clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 560px);
             alignment: center;
             spacing: 0px;
             HorizontalLayout {
                 alignment: center;
-                spacing: 14px;
+                spacing: 18px;
                 if !root.tight : VerticalLayout {
                     alignment: center;
                     IconButton { icon: @image-url("../icons/shuffle.svg"); label: @tr("Перемешивание"); show-mark: true; active: Player.shuffle; fg: Player.colors.tx2; active-fg: Player.colors.tx; clicked => { Actions.toggle-shuffle(); } }
                 }
                 VerticalLayout {
                     alignment: center;
-                    IconButton { size: 36px; icon-size: 20px; icon: @image-url("../icons/previous.svg"); label: @tr("Предыдущий трек"); fg: Player.colors.tx; clicked => { Actions.prev(); } }
+                    // On the wave the transport has no «previous»: «Не то» takes its place.
+                    IconButton { size: 36px; icon-size: 20px; icon: root.on-wave ? @image-url("../icons/close.svg") : @image-url("../icons/previous.svg"); label: root.on-wave ? @tr("Не то") : @tr("Предыдущий трек"); fg: Player.colors.tx; clicked => { if root.on-wave { Actions.wave-not-this(); } else { Actions.prev(); } } }
                 }
                 PlayPause { playing: Player.status == Status.playing; fg: Player.colors.tx; glyph: Player.colors.bar; clicked => { Actions.toggle-play(); } }
                 VerticalLayout {
@@ -133,9 +137,10 @@ export component PlayerBar inherits Rectangle {
                     horizontal-stretch: 1;
                     label: @tr("Позиция");
                     fg: Player.colors.tx;
-                    track: Player.colors.tx.with-alpha(0.16);
+                    track: Player.colors.ln;
                     bubble-text: Player.colors.bar;
                     length: Player.length;
+                    busy: Loading.player;
                     value: Player.length > 0 ? Player.shown / Player.length : 0;
                     changed(f) => {
                         // Show the target at once; the engine's next anchor confirms it.

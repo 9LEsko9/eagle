@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
-    Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
+    Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, OfferPhase, Player,
+    PlayerColors, ProviderItem, QueueItem, Route, SignInKind, SignInMethodItem, SignInPhase,
+    Status, Storage, Theme, TrackItem, Ui, Wave, WaveColors, WaveTrack,
 };
+use eagle_app::providers::ProviderStatus;
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
-    View,
+    SignInState, View, WaveMark, WaveState,
 };
 use eagle_engine::{PositionAnchor, State};
 use slint::{ComponentHandle, Model, VecModel};
@@ -60,6 +62,73 @@ fn track_item(item: LibraryItem) -> TrackItem {
             && item.track.availability == eagle_app::session::Availability::Available,
     }
 }
+fn artists_line(track: &eagle_core::Track) -> String {
+    track
+        .artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn wave_item(track: &eagle_core::Track, mark: WaveMark, cover: slint::Image) -> WaveTrack {
+    WaveTrack {
+        id: track.id.to_string().into(),
+        title: track.title.as_str().into(),
+        artist: artists_line(track).into(),
+        cover,
+        mark: match mark {
+            WaveMark::None => "",
+            WaveMark::Skipped => "не то",
+            WaveMark::Liked => "♥",
+        }
+        .into(),
+    }
+}
+thread_local! { static TUNING_SYNCED: Cell<bool> = const { Cell::new(false) }; }
+/// Shows the wave feed. Covers that are already loaded stay; the others are asked for.
+/// The tuning is taken over once per bridge: afterwards the screen owns it.
+fn apply_wave(ui: &DesktopWindow, bridge: &Bridge, state: WaveState) {
+    let wave = ui.global::<Wave>();
+    if !TUNING_SYNCED.with(|synced| synced.replace(true)) && !wave.get_dragging() {
+        let (x, y) = state.tuning.mood.unwrap_or((0., 0.));
+        wave.set_mood_x(x);
+        wave.set_mood_y(y);
+        wave.set_novelty(state.tuning.novelty);
+    }
+    let mut known: HashMap<String, slint::Image> = wave
+        .get_played()
+        .iter()
+        .chain(std::iter::once(wave.get_next()))
+        .filter(|item| item.cover.size().width > 0)
+        .map(|item| (item.id.to_string(), item.cover))
+        .collect();
+    let mut take =
+        |track: &eagle_core::Track| known.remove(&track.id.to_string()).unwrap_or_default();
+    let played: Vec<WaveTrack> = state
+        .previous
+        .iter()
+        .map(|item| wave_item(&item.track, item.mark, take(&item.track)))
+        .collect();
+    let next = state
+        .next
+        .as_ref()
+        .map(|track| wave_item(track, WaveMark::None, take(track)));
+    let missing: Vec<String> = played
+        .iter()
+        .chain(next.iter())
+        .filter(|item| item.cover.size().width == 0)
+        .map(|item| format!("t:{}", item.id))
+        .collect();
+    wave.set_active(state.current.is_some());
+    wave.set_played(Rc::new(VecModel::from(played)).into());
+    wave.set_has_next(next.is_some());
+    wave.set_next(next.unwrap_or_default());
+    wave.set_why(state.why.into());
+    wave.set_note(state.note.into());
+    if !missing.is_empty() && ui.global::<Ui>().get_list_covers() {
+        let _ = bridge.sender.send(Command::Thumbnails(missing));
+    }
+}
 fn card_item(card: Card) -> CardItem {
     let route = if card.key.starts_with("p:") {
         Route::Playlist
@@ -86,7 +155,6 @@ fn route(view: View) -> Route {
         View::Search => Route::Search,
         View::Album => Route::Album,
         View::Playlist => Route::Playlist,
-        View::Login => Route::Login,
         View::Settings => Route::Settings,
         View::Albums => Route::Albums,
         View::Artists => Route::Artists,
@@ -95,8 +163,159 @@ fn route(view: View) -> Route {
     }
 }
 
+/// The user's answer about sending local likes to a newly connected service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Offer {
+    /// This many likes could be sent; the user has not answered.
+    Asking(usize),
+    Sent,
+    Skipped,
+}
+
+/// «1 лайк», «2 лайка», «5 лайков».
+fn likes_phrase(count: usize) -> String {
+    let word = match (count % 100, count % 10) {
+        (11..=14, _) => "лайков",
+        (_, 1) => "лайк",
+        (_, 2..=4) => "лайка",
+        _ => "лайков",
+    };
+    format!("{count} {word}")
+}
+
+/// Everything the services section shows, kept so a change to one part rebuilds its row.
+#[derive(Default)]
+struct Services {
+    statuses: RefCell<Vec<ProviderStatus>>,
+    sign_in: RefCell<HashMap<String, SignInState>>,
+    offers: RefCell<HashMap<String, Offer>>,
+    /// Rows are updated in place, so a field being typed in survives every event.
+    rows: Rc<VecModel<ProviderItem>>,
+    attached: Cell<bool>,
+}
+
+/// A link without the scheme and the closing slash: `https://ya.ru/device` becomes `ya.ru/device`.
+fn link_label(url: &str) -> String {
+    let bare = url.split_once("://").map_or(url, |(_, rest)| rest);
+    bare.trim_end_matches('/').to_owned()
+}
+
+fn provider_item(
+    status: &ProviderStatus,
+    state: Option<&SignInState>,
+    offer: Option<Offer>,
+) -> ProviderItem {
+    let methods = status
+        .sign_in
+        .iter()
+        .filter_map(|method| {
+            use eagle_core::SignInMethod;
+            Some(match method {
+                SignInMethod::DeviceCode => SignInMethodItem {
+                    kind: SignInKind::DeviceCode,
+                    hint: Default::default(),
+                    help_url: Default::default(),
+                },
+                SignInMethod::Token { hint, help_url } => SignInMethodItem {
+                    kind: SignInKind::Token,
+                    hint: (*hint).into(),
+                    help_url: help_url.unwrap_or_default().into(),
+                },
+                SignInMethod::Password { login_hint } => SignInMethodItem {
+                    kind: SignInKind::Password,
+                    hint: (*login_hint).into(),
+                    help_url: Default::default(),
+                },
+                SignInMethod::Browser => SignInMethodItem {
+                    kind: SignInKind::Browser,
+                    hint: Default::default(),
+                    help_url: Default::default(),
+                },
+                // A method this build does not know is not offered.
+                _ => return None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut item = ProviderItem {
+        id: status.id.as_str().into(),
+        name: status.name.as_str().into(),
+        signed_in: status.signed_in,
+        account: status.account_name.clone().unwrap_or_default().into(),
+        methods: Rc::new(VecModel::from(methods)).into(),
+        phase: SignInPhase::Idle,
+        offer: OfferPhase::None,
+        ..Default::default()
+    };
+    match state {
+        None | Some(SignInState::Idle) => {}
+        Some(SignInState::Busy) => item.phase = SignInPhase::Busy,
+        Some(SignInState::Code { code, url, expired }) => {
+            item.phase = SignInPhase::Code;
+            item.code = code.as_str().into();
+            item.link = url.as_str().into();
+            item.link_label = link_label(url).into();
+            item.expired = *expired;
+        }
+        Some(SignInState::Browser { url }) => {
+            item.phase = SignInPhase::Browser;
+            item.link = url.as_str().into();
+        }
+        Some(SignInState::SecondFactor { hint }) => {
+            item.phase = SignInPhase::SecondFactor;
+            item.detail = hint.as_str().into();
+        }
+        Some(SignInState::Failed(text)) => {
+            item.phase = SignInPhase::Failed;
+            item.detail = text.as_str().into();
+        }
+    }
+    if status.signed_in {
+        match offer {
+            Some(Offer::Asking(count)) => {
+                item.offer = OfferPhase::Asking;
+                item.offer_text =
+                    format!("Отправить {} из eagle в этот сервис?", likes_phrase(count)).into();
+            }
+            Some(Offer::Sent) => item.offer = OfferPhase::Sent,
+            Some(Offer::Skipped) => item.offer = OfferPhase::Skipped,
+            None => {}
+        }
+    }
+    item
+}
+
+impl Services {
+    /// Shows the current statuses, sign-in states and answers.
+    fn publish(&self, ui: &DesktopWindow) {
+        if !self.attached.replace(true) {
+            ui.global::<Ui>().set_providers(self.rows.clone().into());
+        }
+        let statuses = self.statuses.borrow();
+        let states = self.sign_in.borrow();
+        let offers = self.offers.borrow();
+        let items = statuses
+            .iter()
+            .map(|status| {
+                provider_item(
+                    status,
+                    states.get(&status.id),
+                    offers.get(&status.id).copied(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if self.rows.row_count() == items.len() {
+            for (index, item) in items.into_iter().enumerate() {
+                self.rows.set_row_data(index, item);
+            }
+        } else {
+            self.rows.set_vec(items);
+        }
+    }
+}
+
 /// UI-thread state shared by event delivery and actions.
 struct Bridge {
+    services: Services,
     rows: Rc<VecModel<TrackItem>>,
     search_rows: RefCell<Vec<LibraryItem>>,
     search_cards: RefCell<Vec<Card>>,
@@ -186,6 +405,9 @@ impl Bridge {
                 .iter()
                 .map(|row| row.cover),
         );
+        let wave = ui.global::<Wave>();
+        active.extend(wave.get_played().iter().map(|row| row.cover));
+        active.push(wave.get_next().cover);
         self.images
             .borrow_mut()
             .retain(|_, (_, image)| active.contains(image));
@@ -281,6 +503,23 @@ impl Bridge {
                     self.rows.set_row_data(index, row);
                 }
             }
+            let wave = ui.global::<Wave>();
+            let wave_rows = wave.get_played();
+            if let Some(model) = wave_rows.as_any().downcast_ref::<VecModel<WaveTrack>>() {
+                for index in 0..model.row_count() {
+                    if let Some(mut row) = model.row_data(index)
+                        && row.id.as_str() == id
+                    {
+                        row.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
+                        model.set_row_data(index, row);
+                    }
+                }
+            }
+            let mut next = wave.get_next();
+            if next.id.as_str() == id {
+                next.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
+                wave.set_next(next);
+            }
             let queue = ui.global::<Library>().get_queue();
             for index in 0..if ui.global::<Ui>().get_panel_open() {
                 queue.row_count()
@@ -356,6 +595,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let radio_ready = snapshot.radio_ready;
             let radio_busy = snapshot.radio_busy;
             let radio_notice = snapshot.radio_notice.clone();
+            let wave = snapshot.wave.clone();
             ui.global::<Ui>().set_signed_in(snapshot.signed_in);
             apply(ui, Event::View(snapshot.view), bridge);
             apply(ui, Event::Collections(snapshot.collections), bridge);
@@ -401,6 +641,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             ui.global::<Ui>().set_radio_busy(radio_busy);
             ui.global::<Ui>()
                 .set_radio_notice(radio_notice.unwrap_or_default().into());
+            TUNING_SYNCED.with(|synced| synced.set(false));
+            apply(ui, Event::Wave(Box::new(wave)), bridge);
         }
         Event::Collections(collections) => {
             let model = ui.global::<Library>().get_playlists();
@@ -587,6 +829,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             ui.global::<Ui>()
                 .set_radio_notice(notice.unwrap_or_default().into());
         }
+        Event::Wave(state) => apply_wave(ui, bridge, *state),
         Event::Busy(busy) => ui.global::<Ui>().set_busy(busy),
         Event::Player(state) => {
             let player = ui.global::<Player>();
@@ -631,6 +874,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         .map_or_else(String::new, ToString::to_string)
                         .into(),
                 );
+                player.set_album(track.album_title.as_deref().unwrap_or_default().into());
                 player.set_artist_id(
                     track
                         .artists
@@ -660,6 +904,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             } else {
                 player.set_track_id("".into());
                 player.set_album_id("".into());
+                player.set_album("".into());
                 player.set_artist_id("".into());
                 player.set_title("".into());
                 player.set_artist("".into());
@@ -868,8 +1113,26 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 }
             }
         }
-        // No dialog yet: until the user can answer, nothing is sent to the provider.
-        Event::LikesBackfillOffer { .. } => {}
+        // Until the user answers in the services section, nothing is sent to the provider.
+        Event::LikesBackfillOffer { provider, count } => {
+            bridge
+                .services
+                .offers
+                .borrow_mut()
+                .insert(provider, Offer::Asking(count));
+            bridge.services.publish(ui);
+        }
+        Event::ServicesIntro => {
+            // Only the start screen is replaced; a screen the user already opened stays.
+            if ui.global::<Ui>().get_route() == Route::Library {
+                let _ = bridge.sender.send(Command::Downloads);
+                let _ = bridge.sender.send(Command::Open(View::Settings));
+            }
+        }
+        Event::SignIn { provider, state } => {
+            bridge.services.sign_in.borrow_mut().insert(provider, state);
+            bridge.services.publish(ui);
+        }
         Event::Providers(all) => {
             let searchable = all
                 .iter()
@@ -888,27 +1151,14 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .collect::<Vec<_>>();
             ui.global::<Ui>()
                 .set_searchable_providers(Rc::new(VecModel::from(searchable)).into());
-            let items: Vec<ProviderItem> = all
-                .into_iter()
-                .map(|p| {
-                    let (token_auth, hint, help_url) = match &p.auth {
-                        eagle_core::AuthMethod::Token { hint, help_url } => {
-                            (true, *hint, help_url.unwrap_or_default())
-                        }
-                        _ => (false, "", ""),
-                    };
-                    ProviderItem {
-                        id: p.id.into(),
-                        name: p.name.into(),
-                        hint: hint.into(),
-                        help_url: help_url.into(),
-                        token_auth,
-                        signed_in: p.signed_in,
-                    }
-                })
-                .collect();
-            ui.global::<Ui>()
-                .set_providers(Rc::new(VecModel::from(items)).into());
+            // A service that signed out forgets the answer about its likes.
+            bridge
+                .services
+                .offers
+                .borrow_mut()
+                .retain(|id, _| all.iter().any(|p| p.signed_in && p.id == *id));
+            *bridge.services.statuses.borrow_mut() = all;
+            bridge.services.publish(ui);
         }
     }
 }
@@ -916,20 +1166,33 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
 thread_local! { static COVER_COLOR: RefCell<[u8; 3]> = const { RefCell::new([128; 3]) }; }
 pub(super) fn apply_colors(ui: &DesktopWindow) {
     let tokens = ui.global::<Theme>().get_t();
-    let background = [tokens.bg.red(), tokens.bg.green(), tokens.bg.blue()];
+    let rgb = |c: slint::Color| [c.red(), c.green(), c.blue()];
+    let background = rgb(tokens.bg);
+    let surface = rgb(tokens.surf);
     let tint = match ui.global::<Theme>().get_tint() {
         0 => eagle_palette::Tint::Off,
         2 => eagle_palette::Tint::Bright,
         _ => eagle_palette::Tint::Soft,
     };
-    let (bar, panel) =
-        COVER_COLOR.with(|c| eagle_palette::player_surfaces(*c.borrow(), background, tint));
+    let (bar, panel) = COVER_COLOR
+        .with(|c| eagle_palette::player_surfaces(*c.borrow(), background, surface, tint));
     let color = |rgb: [u8; 3]| slint::Color::from_rgb_u8(rgb[0], rgb[1], rgb[2]);
     ui.global::<Player>().set_colors(PlayerColors {
         bg: color(panel.background),
         bar: color(bar.background),
         tx: color(panel.text),
         tx2: color(panel.secondary),
+        ln: color(bar.line),
+        accent: color(panel.accent),
+    });
+    let pad = COVER_COLOR.with(|c| eagle_palette::wave_pad(*c.borrow(), background));
+    ui.global::<Wave>().set_colors(WaveColors {
+        pad: color(pad.background),
+        ring: color(pad.ring),
+        tx: color(pad.text),
+        tx2: color(pad.secondary),
+        dot: color(pad.dot),
+        card: color(pad.card),
     });
     #[cfg(target_os = "macos")]
     super::window_chrome::apply(ui);
@@ -961,6 +1224,8 @@ fn like_optimistically(ui: &DesktopWindow, rows: &VecModel<TrackItem>, id: &str)
 }
 
 pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
+    ui.global::<Wave>()
+        .set_dots(Rc::new(VecModel::from(super::pad_dots())).into());
     let actions = ui.global::<Actions>();
     let tx = sender.clone();
     actions.on_refresh_playlist(move |id| {
@@ -1093,8 +1358,16 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     simple!(on_toggle_shuffle, Command::ToggleShuffle);
     simple!(on_cycle_repeat, Command::CycleRepeat);
     simple!(on_prev, Command::Previous);
-    simple!(on_radio_start, Command::RadioStart);
-    simple!(on_radio_more, Command::RadioMore);
+    simple!(on_radio_start, Command::RadioPlay);
+    simple!(on_wave_not_this, Command::RadioNotThis);
+    simple!(on_wave_more_like_this, Command::RadioMoreLikeThis);
+    let tx = sender.clone();
+    actions.on_wave_tune(move |x, y, novelty| {
+        let _ = tx.send(Command::RadioTune {
+            mood: Some((x, y)),
+            novelty,
+        });
+    });
     let tx = sender.clone();
     actions.on_play(move |id| {
         if let Ok(id) = id.parse() {
@@ -1305,6 +1578,59 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
         });
     });
     let tx = sender.clone();
+    actions.on_sign_in_start(move |provider, method| {
+        let Ok(method) = usize::try_from(method) else {
+            return;
+        };
+        let _ = tx.send(Command::SignInStart {
+            provider: provider.to_string(),
+            method,
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_password(move |provider, login, password| {
+        let _ = tx.send(Command::SignInPassword {
+            provider: provider.to_string(),
+            login: login.to_string(),
+            password: eagle_app::session::Token::new(password.to_string()),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_second_factor(move |provider, code| {
+        // Codes are shown as «000 000»; the provider gets the digits.
+        let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let _ = tx.send(Command::SignInSecondFactor {
+            provider: provider.to_string(),
+            code: eagle_app::session::Token::new(code),
+        });
+    });
+    let tx = sender.clone();
+    actions.on_sign_in_cancel(move |provider| {
+        let _ = tx.send(Command::SignInCancel {
+            provider: provider.to_string(),
+        });
+    });
+    let tx = sender.clone();
+    let weak = ui.as_weak();
+    actions.on_likes_backfill(move |provider, accept| {
+        let _ = tx.send(Command::LikesBackfill {
+            provider: provider.to_string(),
+            accept,
+        });
+        if let Some(ui) = weak.upgrade() {
+            with_bridge(|bridge| {
+                bridge.services.offers.borrow_mut().insert(
+                    provider.to_string(),
+                    if accept { Offer::Sent } else { Offer::Skipped },
+                );
+                bridge.services.publish(&ui);
+            });
+        }
+    });
+    actions.on_open_url(|url| {
+        crate::browser::open(&url);
+    });
+    let tx = sender.clone();
     actions.on_logout(move |provider| {
         let _ = tx.send(Command::Logout {
             provider: provider.to_string(),
@@ -1337,7 +1663,6 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
             Route::Search => View::Search,
             Route::Album => View::Album,
             Route::Playlist => View::Playlist,
-            Route::Login => View::Login,
             Route::Settings => View::Settings,
             Route::Albums => View::Albums,
             Route::Artists => View::Artists,
@@ -1357,8 +1682,10 @@ pub(super) fn initialize(
     anchor: Arc<Mutex<Option<PositionAnchor>>>,
     sender: CommandSender,
 ) {
+    TUNING_SYNCED.with(|synced| synced.set(false));
     UI_BRIDGE.with(|bridge| {
         *bridge.borrow_mut() = Some(Rc::new(Bridge {
+            services: Services::default(),
             rows,
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1410,6 +1737,22 @@ pub(super) fn coalesce_hidden_position(
 pub(super) mod tests {
     use super::*;
     #[test]
+    fn likes_are_counted_in_russian() {
+        assert_eq!(likes_phrase(1), "1 лайк");
+        assert_eq!(likes_phrase(2), "2 лайка");
+        assert_eq!(likes_phrase(5), "5 лайков");
+        assert_eq!(likes_phrase(11), "11 лайков");
+        assert_eq!(likes_phrase(12), "12 лайков");
+        assert_eq!(likes_phrase(21), "21 лайк");
+        assert_eq!(likes_phrase(104), "104 лайка");
+        assert_eq!(likes_phrase(128), "128 лайков");
+    }
+    #[test]
+    fn link_label_drops_scheme_and_trailing_slash() {
+        assert_eq!(link_label("https://ya.ru/device"), "ya.ru/device");
+        assert_eq!(link_label("https://example.test/"), "example.test");
+    }
+    #[test]
     fn hidden_positions_update_anchor_without_scheduling_ui_work() {
         let anchor = Mutex::new(None);
         let position = PositionAnchor {
@@ -1438,6 +1781,7 @@ pub(super) mod tests {
         let root = std::env::temp_dir().join(format!("eagle-ui-search-{}", std::process::id()));
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let bridge = Bridge {
+            services: Services::default(),
             rows: Rc::new(VecModel::default()),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1542,6 +1886,7 @@ pub(super) mod tests {
             std::env::temp_dir().join(format!("eagle-ui-search-delta-{}", std::process::id()));
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let bridge = Bridge {
+            services: Services::default(),
             rows: Rc::new(VecModel::default()),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1666,6 +2011,7 @@ pub(super) mod tests {
         let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
         let rows = Rc::new(VecModel::default());
         let bridge = Bridge {
+            services: Services::default(),
             rows: rows.clone(),
             search_rows: RefCell::new(Vec::new()),
             search_cards: RefCell::new(Vec::new()),
@@ -1808,6 +2154,7 @@ pub(super) mod tests {
             radio_ready: true,
             radio_busy: false,
             radio_notice: Some("Нет сети; очередь сохранена".into()),
+            wave: Default::default(),
             signed_in: true,
             player: Arc::new(eagle_app::session::PlayerState {
                 track: Some(track.clone()),

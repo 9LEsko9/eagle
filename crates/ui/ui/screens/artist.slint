@@ -5,6 +5,9 @@ import { TrackRowView } from "../components/track-row.slint";
 import { TextButton } from "../components/button.slint";
 import { CardGrid } from "../components/cards.slint";
 import { Artwork } from "../components/cover.slint";
+import { SkeletonRows } from "../components/skeleton.slint";
+import { SkeletonBar } from "../components/spinner.slint";
+import { Loading } from "../globals/loading.slint";
 import { TrackMenu, TrackTableHeader } from "collection.slint";
 
 component SectionHeading inherits Text {
@@ -39,15 +42,26 @@ export component ArtistScreen inherits Flickable {
                 alignment: end;
                 spacing: 0px;
                 Text { text: @tr("Исполнитель"); color: Theme.t.tx2; font-size: Type.meta; font-weight: 500; }
-                Text {
-                    text: Library.title != "" ? Library.title : Ui.busy ? @tr("Загрузка…") : "";
-                    color: Theme.t.tx;
-                    font-size: Layout.compact ? Type.title : Type.display;
-                    font-weight: 700;
-                    letter-spacing: -0.8px;
-                    overflow: elide;
-                    height: self.preferred-height + 10px;
-                    vertical-alignment: center;
+                // A blank title keeps the height; a skeleton bar stands in while the page loads.
+                Rectangle {
+                    height: artist-title.height;
+                    artist-title := Text {
+                        width: parent.width;
+                        text: Library.title != "" ? Library.title : " ";
+                        color: Theme.t.tx;
+                        font-size: Layout.compact ? Type.title : Type.display;
+                        font-weight: 700;
+                        letter-spacing: -0.8px;
+                        overflow: elide;
+                        height: self.preferred-height + 10px;
+                        vertical-alignment: center;
+                    }
+                    if Library.title == "" && Loading.page : SkeletonBar {
+                        x: 0px;
+                        y: (parent.height - self.height) / 2;
+                        width: min(280px, parent.width);
+                        height: Layout.compact ? 20px : 28px;
+                    }
                 }
                 HorizontalLayout {
                     spacing: 10px;
@@ -62,6 +76,15 @@ export component ArtistScreen inherits Flickable {
                     }
                 }
             }
+        }
+        // Placeholder for the first load: a section heading bar and a few track rows.
+        if Loading.page && Library.tracks.length == 0 && Library.cards.length == 0 : VerticalLayout {
+            spacing: 8px;
+            Rectangle {
+                height: 48px;
+                SkeletonBar { x: 0px; y: parent.height - self.height; width: 180px; height: 18px; }
+            }
+            SkeletonRows { count: 5; }
         }
         if Library.tracks.length > 0 : SectionHeading { text: @tr("Популярные треки"); }
         if Library.tracks.length > 0 : Rectangle { height: 8px; }

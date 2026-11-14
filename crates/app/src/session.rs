@@ -3,10 +3,12 @@
 use crate::providers::{
     ProviderStatus, Providers, account_key, liked_albums_key, liked_artists_key,
 };
+pub use crate::sign_in::SignInState;
+use crate::sign_in::{self, SignInUpdate, SignIns};
 use eagle_core::{
-    Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
-    PlaylistSnapshot, PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError,
-    RadioQueueItem, RadioSession, Track, TrackId,
+    Album, Artist, Capabilities, Playlist, PlaylistEdit, PlaylistEditError, PlaylistSnapshot,
+    PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError, RadioQueueItem, RadioSession,
+    RadioTuning, SignInInput, SignInMethod, Track, TrackId,
 };
 pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
@@ -21,6 +23,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod wave;
+pub use wave::{MOVED_NOTE, WaveEntry, WaveMark, WaveState, wave_why};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Above this many inserts/removals a list change is sent as one reset.
@@ -175,7 +180,6 @@ pub enum View {
     Search,
     Album,
     Playlist,
-    Login,
     Settings,
     /// Liked albums grid.
     Albums,
@@ -188,6 +192,18 @@ pub enum View {
 pub enum Command {
     RadioStart,
     RadioMore,
+    /// «Слушать волну»: starts the wave with the stored tuning and plays it, or resumes it.
+    RadioPlay,
+    /// Mood (valence, energy in -1..1; `None` is any) and novelty (0 familiar, 1 new). The wave
+    /// follows from the next track once the values have rested.
+    RadioTune {
+        mood: Option<(f32, f32)>,
+        novelty: f32,
+    },
+    /// «Ещё такого»: the wave starts over from the current track.
+    RadioMoreLikeThis,
+    /// «Не то»: dislikes the current track of the wave and skips it.
+    RadioNotThis,
     UiAttached(bool),
     ClearPlaylistMutationNotice(TrackId),
     EditPlaylist {
@@ -256,6 +272,29 @@ pub enum Command {
     Login {
         provider: String,
         token: Token,
+    },
+    /// Starts the provider's sign-in method number `method` (an index into
+    /// `ProviderStatus::sign_in`) that needs no input: a device code or the browser. Progress
+    /// arrives as `Event::SignIn`. A token is entered with `Login`, a password with
+    /// `SignInPassword`.
+    SignInStart {
+        provider: String,
+        method: usize,
+    },
+    /// Signs in with a login and password.
+    SignInPassword {
+        provider: String,
+        login: String,
+        password: Token,
+    },
+    /// Answers the second factor that `SignInState::SecondFactor` asked for.
+    SignInSecondFactor {
+        provider: String,
+        code: Token,
+    },
+    /// Abandons the provider's running sign-in.
+    SignInCancel {
+        provider: String,
     },
     /// Forgets the provider's token. Offline saves of its account go too unless `keep_saved`;
     /// likes and playlists stay.
@@ -400,6 +439,7 @@ pub struct SessionSnapshot {
     pub radio_ready: bool,
     pub radio_busy: bool,
     pub radio_notice: Option<String>,
+    pub wave: WaveState,
     pub signed_in: bool,
     pub player: Arc<PlayerState>,
     pub queue: Vec<(u64, Arc<Track>)>,
@@ -409,6 +449,14 @@ pub struct SessionSnapshot {
 pub enum Event {
     /// Every provider with its sign-in state; sent whenever any of them changes.
     Providers(Vec<ProviderStatus>),
+    /// First start with nothing signed in: the UI should show the services, unless the user is
+    /// already somewhere else.
+    ServicesIntro,
+    /// The sign-in of one provider changed what it shows.
+    SignIn {
+        provider: String,
+        state: SignInState,
+    },
     /// `count` local likes could be sent to the connected `provider`; nothing is sent until the
     /// user answers with `Command::LikesBackfill`.
     LikesBackfillOffer {
@@ -420,6 +468,8 @@ pub enum Event {
         busy: bool,
         notice: Option<String>,
     },
+    /// The wave screen: tuning, the feed around the current track and the note.
+    Wave(Box<WaveState>),
     Snapshot(Box<SessionSnapshot>),
     Downloads(Vec<eagle_store::DownloadJob>),
     NetworkPolicy(eagle_net::policy::NetworkPolicy),
@@ -612,6 +662,8 @@ enum Message {
     Source(u64, u64, TrackId),
     /// The network became reachable: deferred likes are sent now.
     NetworkOnline,
+    /// Progress of a provider's sign-in flow; generation 0 is a token sign-in.
+    SignIn(String, u64, SignInUpdate),
 }
 #[derive(Clone)]
 pub struct CommandSender(mpsc::Sender<Message>);
@@ -743,6 +795,7 @@ struct Worker {
     radio_busy: bool,
     radio_can_more: bool,
     radio_notice: Option<String>,
+    wave: wave::Wave,
     cards: Vec<Card>,
     covers: crate::covers::Covers,
     downloads: crate::downloads::Downloads,
@@ -752,6 +805,10 @@ struct Worker {
     clock: Clock,
     /// When the earliest deferred like is due, if any is pending in the future.
     like_retry_at: Option<i64>,
+    /// Sign-in flows that are waiting for the user, by provider.
+    sign_ins: SignIns,
+    /// Whether the first answer about saved sign-ins has been looked at.
+    services_checked: bool,
 }
 impl Worker {
     #[cfg(test)]
@@ -855,6 +912,7 @@ impl Worker {
         downloads.account(account.clone());
         covers.set_context(&artwork_context(&store, &providers)?);
         let profile = store.profile_id()?;
+        let tuning = wave::load_tuning(&store);
         let mut worker = Self {
             store,
             cache,
@@ -895,6 +953,8 @@ impl Worker {
             view_generation: 0,
             search_ui_id: None,
             view: View::Library,
+            sign_ins: SignIns::default(),
+            services_checked: false,
             playlist_id: None,
             playlist_snapshot: None,
             playlist_edit_busy: false,
@@ -904,6 +964,7 @@ impl Worker {
             radio_busy: false,
             radio_can_more: false,
             radio_notice: None,
+            wave: wave::Wave::new(tuning),
             cards: Vec::new(),
             covers,
             downloads,
@@ -1105,6 +1166,7 @@ impl Worker {
             radio_ready: self.radio_can_more && !self.radio_busy,
             radio_busy: self.radio_busy,
             radio_notice: self.radio_notice.clone(),
+            wave: self.wave_state(),
             signed_in: !self.account.is_empty(),
             player: self.player.clone(),
             queue: self
@@ -1165,6 +1227,7 @@ impl Worker {
                 if self.like_due() {
                     self.send_flush_likes(false);
                 }
+                self.wave_tick(Instant::now());
                 let message = match self.timer_wait() {
                     None => match rx.recv() {
                         Ok(message) => message,
@@ -1215,6 +1278,11 @@ impl Worker {
                         self.engine_event(event)
                     }
                     Message::Engine(_, _) => {}
+                    Message::SignIn(provider, generation, update) => {
+                        if let Err(error) = self.sign_in_update(provider, generation, update) {
+                            (self.emit)(Event::Error(error.to_string()));
+                        }
+                    }
                     Message::NetworkOnline => self.send_flush_likes(true),
                     Message::Bitrate(generation, id, bitrate) => {
                         self.apply_bitrate(generation, id, bitrate);
@@ -1378,11 +1446,13 @@ impl Worker {
                                 self.downloads.account(self.account.clone());
                                 (self.emit)(Event::Account);
                                 (self.emit)(Event::Providers(self.providers.statuses()));
+                                self.show_services_once();
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
                             Ok(CatalogReply::Providers) => {
                                 (self.emit)(Event::Providers(self.providers.statuses()));
+                                self.show_services_once();
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
@@ -1477,6 +1547,7 @@ impl Worker {
         let radio_busy = self.radio_busy;
         let radio_can_more = self.radio_can_more;
         let radio_notice = self.radio_notice.clone();
+        let wave = self.wave.clone();
         let Self {
             store,
             cache,
@@ -1538,6 +1609,7 @@ impl Worker {
         next.radio_busy = radio_busy;
         next.radio_can_more = radio_can_more;
         next.radio_notice = radio_notice;
+        next.wave = wave;
         next.covers.set_active(ui_attached);
         (emit)(Event::StorageMoving(false));
         next.storage()?;
@@ -1595,6 +1667,144 @@ impl Worker {
             _ => "",
         }
     }
+    fn sign_in_event(&self, provider: &str, state: SignInState) {
+        (self.emit)(Event::SignIn {
+            provider: provider.to_owned(),
+            state,
+        });
+    }
+    fn sign_in_provider(&self, provider_id: &str) -> Result<Arc<dyn Provider>> {
+        Ok(self
+            .providers
+            .get(provider_id)
+            .ok_or("провайдер недоступен")?
+            .clone())
+    }
+    /// Starts `task` on a flow thread, replacing the provider's running flow.
+    fn sign_in_flow(&mut self, provider: Arc<dyn Provider>, task: sign_in::Task) -> Result<()> {
+        let id = provider.info().id;
+        let (generation, cancel) = self.sign_ins.begin(id);
+        self.sign_in_event(id, SignInState::Busy);
+        let tx = self.tx.clone();
+        let name = id.to_owned();
+        let spawned = sign_in::spawn(provider, task, cancel, move |update| {
+            tx.send(Message::SignIn(name.clone(), generation, update))
+                .is_ok()
+        });
+        if let Err(error) = spawned {
+            self.sign_ins.cancel(id);
+            self.sign_in_event(id, SignInState::Idle);
+            return Err(error.into());
+        }
+        log::info!(provider = id; "sign-in started");
+        Ok(())
+    }
+    /// Applies what a flow thread reported; reports of a replaced or cancelled flow are dropped.
+    fn sign_in_update(
+        &mut self,
+        provider: String,
+        generation: u64,
+        update: SignInUpdate,
+    ) -> Result<()> {
+        // Generation 0 is a token sign-in, which has no flow to look up.
+        match update {
+            SignInUpdate::Finished => {
+                self.sign_in_event(&provider, SignInState::Idle);
+                return Ok(());
+            }
+            SignInUpdate::Failed(text) if generation == 0 => {
+                self.sign_in_event(&provider, SignInState::Failed(text));
+                return Ok(());
+            }
+            _ => {}
+        }
+        let Some(active) = self.sign_ins.current(&provider, generation) else {
+            return Ok(());
+        };
+        match update {
+            SignInUpdate::Code { code, url } => {
+                active.shown = Some((code.clone(), url.clone()));
+                self.sign_in_event(
+                    &provider,
+                    SignInState::Code {
+                        code,
+                        url,
+                        expired: false,
+                    },
+                );
+            }
+            SignInUpdate::Browser { url } => {
+                active.browser = true;
+                self.sign_in_event(&provider, SignInState::Browser { url });
+            }
+            SignInUpdate::SecondFactor { hint, flow } => {
+                active.flow = Some(flow);
+                self.sign_in_event(&provider, SignInState::SecondFactor { hint });
+            }
+            SignInUpdate::Expired => {
+                let shown = active.shown.take().filter(|_| !active.browser);
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(
+                    &provider,
+                    match shown {
+                        Some((code, url)) => SignInState::Code {
+                            code,
+                            url,
+                            expired: true,
+                        },
+                        None => SignInState::Failed("Время на вход вышло".into()),
+                    },
+                );
+            }
+            SignInUpdate::Failed(text) => {
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(&provider, SignInState::Failed(text));
+            }
+            SignInUpdate::Done(token) => {
+                self.sign_ins.cancel(&provider);
+                log::info!(provider = provider.as_str(); "sign-in confirmed by the user");
+                // The same path as a typed token: saved only after the provider accepts it.
+                self.command(Command::Login { provider, token })?;
+            }
+            SignInUpdate::Finished => {}
+        }
+        Ok(())
+    }
+    /// The first time the app starts with nothing signed in, shows Settings, where the
+    /// services are the first section. Later starts keep the screen the user left.
+    /// A failure of the settings store only skips the intro; it never stops the syncs.
+    fn show_services_once(&mut self) {
+        if std::mem::replace(&mut self.services_checked, true) {
+            return;
+        }
+        let stored = self
+            .store
+            .setting("services_intro")
+            .and_then(|seen| match seen {
+                Some(_) => Ok(true),
+                None => self
+                    .store
+                    .put_setting("services_intro", "1".into())
+                    .map(|()| false),
+            });
+        match stored {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(error) => {
+                log::warn!(error = error.to_string().as_str(); "services intro skipped");
+                return;
+            }
+        }
+        let needs_account = self
+            .providers
+            .all()
+            .iter()
+            .any(|p| p.info().needs_sign_in());
+        let signed_in = self.providers.signed_in().any(|p| p.info().needs_sign_in());
+        if needs_account && !signed_in {
+            (self.emit)(Event::ServicesIntro);
+        }
+    }
     /// Forgets one provider's session. Its likes and playlists stay; offline saves of the
     /// account that owns them are removed unless `keep_saved`.
     fn logout(&mut self, provider_id: &str, keep_saved: bool) -> Result<()> {
@@ -1604,6 +1814,8 @@ impl Worker {
             .ok_or("провайдер недоступен")?
             .clone();
         let id = provider.info().id;
+        self.sign_ins.cancel(id);
+        self.sign_in_event(id, SignInState::Idle);
         let owns_account = self.providers.account_provider().map(|p| p.info().id) == Some(id);
         let mut failure = None;
         if owns_account && !keep_saved {
@@ -1638,6 +1850,7 @@ impl Worker {
         self.radio = None;
         self.radio_can_more = false;
         self.radio_notice = None;
+        self.wave.reset();
         let account = stored_account(&self.store, &self.providers)?;
         // Radio sessions belong to an account, so their contexts are dropped before the
         // checkpoint; the queue and position belong to the profile and are restored as they were.
@@ -1837,19 +2050,27 @@ impl Worker {
         result: std::result::Result<RadioSession, RadioError>,
     ) {
         self.radio_busy = false;
+        let replace = start && std::mem::take(&mut self.wave.replace);
+        let mut autoplay = start && std::mem::take(&mut self.wave.autoplay);
         if account == self.account {
             match result {
                 Ok(session) => {
+                    // A restart only takes over while the wave is still what plays.
+                    let replace = replace && self.wave_active();
                     let refill = !start
                         && self.radio.as_ref().is_some_and(|(owner, current, _)| {
                             owner == &account && current.id == session.id
                         });
-                    let append_error = if refill {
+                    let append_error = if replace {
+                        self.replace_upcoming(&account, &session.id, &session.batch)
+                            .err()
+                    } else if refill {
                         self.append_radio_batch(&account, &session.id, &session.batch)
                             .err()
                     } else {
                         None
                     };
+                    autoplay &= !replace;
                     if start {
                         self.radio = Some((account, session.clone(), vec![session.batch.clone()]));
                     } else if let Some((_, current, batches)) = &mut self.radio
@@ -1872,9 +2093,13 @@ impl Worker {
             }
             if self.view == View::Radio {
                 self.publish_radio();
+                if autoplay && self.radio_can_more {
+                    self.wave_autoplay();
+                }
             }
         }
         self.emit_radio_state();
+        self.emit_wave();
     }
     fn append_radio_batch(
         &mut self,
@@ -1885,13 +2110,26 @@ impl Worker {
         let Some(current) = self.queue.get(self.current) else {
             return Ok(());
         };
-        if !self
-            .queue_radio
-            .get(&self.occurrence_id(current))
-            .is_some_and(|context| context.account == account && context.session_id == session_id)
-        {
+        let belongs = |track: &Arc<Track>| {
+            self.queue_radio
+                .get(&self.occurrence_id(track))
+                .is_some_and(|context| {
+                    context.account == account && context.session_id == session_id
+                })
+        };
+        // The tail counts too: after a restart the current track may still be of the old session.
+        if !belongs(current) && !self.queue.last().is_some_and(belongs) {
             return Ok(());
         }
+        self.push_radio_batch(account, session_id, batch)
+    }
+    /// Appends the batch to the queue, the engine and the radio contexts.
+    fn push_radio_batch(
+        &mut self,
+        account: &str,
+        session_id: &str,
+        batch: &RadioBatch,
+    ) -> Result<()> {
         let tracks: Vec<_> = batch
             .tracks
             .iter()
@@ -2034,7 +2272,11 @@ impl Worker {
     fn timer_wait(&self) -> Option<Duration> {
         let checkpoint = (self.player.status == State::Playing)
             .then(|| Duration::from_secs(10).saturating_sub(self.last_checkpoint.elapsed()));
-        [checkpoint, self.like_wait()].into_iter().flatten().min()
+        let wave = self.wave.wait(Instant::now(), self.radio_busy);
+        [checkpoint, self.like_wait(), wave]
+            .into_iter()
+            .flatten()
+            .min()
     }
     fn background(&mut self, command: Command) -> Result<()> {
         self.catalog
@@ -2119,58 +2361,29 @@ impl Worker {
                 | Command::EnqueueNext(_)
                 | Command::Next
         );
-        if let Command::Login { provider, .. } = &command
-            && self.providers.account_provider().map(|p| p.info().id) == Some(provider.as_str())
-        {
-            self.downloads.account(String::new());
+        if let Command::Login { provider, .. } = &command {
+            if self.providers.account_provider().map(|p| p.info().id) == Some(provider.as_str()) {
+                self.downloads.account(String::new());
+            }
+            // A token typed now replaces whatever flow was waiting for the user.
+            self.sign_ins.cancel(provider);
+            self.sign_in_event(provider, SignInState::Busy);
         }
         match command {
             Command::RadioStart | Command::RadioMore => {
                 if self.view != View::Radio {
                     return Err("откройте Мою волну".into());
                 }
-                if self.radio_busy {
-                    return Err("запрос радио уже выполняется".into());
-                }
-                if self.account.is_empty() {
-                    return Err("войдите в аккаунт для радио".into());
-                }
-                let request = if matches!(command, Command::RadioStart) {
-                    CatalogRequest::RadioStart(self.view_generation, self.account.clone())
+                if matches!(command, Command::RadioStart) {
+                    self.start_radio(false, false, None)?;
                 } else {
-                    let (account, session, batches) = self
-                        .radio
-                        .as_ref()
-                        .filter(|(account, _, _)| account == &self.account && self.radio_can_more)
-                        .ok_or("начните новую радиосессию")?;
-                    let queue = batches
-                        .iter()
-                        .flat_map(|batch| batch.tracks.iter())
-                        .map(|track| RadioQueueItem {
-                            track: track.id.clone(),
-                            album: track.album.clone(),
-                        })
-                        .collect();
-                    CatalogRequest::RadioMore(
-                        self.view_generation,
-                        account.clone(),
-                        session.clone(),
-                        queue,
-                    )
-                };
-                if self
-                    .catalog
-                    .as_ref()
-                    .is_some_and(|catalog| catalog.send(request).is_ok())
-                {
-                    self.radio_busy = true;
-                    self.radio_notice = None;
-                    self.emit_radio_state();
-                } else {
-                    self.radio_notice = Some("каталог остановлен".into());
-                    self.emit_radio_state();
+                    self.request_radio_more()?;
                 }
             }
+            Command::RadioPlay => self.wave_play()?,
+            Command::RadioTune { mood, novelty } => self.wave_tune(mood, novelty),
+            Command::RadioMoreLikeThis => self.wave_more_like_this()?,
+            Command::RadioNotThis => self.wave_not_this()?,
             Command::ClearPlaylistMutationNotice(id) => {
                 if self
                     .playlist_edit_notice
@@ -2491,10 +2704,11 @@ impl Worker {
                         (self.emit)(Event::LibraryReset(Vec::new()));
                     }
                     View::Album | View::Playlist | View::Artist => self.publish(Vec::new()),
-                    View::Login | View::Settings => {}
+                    View::Settings => {}
                     View::Radio => {
                         self.publish_radio();
                         self.emit_radio_state();
+                        self.wave_track_changed();
                     }
                 }
             }
@@ -2573,6 +2787,65 @@ impl Worker {
                 provider,
                 keep_saved,
             } => self.logout(&provider, keep_saved)?,
+            Command::SignInStart { provider, method } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let method = provider
+                    .info()
+                    .sign_in
+                    .get(method)
+                    .copied()
+                    .ok_or("такого способа входа нет")?;
+                match method {
+                    SignInMethod::DeviceCode | SignInMethod::Browser => self.sign_in_flow(
+                        provider,
+                        sign_in::Task::Start {
+                            method,
+                            input: SignInInput::None,
+                        },
+                    )?,
+                    _ => return Err("этому способу входа нужны данные от пользователя".into()),
+                }
+            }
+            Command::SignInPassword {
+                provider,
+                login,
+                password,
+            } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let method = provider
+                    .info()
+                    .sign_in
+                    .iter()
+                    .copied()
+                    .find(|method| matches!(method, SignInMethod::Password { .. }))
+                    .ok_or("вход по паролю не поддерживается")?;
+                self.sign_in_flow(
+                    provider,
+                    sign_in::Task::Start {
+                        method,
+                        input: SignInInput::Password { login, password },
+                    },
+                )?;
+            }
+            Command::SignInSecondFactor { provider, code } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let flow = self
+                    .sign_ins
+                    .get(provider.info().id)
+                    .and_then(|active| active.flow.take())
+                    .ok_or("вход не ждёт код")?;
+                self.sign_in_flow(
+                    provider,
+                    sign_in::Task::Continue {
+                        flow,
+                        code: Some(code),
+                    },
+                )?;
+            }
+            Command::SignInCancel { provider } => {
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(&provider, SignInState::Idle);
+            }
             Command::Album(id) => {
                 self.title.clear();
                 self.header = Header::default();
@@ -3019,6 +3292,7 @@ impl Worker {
                 self.last_position = None;
                 self.restored_position = Duration::ZERO;
                 self.emit_queue();
+                self.wave_track_changed();
                 if let Some(track) = self.queue.get(self.current).cloned() {
                     let bitrate = self
                         .audio_bitrates
@@ -3069,6 +3343,7 @@ impl Worker {
                     state.bitrate_kbps = self.audio_bitrates.get(&occurrence).copied().flatten();
                     state.source_provider = self.audio_sources.get(&occurrence).cloned();
                     self.emit_queue();
+                    self.wave_track_changed();
                     (self.emit)(Event::Player(self.player.clone()));
                 }
                 let repeated = self.history_marker.take().is_some_and(|(index, previous)| {
@@ -3135,7 +3410,9 @@ struct SyncState {
 }
 
 enum CatalogRequest {
-    RadioStart(u64, String),
+    RadioStart(u64, String, RadioTuning),
+    /// Tells the provider that the track is not wanted; fire and forget.
+    Dislike(TrackId),
     RadioMore(u64, String, RadioSession, Vec<RadioQueueItem>),
     Command(u64, Command),
     EditPlaylist(u64, PlaylistSnapshot, PlaylistEdit),
@@ -3280,8 +3557,9 @@ impl Catalog {
                         }
                         let generation = match &request {
                             CatalogRequest::Command(generation, _) => *generation,
-                            CatalogRequest::RadioStart(generation, _)
+                            CatalogRequest::RadioStart(generation, _, _)
                             | CatalogRequest::RadioMore(generation, _, _, _) => *generation,
+                            CatalogRequest::Dislike(_) => 0,
                             CatalogRequest::EditPlaylist(generation, _, _) => *generation,
                             CatalogRequest::RefreshPlaylist(generation, _) => *generation,
                             CatalogRequest::Cover(_, _, generation, _) => *generation,
@@ -3299,6 +3577,13 @@ impl Catalog {
                             let _ =
                                 replies.send(Message::Catalog(generation, Box::new(Ok(partial))));
                         };
+                        let login = match &request {
+                            CatalogRequest::Command(_, Command::Login { provider, .. }) => {
+                                Some(provider.clone())
+                            }
+                            _ => None,
+                        };
+                        let mut login_failure = None;
                         let reply =
                             match &request {
                                 CatalogRequest::Command(_, Command::Search(query)) => {
@@ -3313,15 +3598,33 @@ impl Catalog {
                                     .search_cards_merged(CardKind::Playlists, query, &send_partial),
                                 _ => self.request(request),
                             }
-                            .map_err(|e| e.to_string());
+                            .map_err(|e| {
+                                if login.is_some() {
+                                    login_failure = Some(match e.downcast_ref::<ProviderError>() {
+                                        Some(error) => sign_in::failure_text(error, true),
+                                        None => "Не получилось войти".into(),
+                                    });
+                                }
+                                e.to_string()
+                            });
                         let reply = if mutation {
                             Ok(reply.unwrap_or_else(CatalogReply::PlaylistFailed))
                         } else {
                             reply
                         };
+                        let sign_in_update = login.map(|provider| {
+                            let update = match &reply {
+                                Ok(_) => SignInUpdate::Finished,
+                                Err(_) => {
+                                    SignInUpdate::Failed(login_failure.take().unwrap_or_default())
+                                }
+                            };
+                            Message::SignIn(provider, 0, update)
+                        });
                         if replies
                             .send(Message::Catalog(generation, Box::new(reply)))
                             .is_err()
+                            || sign_in_update.is_some_and(|message| replies.send(message).is_err())
                             || !self.report_likes_pending(&replies)
                         {
                             break;
@@ -3535,17 +3838,47 @@ impl Catalog {
         }
     }
 
+    /// Starts a wave with the provider that owns the seed, or else the first one with radio.
+    /// Mood and novelty go only to a provider that declares `radio_tuning`; a seed always goes
+    /// along, and a provider without `radio_seed` refuses it.
+    fn radio_start(
+        &self,
+        account: &str,
+        tuning: &RadioTuning,
+    ) -> std::result::Result<RadioSession, RadioError> {
+        let radio = |p: &&Arc<dyn Provider>| {
+            self.providers.is_signed_in(p.as_ref()) && self.providers.effective(p.as_ref()).radio
+        };
+        let provider = match &tuning.seed {
+            Some(seed) => self.providers.for_track(seed).filter(radio),
+            None => self.providers.first_with(|c| c.radio),
+        }
+        .ok_or(ProviderError::Auth)?;
+        if provider.account()?.id != account {
+            return Err(ProviderError::Auth.into());
+        }
+        let mut tuning = tuning.clone();
+        if !self.providers.effective(provider.as_ref()).radio_tuning {
+            tuning.mood = None;
+            tuning.novelty = RadioTuning::default().novelty;
+        }
+        provider.radio_start(&tuning)
+    }
     fn request(&self, request: CatalogRequest) -> Result<CatalogReply> {
         match request {
-            CatalogRequest::RadioStart(_, account) => {
-                let result = match self.providers.first_with(|c| c.radio) {
-                    Some(provider) => match provider.account() {
-                        Ok(current) if current.id == account => provider.radio_start(),
-                        _ => Err(eagle_core::ProviderError::Auth.into()),
-                    },
-                    None => Err(eagle_core::ProviderError::Auth.into()),
-                };
+            CatalogRequest::RadioStart(_, account, tuning) => {
+                let result = self.radio_start(&account, &tuning);
                 Ok(CatalogReply::RadioResult(account, true, result))
+            }
+            CatalogRequest::Dislike(id) => {
+                let provider = self.provider_for(&id)?;
+                // A hint for the wave, not the user's data: a failure is logged, not shown.
+                if self.providers.effective(provider.as_ref()).dislikes
+                    && let Err(error) = provider.set_disliked(&id, true)
+                {
+                    log::warn!(provider = id.provider(), error = error.to_string().as_str(); "dislike not sent");
+                }
+                Ok(CatalogReply::Unchanged)
             }
             CatalogRequest::RadioMore(_, account, mut session, queue) => {
                 // The session belongs to the provider of its tracks, whatever the priority is now.
@@ -4275,8 +4608,9 @@ impl Catalog {
                     .get(&provider)
                     .ok_or("провайдер недоступен")?
                     .clone();
-                if !matches!(provider.info().auth, AuthMethod::Token { .. }) {
-                    return Err("этот провайдер не требует входа токеном".into());
+                // Every sign-in method ends with a token: typed, or handed out by a flow.
+                if !provider.info().needs_sign_in() {
+                    return Err("этот провайдер не требует входа".into());
                 }
                 let account = self.providers.sign_in(provider.as_ref(), token)?;
                 self.resolve_unresolved_likes(provider.as_ref());
@@ -4691,7 +5025,7 @@ mod delta_tests {
         worker.command(Command::RadioStart).unwrap();
         assert!(matches!(
             catalog_rx.try_recv(),
-            Ok(CatalogRequest::RadioStart(_, _))
+            Ok(CatalogRequest::RadioStart(_, _, _))
         ));
         let track = (*row(1, false).track).clone();
         worker.radio_finished(
@@ -4743,6 +5077,257 @@ mod delta_tests {
         assert!(worker.command(Command::RadioMore).is_err());
         assert!(catalog_rx.try_recv().is_err());
         assert_eq!(worker.queue[0].id.to_string(), "yandex:9");
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A worker whose queue holds `count` tracks of one wave session, the first one current.
+    fn wave_worker(
+        name: &str,
+        count: u32,
+    ) -> (Worker, mpsc::Receiver<CatalogRequest>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("eg-wave-{name}-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let (catalog_tx, catalog_rx) = mpsc::channel();
+        worker.catalog = Some(catalog_tx);
+        worker.account = "a".into();
+        worker.view = View::Radio;
+        worker.queue = (1..=count).map(|n| row(n, false).track).collect();
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        for track in worker.queue.clone() {
+            worker.queue_radio.insert(
+                worker.occurrence_id(&track),
+                eagle_store::RadioContext {
+                    account: "a".into(),
+                    session_id: "s".into(),
+                    batch_id: Some("b".into()),
+                },
+            );
+        }
+        (worker, catalog_rx, root)
+    }
+    fn queued_ids(worker: &Worker) -> Vec<String> {
+        worker.queue.iter().map(|t| t.id.to_string()).collect()
+    }
+    #[test]
+    fn tuning_waits_for_the_debounce_then_restarts_the_wave_with_the_last_value() {
+        let (mut worker, catalog_rx, root) = wave_worker("tune", 3);
+        worker
+            .command(Command::RadioTune {
+                mood: Some((0.0, 0.5)),
+                novelty: 0.9,
+            })
+            .unwrap();
+        worker
+            .command(Command::RadioTune {
+                mood: Some((0.0, 0.9)),
+                novelty: 0.9,
+            })
+            .unwrap();
+        let state = worker.wave_state();
+        assert_eq!(state.note, MOVED_NOTE);
+        assert_eq!(state.tuning.mood, Some((0.0, 0.9)));
+        // Nothing is sent while the value is still moving.
+        worker.wave_tick(Instant::now());
+        assert!(catalog_rx.try_recv().is_err());
+        assert!(worker.wave.wait(Instant::now(), false).is_some());
+        assert!(worker.wave.wait(Instant::now(), true).is_none());
+        worker.wave_tick(Instant::now() + Duration::from_secs(1));
+        let Ok(CatalogRequest::RadioStart(_, account, tuning)) = catalog_rx.try_recv() else {
+            panic!("expected one restart")
+        };
+        assert_eq!(account, "a");
+        assert_eq!(tuning.mood, Some((0.0, 0.9)));
+        assert_eq!(tuning.novelty, 0.9);
+        assert_eq!(tuning.seed, None);
+        assert!(catalog_rx.try_recv().is_err());
+        assert!(worker.radio_busy && worker.wave.replace);
+        let stored = worker.store.setting("radio_tuning").unwrap().unwrap();
+        assert_eq!(wave::decode_tuning(&stored), tuning);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn tuning_without_a_playing_wave_is_only_stored() {
+        let (mut worker, catalog_rx, root) = wave_worker("idle", 2);
+        worker.queue_radio.clear();
+        assert!(!worker.wave_active());
+        worker
+            .command(Command::RadioTune {
+                mood: None,
+                novelty: 0.1,
+            })
+            .unwrap();
+        assert!(worker.wave_state().note.is_empty());
+        worker.wave_tick(Instant::now() + Duration::from_secs(1));
+        assert!(catalog_rx.try_recv().is_err());
+        let stored = worker.store.setting("radio_tuning").unwrap().unwrap();
+        assert_eq!(wave::decode_tuning(&stored).novelty, 0.1);
+        drop(worker);
+        let (tx, _) = mpsc::channel();
+        let again = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        assert_eq!(again.wave.tuning.novelty, 0.1);
+        drop(again);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn more_like_this_restarts_from_the_current_track_and_swaps_only_the_upcoming_queue() {
+        let (mut worker, catalog_rx, root) = wave_worker("seed", 3);
+        worker.command(Command::RadioMoreLikeThis).unwrap();
+        assert!(worker.wave_state().note.starts_with("Ещё такого"));
+        worker.wave_tick(Instant::now());
+        let Ok(CatalogRequest::RadioStart(_, _, tuning)) = catalog_rx.try_recv() else {
+            panic!("expected a seeded start")
+        };
+        assert_eq!(
+            tuning.seed.as_ref().map(ToString::to_string).as_deref(),
+            Some("yandex:1")
+        );
+        let fresh = |n: u32| (*row(n, false).track).clone();
+        worker.radio_finished(
+            "a".into(),
+            true,
+            Ok(RadioSession {
+                id: "t".into(),
+                batch: RadioBatch {
+                    id: Some("fresh".into()),
+                    // The seed itself comes first, as services do; it is already playing.
+                    tracks: vec![fresh(1), fresh(7), fresh(8)],
+                },
+            }),
+        );
+        assert_eq!(worker.current, 0);
+        assert_eq!(queued_ids(&worker), ["yandex:1", "yandex:7", "yandex:8"]);
+        let ids: Vec<_> = worker
+            .queue
+            .iter()
+            .map(|t| worker.occurrence_id(t))
+            .collect();
+        assert_eq!(worker.queue_radio[&ids[1]].session_id, "t");
+        assert_eq!(worker.queue_radio[&ids[0]].session_id, "s");
+        assert_eq!(worker.queue_original.len(), 3);
+        assert!(worker.wave_active());
+        assert!(!worker.radio_busy && !worker.wave.replace);
+        let state = worker.wave_state();
+        assert_eq!(state.next.unwrap().id.to_string(), "yandex:7");
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_restart_that_arrives_after_the_wave_stopped_leaves_the_queue_alone() {
+        let (mut worker, catalog_rx, root) = wave_worker("stale", 3);
+        worker.command(Command::RadioMoreLikeThis).unwrap();
+        worker.wave_tick(Instant::now());
+        let _ = catalog_rx.try_recv().unwrap();
+        worker.queue_radio.clear();
+        worker.radio_finished(
+            "a".into(),
+            true,
+            Ok(RadioSession {
+                id: "t".into(),
+                batch: RadioBatch {
+                    id: None,
+                    tracks: vec![(*row(9, false).track).clone()],
+                },
+            }),
+        );
+        assert_eq!(queued_ids(&worker), ["yandex:1", "yandex:2", "yandex:3"]);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn not_this_marks_dislikes_and_skips_to_the_next_track() {
+        let (mut worker, catalog_rx, root) = wave_worker("skip", 3);
+        let skipped = worker.queue[0].clone();
+        worker.command(Command::RadioNotThis).unwrap();
+        let Ok(CatalogRequest::Dislike(id)) = catalog_rx.try_recv() else {
+            panic!("expected a dislike")
+        };
+        assert_eq!(id.to_string(), "yandex:1");
+        assert_eq!(worker.current, 1);
+        let state = worker.wave_state();
+        assert_eq!(state.previous.len(), 1);
+        assert_eq!(state.previous[0].track.id, skipped.id);
+        assert_eq!(state.previous[0].mark, WaveMark::Skipped);
+        assert_eq!(state.current.unwrap().track.id.to_string(), "yandex:2");
+        assert!(state.note.starts_with("Понял"));
+        // The note outlives the change that the skip itself causes, then goes.
+        worker.wave_track_changed();
+        assert!(worker.wave_state().note.starts_with("Понял"));
+        worker.wave_track_changed();
+        assert!(worker.wave_state().note.is_empty());
+        worker.queue_radio.clear();
+        assert!(worker.command(Command::RadioNotThis).is_err());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn the_feed_shows_two_previous_tracks_with_likes_and_the_next_one() {
+        let (mut worker, _catalog_rx, root) = wave_worker("feed", 5);
+        worker.current = 3;
+        worker.queue_likes.insert(worker.queue[2].id.clone());
+        let state = worker.wave_state();
+        let previous: Vec<_> = state
+            .previous
+            .iter()
+            .map(|e| (e.track.id.to_string(), e.mark))
+            .collect();
+        assert_eq!(
+            previous,
+            [
+                ("yandex:2".to_string(), WaveMark::None),
+                ("yandex:3".to_string(), WaveMark::Liked)
+            ]
+        );
+        assert_eq!(state.current.unwrap().track.id.to_string(), "yandex:4");
+        assert_eq!(state.next.unwrap().id.to_string(), "yandex:5");
+        // Tracks that did not come from the wave never appear in the feed.
+        let outsider = worker.occurrence_id(&worker.queue[4].clone());
+        worker.queue_radio.remove(&outsider);
+        assert!(worker.wave_state().next.is_none());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_nearly_empty_queue_asks_for_more_or_starts_a_new_session() {
+        let (mut worker, catalog_rx, root) = wave_worker("refill", 2);
+        let batch = RadioBatch {
+            id: None,
+            tracks: vec![
+                (*row(1, false).track).clone(),
+                (*row(2, false).track).clone(),
+            ],
+        };
+        worker.radio = Some((
+            "a".into(),
+            RadioSession {
+                id: "s".into(),
+                batch: batch.clone(),
+            },
+            vec![batch],
+        ));
+        worker.radio_can_more = true;
+        worker.wave_track_changed();
+        assert!(matches!(
+            catalog_rx.try_recv(),
+            Ok(CatalogRequest::RadioMore(..))
+        ));
+        // Busy: no second request.
+        worker.wave_track_changed();
+        assert!(catalog_rx.try_recv().is_err());
+        // The session is gone (restart of the application): a new one takes its place.
+        worker.radio_busy = false;
+        worker.radio = None;
+        worker.radio_can_more = false;
+        worker.wave_track_changed();
+        worker.wave_tick(Instant::now());
+        assert!(matches!(
+            catalog_rx.try_recv(),
+            Ok(CatalogRequest::RadioStart(..))
+        ));
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5997,10 +6582,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::Token {
+                sign_in: &[SignInMethod::Token {
                     hint: "",
                     help_url: None,
-                },
+                }],
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -6008,6 +6593,7 @@ mod sync_tests {
         fn account(&self) -> std::result::Result<Account, ProviderError> {
             Ok(Account {
                 id: "1".into(),
+                name: None,
                 subscription: true,
                 capabilities: Capabilities::default(),
             })
@@ -6283,6 +6869,7 @@ mod sync_tests {
             "yandex",
             Some(Account {
                 id: "1".into(),
+                name: None,
                 subscription: true,
                 capabilities: fixture_capabilities(),
             }),
@@ -6314,10 +6901,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::Token {
+                sign_in: &[SignInMethod::Token {
                     hint: "",
                     help_url: None,
-                },
+                }],
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -7945,5 +8532,251 @@ mod like_delivery_tests {
         h.worker.refresh_like_deadline();
         assert_eq!(h.worker.like_wait(), None);
         assert!(!h.worker.like_due());
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+    use eagle_provider_sdk::testkit::{FAKE_SECOND_FACTOR, FakeProvider};
+
+    struct Harness {
+        session: Option<Session>,
+        events: mpsc::Receiver<Event>,
+        root: PathBuf,
+    }
+    impl Harness {
+        fn start(tag: &str, provider: Arc<FakeProvider>) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("eagle-sign-in-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            Self::restart(root, provider)
+        }
+        fn restart(root: PathBuf, provider: Arc<FakeProvider>) -> Self {
+            let (tx, events) = mpsc::channel();
+            let session =
+                Session::start_with_providers(root.clone(), vec![provider], move |event| {
+                    let _ = tx.send(event);
+                })
+                .unwrap();
+            Self {
+                session: Some(session),
+                events,
+                root,
+            }
+        }
+        fn send(&self, command: Command) {
+            self.session
+                .as_ref()
+                .unwrap()
+                .sender()
+                .send(command)
+                .unwrap();
+        }
+        /// Skips events until `predicate` holds for one of them.
+        fn wait(&self, what: &str, predicate: impl Fn(&Event) -> bool) -> Event {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match self.events.recv_timeout(left) {
+                    Ok(event) if predicate(&event) => return event,
+                    Ok(_) => {}
+                    Err(_) => panic!("no event: {what}"),
+                }
+            }
+        }
+        fn state(&self, what: &str, predicate: impl Fn(&SignInState) -> bool) -> SignInState {
+            match self.wait(
+                what,
+                |event| matches!(event, Event::SignIn { state, .. } if predicate(state)),
+            ) {
+                Event::SignIn { state, .. } => state,
+                _ => unreachable!(),
+            }
+        }
+        fn signed_in(&self) {
+            self.wait("signed in", |event| {
+                matches!(event, Event::Providers(all) if all.iter().any(|p| p.id == "fakea" && p.signed_in))
+            });
+        }
+        fn quit(mut self) {
+            drop(self.session.take());
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    fn start_flow() -> Command {
+        Command::SignInStart {
+            provider: "fakea".into(),
+            method: 0,
+        }
+    }
+
+    #[test]
+    fn device_code_flow_shows_the_code_and_signs_in() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_device_code(2));
+        let h = Harness::start("code", fake.clone());
+        h.send(start_flow());
+        h.state("busy", |s| *s == SignInState::Busy);
+        let code = h.state("code", |s| matches!(s, SignInState::Code { .. }));
+        assert_eq!(
+            code,
+            SignInState::Code {
+                code: "ABC-123".into(),
+                url: "https://example.test/device".into(),
+                expired: false
+            }
+        );
+        h.signed_in();
+        h.state("idle", |s| *s == SignInState::Idle);
+        assert_eq!(fake.sign_in_starts(), 1);
+        h.quit();
+    }
+
+    #[test]
+    fn expired_code_is_kept_on_screen_marked_expired_and_nobody_signs_in() {
+        let fake = Arc::new(
+            FakeProvider::new("fakea")
+                .signed_out()
+                .with_device_code(0)
+                .expiring(),
+        );
+        let h = Harness::start("expired", fake);
+        h.send(start_flow());
+        let state = h.state("expired", |s| {
+            matches!(s, SignInState::Code { expired: true, .. })
+        });
+        assert!(matches!(state, SignInState::Code { code, .. } if code == "ABC-123"));
+        // A new code can be requested right away.
+        h.send(start_flow());
+        h.state("second code", |s| {
+            matches!(s, SignInState::Code { expired: false, .. })
+        });
+        h.quit();
+    }
+
+    #[test]
+    fn cancelling_stops_the_polling() {
+        let fake = Arc::new(
+            FakeProvider::new("fakea")
+                .signed_out()
+                .with_device_code(usize::MAX),
+        );
+        let h = Harness::start("cancel", fake.clone());
+        h.send(start_flow());
+        h.state("code", |s| matches!(s, SignInState::Code { .. }));
+        h.send(Command::SignInCancel {
+            provider: "fakea".into(),
+        });
+        h.state("idle", |s| *s == SignInState::Idle);
+        thread::sleep(Duration::from_millis(100));
+        let polls = fake.sign_in_polls();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(fake.sign_in_polls(), polls);
+        h.quit();
+    }
+
+    #[test]
+    fn password_then_second_factor_signs_in() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("password", fake);
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("secret".into()),
+        });
+        let state = h.state("second factor", |s| {
+            matches!(s, SignInState::SecondFactor { .. })
+        });
+        assert_eq!(
+            state,
+            SignInState::SecondFactor {
+                hint: "из приложения".into()
+            }
+        );
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new(FAKE_SECOND_FACTOR.into()),
+        });
+        h.signed_in();
+        h.quit();
+    }
+
+    #[test]
+    fn wrong_password_and_wrong_second_factor_fail() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("password-fail", fake);
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("wrong".into()),
+        });
+        h.state("failed", |s| {
+            *s == SignInState::Failed("Не получилось войти".into())
+        });
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("secret".into()),
+        });
+        h.state("second factor", |s| {
+            matches!(s, SignInState::SecondFactor { .. })
+        });
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new("111111".into()),
+        });
+        h.state("failed again", |s| matches!(s, SignInState::Failed(_)));
+        h.quit();
+    }
+
+    #[test]
+    fn second_factor_without_a_waiting_flow_is_an_error() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("no-flow", fake);
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new("000000".into()),
+        });
+        h.wait("error", |event| matches!(event, Event::Error(_)));
+        h.quit();
+    }
+
+    #[test]
+    fn rejected_token_keeps_the_provider_signed_out() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out());
+        let h = Harness::start("token", fake);
+        h.send(Command::Login {
+            provider: "fakea".into(),
+            token: Token::new(String::new()),
+        });
+        h.state("busy", |s| *s == SignInState::Busy);
+        h.state("failed", |s| {
+            *s == SignInState::Failed("Токен не подошёл".into())
+        });
+        h.send(Command::Login {
+            provider: "fakea".into(),
+            token: Token::new("good".into()),
+        });
+        h.signed_in();
+        h.state("idle", |s| *s == SignInState::Idle);
+        h.quit();
+    }
+
+    #[test]
+    fn first_start_without_accounts_opens_settings_once() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out());
+        let h = Harness::start("intro", fake.clone());
+        h.wait("intro", |event| matches!(event, Event::ServicesIntro));
+        let root = h.root.clone();
+        drop(h.session);
+        let h = Harness::restart(root, fake);
+        h.wait("providers", |event| matches!(event, Event::Providers(_)));
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !h.events
+                .try_iter()
+                .any(|event| matches!(event, Event::ServicesIntro))
+        );
+        h.quit();
     }
 }

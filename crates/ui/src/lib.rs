@@ -15,6 +15,7 @@ use std::{
 };
 slint::include_modules!();
 mod bridge;
+mod browser;
 mod events;
 #[cfg(test)]
 mod grid_tests;
@@ -32,8 +33,40 @@ mod tray;
 mod window_chrome;
 
 use eagle_app::session::{Command, CommandSender, Event};
+
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU64;
+
+/// The field of dots on the wave pad: a hexagonal grid inside the reach of the knob, as
+/// fractions of the pad. `edge` fades the dots near the rim.
+pub fn pad_dots() -> Vec<PadDot> {
+    const REACH: f32 = 0.31;
+    const STEP: f32 = 0.034;
+    const ROW: f32 = STEP * 0.866;
+    let rows = (0.5 / ROW).ceil() as i32;
+    let mut dots = Vec::new();
+    for row in -rows..=rows {
+        let y = 0.5 + row as f32 * ROW;
+        let shift = if row.rem_euclid(2) == 1 {
+            STEP / 2.
+        } else {
+            0.
+        };
+        for col in -16..=16 {
+            let x = 0.5 + col as f32 * STEP + shift;
+            let distance = (x - 0.5).hypot(y - 0.5);
+            if distance > REACH - 0.012 {
+                continue;
+            }
+            dots.push(PadDot {
+                x,
+                y,
+                edge: ((REACH - distance) / 0.06).min(1.),
+            });
+        }
+    }
+    dots
+}
 
 #[derive(Clone, Default)]
 struct QueueEditorState {
@@ -974,9 +1007,103 @@ mod tests {
             );
         }
     }
+    /// Indicators wait for `Loading.delay`, so fast work never flashes, and drop at once.
+    fn loading_indicators_wait_for_the_delay() {
+        let ui = DesktopWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280., 880.));
+        ui.global::<Ui>().set_signed_in(true);
+        ui.global::<Ui>().set_route(Route::Playlist);
+        ui.show().unwrap();
+        let skeletons = || ElementHandle::find_by_element_type_name(&ui, "SkeletonRows").count();
+        let step = |ms: u64| {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+            slint::platform::update_timers_and_animations();
+        };
+        ui.global::<Ui>().set_busy(true);
+        step(0);
+        step(150);
+        assert!(!ui.global::<Loading>().get_page());
+        assert_eq!(skeletons(), 0);
+        step(100);
+        assert!(ui.global::<Loading>().get_page());
+        assert!(skeletons() > 0);
+        ui.global::<Ui>().set_busy(false);
+        step(0);
+        assert!(!ui.global::<Loading>().get_page());
+        assert_eq!(skeletons(), 0);
+
+        // A busy button shows a spinner and ignores activation.
+        let created = Rc::new(RefCell::new(0));
+        ui.global::<Actions>().on_create_playlist({
+            let created = created.clone();
+            move |_| *created.borrow_mut() += 1
+        });
+        ui.global::<Actions>().on_valid_playlist_name(|_| true);
+        ui.global::<Ui>().set_playlist_name("Вечер".into());
+        ui.global::<Ui>().set_create_playlist(true);
+        ui.global::<Ui>().set_playlist_busy(true);
+        step(0);
+        step(250);
+        assert!(ui.global::<Loading>().get_playlist());
+        assert!(ElementHandle::find_by_accessible_label(&ui, "Загрузка").count() > 0);
+        ElementHandle::find_by_accessible_label(&ui, "Создать")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(*created.borrow(), 0);
+        ui.global::<Ui>().set_playlist_busy(false);
+        ui.global::<Ui>().set_create_playlist(false);
+        step(0);
+        assert!(!ui.global::<Loading>().get_playlist());
+    }
+    /// Typing searches after a pause without Enter, and placeholder rows never push the player
+    /// bar out of a short window.
+    fn search_runs_while_typing_and_keeps_the_player_bar() {
+        let ui = DesktopWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280., 700.));
+        ui.global::<Ui>().set_signed_in(true);
+        ui.global::<Ui>().set_route(Route::Search);
+        ui.show().unwrap();
+        let step = |ms: u64| {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+            slint::platform::update_timers_and_animations();
+        };
+        let searched = Rc::new(RefCell::new(Vec::<String>::new()));
+        ui.global::<Actions>().on_search({
+            let searched = searched.clone();
+            move |query| searched.borrow_mut().push(query.to_string())
+        });
+        step(0);
+        ui.global::<Ui>().set_search_query("ми".into());
+        step(0);
+        step(200);
+        ui.global::<Ui>().set_search_query("мис".into());
+        step(0);
+        step(200);
+        assert!(searched.borrow().is_empty(), "searched before the pause");
+        step(150);
+        assert_eq!(*searched.borrow(), ["мис"]);
+
+        ui.global::<Ui>().set_search_valid(true);
+        ui.global::<Ui>().set_search_pending(true);
+        step(0);
+        step(250);
+        assert!(ElementHandle::find_by_element_type_name(&ui, "SkeletonRows").count() > 0);
+        let bar = ElementHandle::find_by_element_type_name(&ui, "PlayerBar")
+            .next()
+            .unwrap();
+        let bottom = bar.absolute_position().y + bar.size().height;
+        assert!(bottom <= 700.5, "player bar ends at {bottom}");
+        assert!(bar.size().height > 0.);
+        ui.global::<Ui>().set_search_pending(false);
+        ui.global::<Ui>().set_route(Route::Library);
+        step(0);
+    }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        search_runs_while_typing_and_keeps_the_player_bar();
+        loading_indicators_wait_for_the_delay();
         player_bar_centre_is_independent_of_title();
         for width in [1000., 1067., 1068., 1127., 1128., 1129., 1280.] {
             let panel_ui = DesktopWindow::new().unwrap();
@@ -1257,6 +1384,11 @@ mod tests {
             move || *deleted.borrow_mut() = true
         });
         slint::platform::update_timers_and_animations();
+        ElementHandle::find_by_accessible_label(&ui, "Действия со списком")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        slint::platform::update_timers_and_animations();
         ElementHandle::find_by_accessible_label(&ui, "Удалить плейлист")
             .next()
             .unwrap()
@@ -1294,5 +1426,20 @@ mod tests {
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(10));
         slint::platform::update_timers_and_animations();
         assert_eq!(*positions.borrow(), before);
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    #[test]
+    fn dots_stay_inside_the_reach_and_fade_toward_the_rim() {
+        let dots = super::pad_dots();
+        assert!(dots.len() > 200);
+        for dot in &dots {
+            assert!((dot.x - 0.5).hypot(dot.y - 0.5) < 0.31);
+            assert!((0.0..=1.0).contains(&dot.edge));
+        }
+        assert!(dots.iter().any(|dot| dot.edge < 0.5));
+        assert!(dots.iter().any(|dot| dot.edge == 1.0));
     }
 }

@@ -4,7 +4,7 @@
 //! Registry of the providers built into eagle. The order is the user's priority.
 
 use crate::tokens::{MemoryTokens, TokenStore};
-use eagle_core::{Account, AuthMethod, Capabilities, Provider, ProviderError, Token, TrackId};
+use eagle_core::{Account, Capabilities, Provider, ProviderError, SignInMethod, Token, TrackId};
 use eagle_net::Client;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 
@@ -18,7 +18,10 @@ pub fn builtin(net: Arc<Client>) -> Vec<Arc<dyn Provider>> {
 pub struct ProviderStatus {
     pub id: String,
     pub name: String,
-    pub auth: AuthMethod,
+    /// Ways to sign in, preferred first; empty when the provider needs no account.
+    pub sign_in: Vec<SignInMethod>,
+    /// Name of the signed-in account, when the provider reports one.
+    pub account_name: Option<String>,
     pub signed_in: bool,
     /// Effective capabilities; all off while signed out.
     pub capabilities: Capabilities,
@@ -124,7 +127,8 @@ impl Providers {
                 ProviderStatus {
                     id: p.info().id.to_owned(),
                     name: p.info().name.to_owned(),
-                    auth: p.info().auth.clone(),
+                    sign_in: p.info().sign_in.to_vec(),
+                    account_name: self.account(p.info().id).and_then(|account| account.name),
                     signed_in,
                     capabilities: if signed_in {
                         self.effective(p.as_ref())
@@ -158,15 +162,14 @@ impl Providers {
     }
     /// A provider that needs no sign-in always counts as signed in.
     pub fn is_signed_in(&self, provider: &dyn Provider) -> bool {
-        matches!(provider.info().auth, AuthMethod::None)
-            || self.account(provider.info().id).is_some()
+        !provider.info().needs_sign_in() || self.account(provider.info().id).is_some()
     }
     /// What the provider can do now: its own capabilities narrowed by the account's.
     pub fn effective(&self, provider: &dyn Provider) -> Capabilities {
         let info = provider.info();
         match self.account(info.id) {
             Some(account) => info.capabilities.intersect(&account.capabilities),
-            None if matches!(info.auth, AuthMethod::None) => info.capabilities,
+            None if !info.needs_sign_in() => info.capabilities,
             None => Capabilities::none(),
         }
     }
@@ -188,11 +191,9 @@ impl Providers {
             .find(|p| self.is_signed_in(p.as_ref()) && f(&self.effective(p.as_ref())))
     }
     /// The provider whose account owns this installation's rights (offline, downloads, play
-    /// reports, radio): the first one that signs in with a token.
+    /// reports, radio): the first one that has an account to sign in to.
     pub fn account_provider(&self) -> Option<&Arc<dyn Provider>> {
-        self.all
-            .iter()
-            .find(|p| matches!(p.info().auth, AuthMethod::Token { .. }))
+        self.all.iter().find(|p| p.info().needs_sign_in())
     }
 }
 
@@ -229,6 +230,7 @@ mod tests {
     fn account(capabilities: Capabilities) -> Account {
         Account {
             id: "1".into(),
+            name: None,
             subscription: true,
             capabilities,
         }

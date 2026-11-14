@@ -1,15 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 export enum Status { idle, loading, playing, paused, buffering }
-export enum Route { saved, history, library, search, album, playlist, login, settings, albums, artists, artist, radio }
+export enum Route { saved, history, library, search, album, playlist, settings, albums, artists, artist, radio }
 export struct TrackItem { occurrence: string, blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
 export struct CollectionItem { id: string, title: string }
 // Album or artist tile. `key` routes artwork; `id` opens it.
 export struct CardItem { id: string, key: string, title: string, subtitle: string, cover: image, round: bool, route: Route }
-export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color }
+// One entry of the wave feed; `mark` is "", "не то" or "♥".
+export struct WaveTrack { id: string, title: string, artist: string, cover: image, mark: string }
+// A dot of the pad's field, as fractions of the pad; `edge` fades the dots at the rim.
+export struct PadDot { x: float, y: float, edge: float }
+export struct WaveColors { pad: color, ring: color, tx: color, tx2: color, dot: color, card: color }
+export struct PlayerColors { bg: color, bar: color, tx: color, tx2: color, ln: color, accent: color }
 export struct QueueItem { id: string, title: string, artist: string, current: bool }
 export struct DownloadItem { id: string, track: string, quality: string, status: string, error: string, pausable: bool, retryable: bool, cancellable: bool, saved: bool }
-// One connectable service. `token-auth` providers get a token field; `hint` is its placeholder.
-export struct ProviderItem { id: string, name: string, hint: string, help-url: string, token-auth: bool, signed-in: bool }
+// How a service can be signed in to, in the order the provider prefers.
+export enum SignInKind { device-code, token, password, browser }
+// What the open sign-in of one service shows.
+export enum SignInPhase { idle, busy, code, browser, second-factor, failed }
+// The user's answer about sending local likes to a newly connected service.
+export enum OfferPhase { none, asking, sent, skipped }
+// `hint` labels the token field or the login field; `help-url` explains where to get a token.
+export struct SignInMethodItem { kind: SignInKind, hint: string, help-url: string }
+// One connectable service. `account` is the signed-in account's name. `code`, `link`,
+// `link-label` and `expired` describe a device code; `detail` is the second-factor hint or the
+// error text. `offer-text` is the likes question while `offer` is asking.
+export struct ProviderItem {
+    id: string,
+    name: string,
+    signed-in: bool,
+    account: string,
+    methods: [SignInMethodItem],
+    phase: SignInPhase,
+    code: string,
+    link: string,
+    link-label: string,
+    expired: bool,
+    detail: string,
+    offer: OfferPhase,
+    offer-text: string,
+}
 export global Storage {
     in property <string> cache-usage;
     in property <string> staging-usage;
@@ -28,6 +57,7 @@ export global Player {
     in property <string> quality;
     in property <string> track-id;
     in property <string> album-id;
+    in property <string> album;
     in property <string> artist-id;
     in property <string> source;
     in property <string> title;
@@ -42,6 +72,27 @@ export global Player {
     in property <int> repeat;
     in property <PlayerColors> colors;
     pure callback position() -> float;
+}
+// «Моя волна». `mood-*` and `novelty` are owned by the screen while the user changes them; the
+// session echoes what it stored. Mood is valence (x) and energy (y) in -1..1.
+export global Wave {
+    in-out property <float> mood-x;
+    in-out property <float> mood-y;
+    in-out property <float> novelty: 0.5;
+    in-out property <bool> dragging;
+    // How far the knob reaches from the centre of the pad, as a fraction of the pad.
+    out property <float> reach: 0.31;
+    out property <[string]> moods: [@tr("светлое"), @tr("весёлое"), @tr("энергичное"), @tr("дерзкое"), @tr("мрачное"), @tr("грустное"), @tr("тихое"), @tr("спокойное")];
+    out property <[string]> moods-capital: [@tr("Светлое"), @tr("Весёлое"), @tr("Энергичное"), @tr("Дерзкое"), @tr("Мрачное"), @tr("Грустное"), @tr("Тихое"), @tr("Спокойное")];
+    // The current track is a wave track.
+    in property <bool> active;
+    in property <[WaveTrack]> played;
+    in property <bool> has-next;
+    in property <WaveTrack> next;
+    in property <string> why;
+    in property <string> note;
+    in property <[PadDot]> dots;
+    in property <WaveColors> colors;
 }
 export global Library {
     in property <[TrackItem]> tracks;
@@ -77,6 +128,9 @@ export global Ui {
     in-out property <string> error;
     in property <bool> signed-in;
     in property <[ProviderItem]> providers;
+    // The service whose sign-in is open under its row, and the method shown there.
+    in-out property <string> service-open;
+    in-out property <int> service-method;
     in property <bool> busy;
     in property <bool> playlist-busy;
     in property <bool> radio-ready;
@@ -128,10 +182,20 @@ export global Actions {
     callback edit-playlist(string, string, int, int);
     callback add-track-to-playlist(string, string, string, string);
     callback refresh-playlist(string);
+    // «Слушать волну».
     callback radio-start();
-    callback radio-more();
+    // Mood x, mood y, novelty.
+    callback wave-tune(float, float, float);
+    callback wave-not-this();
+    callback wave-more-like-this();
     callback login(string, string);
     callback logout(string);
+    callback sign-in-start(string, int);
+    callback sign-in-password(string, string, string);
+    callback sign-in-second-factor(string, string);
+    callback sign-in-cancel(string);
+    callback likes-backfill(string, bool);
+    callback open-url(string);
     callback like-collection();
     // On-screen ranges (first index, count) so artwork loads only for what is visible.
     callback visible-rows(int, int);

@@ -3,8 +3,9 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use eagle_ui::{
-        Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route,
-        Status, Storage, Theme, ThemeMode, TrackItem, Ui,
+        Actions, CardItem, CollectionItem, DesktopWindow, Library, OfferPhase, Player,
+        PlayerColors, ProviderItem, Route, SignInKind, SignInMethodItem, SignInPhase, Status,
+        Storage, Theme, ThemeMode, TrackItem, Ui, Wave, WaveColors, WaveTrack,
     };
     // Geometric placeholder artwork in the mockup's palette: background, disc, stripe.
     fn art(size: u32, back: [u8; 3], disc: [u8; 3], cx: f32, cy: f32) -> slint::Image {
@@ -197,6 +198,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_liked(false);
     ui.global::<Player>().on_position(|| 84.);
     ui.global::<Ui>().set_signed_in(true);
+    ui.global::<Wave>()
+        .set_dots(Rc::new(VecModel::from(eagle_ui::pad_dots())).into());
     let storage = ui.global::<Storage>();
     storage.set_cache_usage("4.0 МиБ".into());
     storage.set_saved_usage("8.0 МиБ".into());
@@ -214,7 +217,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (file name, theme, route, panel open, drawer open, window width)
     let shots = [
         (
-            "radio-empty-wide",
+            "loading-playlist",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-paper",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "loading-albums",
+            ThemeMode::Graphite,
+            Route::Albums,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-artist",
+            ThemeMode::Graphite,
+            Route::Artist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-search",
+            ThemeMode::Graphite,
+            Route::Search,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "buffering",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "wave-wide",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -222,15 +273,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
-            "radio-empty-narrow",
-            ThemeMode::Graphite,
+            "wave-wide-paper",
+            ThemeMode::Paper,
             Route::Radio,
             false,
             false,
-            760.,
+            1280.,
         ),
         (
-            "radio-filled-wide",
+            "wave-starting-wide",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -238,7 +289,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
-            "radio-filled-narrow",
+            "wave-empty-wide",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "wave-narrow",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -246,7 +305,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             760.,
         ),
         (
-            "radio-error-narrow",
+            "wave-narrow-paper",
+            ThemeMode::Paper,
+            Route::Radio,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "wave-error-narrow",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -487,6 +554,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
+            "services-code",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-expired",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-token",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-password",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-offer",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-compact",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            780.,
+        ),
+        (
             "settings-paper",
             ThemeMode::Paper,
             Route::Settings,
@@ -573,12 +688,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let (name, mode, route, panel, drawer, width) = shots[n];
             let mut shown = tracks.clone();
-            if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
+            let loading = name.starts_with("loading-");
+            if name.starts_with("saved-empty") || loading {
                 shown.clear();
             }
             ui.global::<Player>().set_status(
                 if name.starts_with("saved-blocked") || name.starts_with("paused-") {
                     Status::Paused
+                } else if name == "buffering" {
+                    Status::Buffering
                 } else {
                     Status::Playing
                 },
@@ -590,16 +708,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Library>()
                 .set_tracks(Rc::new(VecModel::from(shown)).into());
             ui.global::<Ui>().set_compact(name.starts_with("compact"));
-            ui.global::<Ui>().set_radio_ready(
-                name.starts_with("radio-filled") || name.starts_with("radio-error"),
-            );
-            ui.global::<Ui>().set_radio_busy(false);
+            ui.global::<Ui>().set_radio_ready(name.starts_with("wave-"));
             ui.global::<Ui>()
-                .set_radio_notice(if name.starts_with("radio-error") {
+                .set_radio_busy(name.starts_with("wave-starting"));
+            ui.global::<Ui>()
+                .set_radio_notice(if name.starts_with("wave-error") {
                     "Нет сети. Очередь воспроизведения сохранена.".into()
                 } else {
                     "".into()
                 });
+            let wave = ui.global::<Wave>();
+            let playing_wave = name.starts_with("wave-")
+                && !name.starts_with("wave-empty")
+                && !name.starts_with("wave-starting");
+            wave.set_active(playing_wave);
+            wave.set_mood_x(0.58);
+            wave.set_mood_y(0.52);
+            wave.set_novelty(0.5);
+            wave.set_has_next(true);
+            let wave_track = |index: usize, mark: &str| WaveTrack {
+                id: tracks[index].id.clone(),
+                title: tracks[index].title.clone(),
+                artist: tracks[index].artist.clone(),
+                cover: tracks[index].cover.clone(),
+                mark: mark.into(),
+            };
+            wave.set_played(
+                Rc::new(VecModel::from(vec![
+                    wave_track(7, "не то"),
+                    wave_track(1, "♥"),
+                ]))
+                .into(),
+            );
+            wave.set_next(wave_track(2, ""));
+            wave.set_why("Похож на «Северный свет» из твоих лайков".into());
+            wave.set_note(if playing_wave {
+                "Волна сместилась — изменится со следующего трека".into()
+            } else {
+                "".into()
+            });
             ui.global::<Ui>()
                 .set_error(if name.starts_with("playlist-conflict") {
                     "Плейлист изменился. Список обновлён; повторите действие.".into()
@@ -614,7 +761,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>()
                 .set_playlist_name("Вечерняя прогулка".into());
             ui.global::<Ui>().set_search_query("Сигнал".into());
-            ui.global::<Ui>().set_search_kind(2);
+            ui.global::<Ui>()
+                .set_search_kind(if name == "loading-search" { 0 } else { 2 });
+            ui.global::<Ui>().set_search_valid(true);
+            ui.global::<Ui>()
+                .set_search_pending(name == "loading-search");
+            ui.global::<Ui>()
+                .set_busy(loading && name != "loading-search");
             ui.global::<Ui>()
                 .set_confirm_delete(name == "delete-playlist");
             ui.global::<Library>()
@@ -627,6 +780,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width,
                 if width > 1600. { 1080. } else { 880. },
             ));
+            if name.starts_with("services-") {
+                let method = |kind, hint: &str| SignInMethodItem {
+                    kind,
+                    hint: hint.into(),
+                    help_url: Default::default(),
+                };
+                let first = ProviderItem {
+                    id: "fixture:a".into(),
+                    name: "Яндекс Музыка".into(),
+                    signed_in: name == "services-offer",
+                    account: if name == "services-offer" {
+                        "anna.k".into()
+                    } else {
+                        "".into()
+                    },
+                    methods: Rc::new(VecModel::from(vec![
+                        method(SignInKind::DeviceCode, ""),
+                        method(SignInKind::Token, "OAuth-токен Яндекс Музыки"),
+                    ]))
+                    .into(),
+                    phase: match name {
+                        "services-code" | "services-expired" => SignInPhase::Code,
+                        _ => SignInPhase::Idle,
+                    },
+                    code: "QW7-K4P".into(),
+                    link: "https://ya.ru/device".into(),
+                    link_label: "ya.ru/device".into(),
+                    expired: name == "services-expired",
+                    offer: if name == "services-offer" {
+                        OfferPhase::Asking
+                    } else {
+                        OfferPhase::None
+                    },
+                    offer_text: "Отправить 128 лайков из eagle в этот сервис?".into(),
+                    ..Default::default()
+                };
+                let second = ProviderItem {
+                    id: "fixture:b".into(),
+                    name: "VK Музыка".into(),
+                    methods: Rc::new(VecModel::from(vec![
+                        method(SignInKind::Password, "Телефон или почта"),
+                        method(SignInKind::Browser, ""),
+                    ]))
+                    .into(),
+                    phase: SignInPhase::Idle,
+                    ..Default::default()
+                };
+                let (open, index) = match name {
+                    "services-password" => ("fixture:b", 0),
+                    _ => ("fixture:a", if name == "services-token" { 1 } else { 0 }),
+                };
+                ui.global::<Ui>().set_service_open(open.into());
+                ui.global::<Ui>().set_service_method(index);
+                ui.global::<Ui>()
+                    .set_providers(Rc::new(VecModel::from(vec![first, second])).into());
+            }
             ui.global::<Theme>().set_mode(mode);
             ui.global::<Ui>().set_route(route);
             let library = ui.global::<Library>();
@@ -665,18 +874,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     library.set_likeable(false);
                 }
             }
+            if loading {
+                library.set_title("".into());
+                library.set_cover(slint::Image::default());
+                library.set_cards(Rc::new(VecModel::<CardItem>::default()).into());
+            }
             ui.global::<Ui>().set_panel_open(panel);
             ui.global::<Ui>().set_drawer_open(drawer);
             let theme = ui.global::<Theme>().get_t();
             let background = [theme.bg.red(), theme.bg.green(), theme.bg.blue()];
-            let (bar, panel) =
-                eagle_palette::player_surfaces([38, 70, 83], background, eagle_palette::Tint::Soft);
+            let surface = [theme.surf.red(), theme.surf.green(), theme.surf.blue()];
+            let (bar, panel) = eagle_palette::player_surfaces(
+                [38, 70, 83],
+                background,
+                surface,
+                eagle_palette::Tint::Soft,
+            );
             let color = |c: [u8; 3]| slint::Color::from_rgb_u8(c[0], c[1], c[2]);
+            let pad = eagle_palette::wave_pad([38, 70, 83], background);
+            ui.global::<Wave>().set_colors(WaveColors {
+                pad: color(pad.background),
+                ring: color(pad.ring),
+                tx: color(pad.text),
+                tx2: color(pad.secondary),
+                dot: color(pad.dot),
+                card: color(pad.card),
+            });
             ui.global::<Player>().set_colors(PlayerColors {
                 bg: color(panel.background),
                 bar: color(bar.background),
                 tx: color(panel.text),
                 tx2: color(panel.secondary),
+                ln: color(bar.line),
+                accent: color(panel.accent),
             });
             index.set(n + 1);
         },
