@@ -7,6 +7,8 @@ import { TextButton } from "../components/button.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { SeekSlider } from "../components/slider.slint";
 import { Artwork } from "../components/cover.slint";
+import { SkeletonPulse } from "../components/spinner.slint";
+import { Loading } from "../globals/loading.slint";
 
 // Words and geometry of the mood. The eight directions run counter-clockwise from the right:
 // светлое, весёлое, энергичное, дерзкое, мрачное, грустное, тихое, спокойное.
@@ -298,12 +300,13 @@ component FeedLine inherits Rectangle {
 
 // Placeholder while the wave is being fetched.
 component Bone inherits Rectangle {
-    background: Theme.t.surf;
+    background: Theme.skeleton;
     border-radius: 6px;
 }
 
 component Feed inherits VerticalLayout {
-    private property <bool> starting: Ui.radio-busy && !Wave.active;
+    // Shown only after the shared loading delay, so a quick start does not flash a skeleton.
+    private property <bool> starting: Loading.radio && !Wave.active;
     spacing: 0px;
     if Wave.active && Wave.played.length > 0 : VerticalLayout {
         spacing: 0px;
@@ -382,8 +385,8 @@ component Feed inherits VerticalLayout {
         }
         FeedLine { track: Wave.next; art: 40px; strong: true; }
     }
-    if root.starting : VerticalLayout {
-        spacing: 12px;
+    if root.starting : SkeletonPulse {
+        height: 214px;
         Rectangle {
             height: 214px;
             border-radius: 24px;
@@ -393,7 +396,7 @@ component Feed inherits VerticalLayout {
                 spacing: 14px;
                 HorizontalLayout {
                     spacing: 22px;
-                    Bone { width: 152px; height: 152px; border-radius: 14px; background: Theme.t.surf; }
+                    Bone { width: 152px; height: 152px; border-radius: 14px; }
                     VerticalLayout {
                         alignment: end;
                         spacing: 10px;
@@ -404,7 +407,6 @@ component Feed inherits VerticalLayout {
                 }
             }
         }
-        Text { text: @tr("Подбираем музыку…"); color: Theme.t.tx2; font-size: Type.meta; accessible-role: text; }
     }
     if !Wave.active && !root.starting : Rectangle {
         height: hint.preferred-height + 44px;
@@ -447,9 +449,9 @@ export component WaveScreen inherits VerticalLayout {
             TextButton {
                 height: 40px;
                 primary: true;
-                enabled: !Ui.radio-busy;
+                busy: Ui.radio-busy && !Wave.active;
                 icon: Wave.active && Player.status == Status.playing ? @image-url("../icons/pause.svg") : @image-url("../icons/play.svg");
-                text: Ui.radio-busy ? @tr("Подбираем…") : Wave.active && Player.status == Status.playing ? @tr("Пауза") : @tr("Слушать волну");
+                text: Wave.active && Player.status == Status.playing ? @tr("Пауза") : @tr("Слушать волну");
                 clicked => {
                     if Wave.active {
                         Actions.toggle-play();
