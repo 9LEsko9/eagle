@@ -288,7 +288,13 @@ export component CollectionScreen inherits VerticalLayout {
         }
         Field {
             init => { self.focus-input(); }
-            changed text => { Actions.search-changed(self.text); search-timer.stop(); if self.text != "" { search-timer.restart(); } }
+            // `restart()` only restarts a running timer, so a stopped one is started instead.
+            changed text => {
+                Actions.search-changed(self.text);
+                if self.text == "" { search-timer.stop(); }
+                else if search-timer.running { search-timer.restart(); }
+                else { search-timer.start(); }
+            }
             icon: @image-url("../icons/search.svg");
             placeholder: @tr("Поиск музыки");
             busy: Loading.search;

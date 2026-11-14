@@ -10,7 +10,13 @@ export component SkeletonRows inherits Rectangle {
     in property <bool> show-album;
     // Title widths as a share of the title column, cycled by row so the list looks natural.
     private property <[float]> widths: [0.62, 0.48, 0.7, 0.55, 0.4, 0.66, 0.52, 0.58];
-    height: root.count * TrackColumns.row-height;
+    // Never taller than the room left: rows that do not fit are cut off, so the player bar
+    // below the page is never pushed out of the window.
+    preferred-height: root.count * TrackColumns.row-height;
+    min-height: 0px;
+    max-height: root.count * TrackColumns.row-height;
+    vertical-stretch: 1;
+    clip: true;
     SkeletonPulse {
         width: parent.width;
         height: parent.height;
@@ -86,7 +92,12 @@ export component SkeletonGrid inherits Rectangle {
     private property <length> gap: 20px;
     private property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
     private property <length> art: (self.width - (columns - 1) * gap) / columns;
-    height: root.rows * (art + 52px + gap);
+    // Cut off like SkeletonRows when the window is short.
+    preferred-height: root.rows * (art + 52px + gap);
+    min-height: 0px;
+    max-height: root.rows * (art + 52px + gap);
+    vertical-stretch: 1;
+    clip: true;
     SkeletonPulse {
         width: parent.width;
         height: parent.height;
