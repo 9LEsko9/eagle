@@ -2,11 +2,12 @@
 //! Domain events are applied only on the Slint event-loop thread.
 use crate::{
     Actions, CardItem, CollectionItem, DesktopWindow, DownloadItem, Library, Player, PlayerColors,
-    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui,
+    ProviderItem, QueueItem, Route, Status, Storage, Theme, TrackItem, Ui, Wave, WaveColors,
+    WaveTrack,
 };
 use eagle_app::session::{
     Card, Command, CommandSender, DownloadState, Event, Header, LibraryDelta, LibraryItem, Quality,
-    View,
+    View, WaveMark, WaveState,
 };
 use eagle_engine::{PositionAnchor, State};
 use slint::{ComponentHandle, Model, VecModel};
@@ -58,6 +59,73 @@ fn track_item(item: LibraryItem) -> TrackItem {
         liked: item.liked,
         available: item.blocked_reason.is_none()
             && item.track.availability == eagle_app::session::Availability::Available,
+    }
+}
+fn artists_line(track: &eagle_core::Track) -> String {
+    track
+        .artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn wave_item(track: &eagle_core::Track, mark: WaveMark, cover: slint::Image) -> WaveTrack {
+    WaveTrack {
+        id: track.id.to_string().into(),
+        title: track.title.as_str().into(),
+        artist: artists_line(track).into(),
+        cover,
+        mark: match mark {
+            WaveMark::None => "",
+            WaveMark::Skipped => "не то",
+            WaveMark::Liked => "♥",
+        }
+        .into(),
+    }
+}
+thread_local! { static TUNING_SYNCED: Cell<bool> = const { Cell::new(false) }; }
+/// Shows the wave feed. Covers that are already loaded stay; the others are asked for.
+/// The tuning is taken over once per bridge: afterwards the screen owns it.
+fn apply_wave(ui: &DesktopWindow, bridge: &Bridge, state: WaveState) {
+    let wave = ui.global::<Wave>();
+    if !TUNING_SYNCED.with(|synced| synced.replace(true)) && !wave.get_dragging() {
+        let (x, y) = state.tuning.mood.unwrap_or((0., 0.));
+        wave.set_mood_x(x);
+        wave.set_mood_y(y);
+        wave.set_novelty(state.tuning.novelty);
+    }
+    let mut known: HashMap<String, slint::Image> = wave
+        .get_played()
+        .iter()
+        .chain(std::iter::once(wave.get_next()))
+        .filter(|item| item.cover.size().width > 0)
+        .map(|item| (item.id.to_string(), item.cover))
+        .collect();
+    let mut take =
+        |track: &eagle_core::Track| known.remove(&track.id.to_string()).unwrap_or_default();
+    let played: Vec<WaveTrack> = state
+        .previous
+        .iter()
+        .map(|item| wave_item(&item.track, item.mark, take(&item.track)))
+        .collect();
+    let next = state
+        .next
+        .as_ref()
+        .map(|track| wave_item(track, WaveMark::None, take(track)));
+    let missing: Vec<String> = played
+        .iter()
+        .chain(next.iter())
+        .filter(|item| item.cover.size().width == 0)
+        .map(|item| format!("t:{}", item.id))
+        .collect();
+    wave.set_active(state.current.is_some());
+    wave.set_played(Rc::new(VecModel::from(played)).into());
+    wave.set_has_next(next.is_some());
+    wave.set_next(next.unwrap_or_default());
+    wave.set_why(state.why.into());
+    wave.set_note(state.note.into());
+    if !missing.is_empty() && ui.global::<Ui>().get_list_covers() {
+        let _ = bridge.sender.send(Command::Thumbnails(missing));
     }
 }
 fn card_item(card: Card) -> CardItem {
@@ -186,6 +254,9 @@ impl Bridge {
                 .iter()
                 .map(|row| row.cover),
         );
+        let wave = ui.global::<Wave>();
+        active.extend(wave.get_played().iter().map(|row| row.cover));
+        active.push(wave.get_next().cover);
         self.images
             .borrow_mut()
             .retain(|_, (_, image)| active.contains(image));
@@ -281,6 +352,23 @@ impl Bridge {
                     self.rows.set_row_data(index, row);
                 }
             }
+            let wave = ui.global::<Wave>();
+            let wave_rows = wave.get_played();
+            if let Some(model) = wave_rows.as_any().downcast_ref::<VecModel<WaveTrack>>() {
+                for index in 0..model.row_count() {
+                    if let Some(mut row) = model.row_data(index)
+                        && row.id.as_str() == id
+                    {
+                        row.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
+                        model.set_row_data(index, row);
+                    }
+                }
+            }
+            let mut next = wave.get_next();
+            if next.id.as_str() == id {
+                next.cover = converted.get_or_insert_with(|| self.image(cover)).clone();
+                wave.set_next(next);
+            }
             let queue = ui.global::<Library>().get_queue();
             for index in 0..if ui.global::<Ui>().get_panel_open() {
                 queue.row_count()
@@ -356,6 +444,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let radio_ready = snapshot.radio_ready;
             let radio_busy = snapshot.radio_busy;
             let radio_notice = snapshot.radio_notice.clone();
+            let wave = snapshot.wave.clone();
             ui.global::<Ui>().set_signed_in(snapshot.signed_in);
             apply(ui, Event::View(snapshot.view), bridge);
             apply(ui, Event::Collections(snapshot.collections), bridge);
@@ -401,6 +490,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             ui.global::<Ui>().set_radio_busy(radio_busy);
             ui.global::<Ui>()
                 .set_radio_notice(radio_notice.unwrap_or_default().into());
+            TUNING_SYNCED.with(|synced| synced.set(false));
+            apply(ui, Event::Wave(Box::new(wave)), bridge);
         }
         Event::Collections(collections) => {
             let model = ui.global::<Library>().get_playlists();
@@ -587,6 +678,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             ui.global::<Ui>()
                 .set_radio_notice(notice.unwrap_or_default().into());
         }
+        Event::Wave(state) => apply_wave(ui, bridge, *state),
         Event::Busy(busy) => ui.global::<Ui>().set_busy(busy),
         Event::Player(state) => {
             let player = ui.global::<Player>();
@@ -931,6 +1023,15 @@ pub(super) fn apply_colors(ui: &DesktopWindow) {
         tx: color(panel.text),
         tx2: color(panel.secondary),
     });
+    let pad = COVER_COLOR.with(|c| eagle_palette::wave_pad(*c.borrow(), background));
+    ui.global::<Wave>().set_colors(WaveColors {
+        pad: color(pad.background),
+        ring: color(pad.ring),
+        tx: color(pad.text),
+        tx2: color(pad.secondary),
+        dot: color(pad.dot),
+        card: color(pad.card),
+    });
     #[cfg(target_os = "macos")]
     super::window_chrome::apply(ui);
 }
@@ -961,6 +1062,8 @@ fn like_optimistically(ui: &DesktopWindow, rows: &VecModel<TrackItem>, id: &str)
 }
 
 pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
+    ui.global::<Wave>()
+        .set_dots(Rc::new(VecModel::from(super::pad_dots())).into());
     let actions = ui.global::<Actions>();
     let tx = sender.clone();
     actions.on_refresh_playlist(move |id| {
@@ -1093,8 +1196,16 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     simple!(on_toggle_shuffle, Command::ToggleShuffle);
     simple!(on_cycle_repeat, Command::CycleRepeat);
     simple!(on_prev, Command::Previous);
-    simple!(on_radio_start, Command::RadioStart);
-    simple!(on_radio_more, Command::RadioMore);
+    simple!(on_radio_start, Command::RadioPlay);
+    simple!(on_wave_not_this, Command::RadioNotThis);
+    simple!(on_wave_more_like_this, Command::RadioMoreLikeThis);
+    let tx = sender.clone();
+    actions.on_wave_tune(move |x, y, novelty| {
+        let _ = tx.send(Command::RadioTune {
+            mood: Some((x, y)),
+            novelty,
+        });
+    });
     let tx = sender.clone();
     actions.on_play(move |id| {
         if let Ok(id) = id.parse() {
@@ -1357,6 +1468,7 @@ pub(super) fn initialize(
     anchor: Arc<Mutex<Option<PositionAnchor>>>,
     sender: CommandSender,
 ) {
+    TUNING_SYNCED.with(|synced| synced.set(false));
     UI_BRIDGE.with(|bridge| {
         *bridge.borrow_mut() = Some(Rc::new(Bridge {
             rows,
@@ -1808,6 +1920,7 @@ pub(super) mod tests {
             radio_ready: true,
             radio_busy: false,
             radio_notice: Some("Нет сети; очередь сохранена".into()),
+            wave: Default::default(),
             signed_in: true,
             player: Arc::new(eagle_app::session::PlayerState {
                 track: Some(track.clone()),

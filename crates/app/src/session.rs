@@ -6,7 +6,7 @@ use crate::providers::{
 use eagle_core::{
     Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
     PlaylistSnapshot, PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError,
-    RadioQueueItem, RadioSession, Track, TrackId,
+    RadioQueueItem, RadioSession, RadioTuning, Track, TrackId,
 };
 pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
@@ -21,6 +21,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod wave;
+pub use wave::{MOVED_NOTE, WaveEntry, WaveMark, WaveState, wave_why};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Above this many inserts/removals a list change is sent as one reset.
@@ -188,6 +191,18 @@ pub enum View {
 pub enum Command {
     RadioStart,
     RadioMore,
+    /// «Слушать волну»: starts the wave with the stored tuning and plays it, or resumes it.
+    RadioPlay,
+    /// Mood (valence, energy in -1..1; `None` is any) and novelty (0 familiar, 1 new). The wave
+    /// follows from the next track once the values have rested.
+    RadioTune {
+        mood: Option<(f32, f32)>,
+        novelty: f32,
+    },
+    /// «Ещё такого»: the wave starts over from the current track.
+    RadioMoreLikeThis,
+    /// «Не то»: dislikes the current track of the wave and skips it.
+    RadioNotThis,
     UiAttached(bool),
     ClearPlaylistMutationNotice(TrackId),
     EditPlaylist {
@@ -400,6 +415,7 @@ pub struct SessionSnapshot {
     pub radio_ready: bool,
     pub radio_busy: bool,
     pub radio_notice: Option<String>,
+    pub wave: WaveState,
     pub signed_in: bool,
     pub player: Arc<PlayerState>,
     pub queue: Vec<(u64, Arc<Track>)>,
@@ -420,6 +436,8 @@ pub enum Event {
         busy: bool,
         notice: Option<String>,
     },
+    /// The wave screen: tuning, the feed around the current track and the note.
+    Wave(Box<WaveState>),
     Snapshot(Box<SessionSnapshot>),
     Downloads(Vec<eagle_store::DownloadJob>),
     NetworkPolicy(eagle_net::policy::NetworkPolicy),
@@ -743,6 +761,7 @@ struct Worker {
     radio_busy: bool,
     radio_can_more: bool,
     radio_notice: Option<String>,
+    wave: wave::Wave,
     cards: Vec<Card>,
     covers: crate::covers::Covers,
     downloads: crate::downloads::Downloads,
@@ -855,6 +874,7 @@ impl Worker {
         downloads.account(account.clone());
         covers.set_context(&artwork_context(&store, &providers)?);
         let profile = store.profile_id()?;
+        let tuning = wave::load_tuning(&store);
         let mut worker = Self {
             store,
             cache,
@@ -904,6 +924,7 @@ impl Worker {
             radio_busy: false,
             radio_can_more: false,
             radio_notice: None,
+            wave: wave::Wave::new(tuning),
             cards: Vec::new(),
             covers,
             downloads,
@@ -1105,6 +1126,7 @@ impl Worker {
             radio_ready: self.radio_can_more && !self.radio_busy,
             radio_busy: self.radio_busy,
             radio_notice: self.radio_notice.clone(),
+            wave: self.wave_state(),
             signed_in: !self.account.is_empty(),
             player: self.player.clone(),
             queue: self
@@ -1165,6 +1187,7 @@ impl Worker {
                 if self.like_due() {
                     self.send_flush_likes(false);
                 }
+                self.wave_tick(Instant::now());
                 let message = match self.timer_wait() {
                     None => match rx.recv() {
                         Ok(message) => message,
@@ -1477,6 +1500,7 @@ impl Worker {
         let radio_busy = self.radio_busy;
         let radio_can_more = self.radio_can_more;
         let radio_notice = self.radio_notice.clone();
+        let wave = self.wave.clone();
         let Self {
             store,
             cache,
@@ -1538,6 +1562,7 @@ impl Worker {
         next.radio_busy = radio_busy;
         next.radio_can_more = radio_can_more;
         next.radio_notice = radio_notice;
+        next.wave = wave;
         next.covers.set_active(ui_attached);
         (emit)(Event::StorageMoving(false));
         next.storage()?;
@@ -1638,6 +1663,7 @@ impl Worker {
         self.radio = None;
         self.radio_can_more = false;
         self.radio_notice = None;
+        self.wave.reset();
         let account = stored_account(&self.store, &self.providers)?;
         // Radio sessions belong to an account, so their contexts are dropped before the
         // checkpoint; the queue and position belong to the profile and are restored as they were.
@@ -1837,19 +1863,27 @@ impl Worker {
         result: std::result::Result<RadioSession, RadioError>,
     ) {
         self.radio_busy = false;
+        let replace = start && std::mem::take(&mut self.wave.replace);
+        let mut autoplay = start && std::mem::take(&mut self.wave.autoplay);
         if account == self.account {
             match result {
                 Ok(session) => {
+                    // A restart only takes over while the wave is still what plays.
+                    let replace = replace && self.wave_active();
                     let refill = !start
                         && self.radio.as_ref().is_some_and(|(owner, current, _)| {
                             owner == &account && current.id == session.id
                         });
-                    let append_error = if refill {
+                    let append_error = if replace {
+                        self.replace_upcoming(&account, &session.id, &session.batch)
+                            .err()
+                    } else if refill {
                         self.append_radio_batch(&account, &session.id, &session.batch)
                             .err()
                     } else {
                         None
                     };
+                    autoplay &= !replace;
                     if start {
                         self.radio = Some((account, session.clone(), vec![session.batch.clone()]));
                     } else if let Some((_, current, batches)) = &mut self.radio
@@ -1872,9 +1906,13 @@ impl Worker {
             }
             if self.view == View::Radio {
                 self.publish_radio();
+                if autoplay && self.radio_can_more {
+                    self.wave_autoplay();
+                }
             }
         }
         self.emit_radio_state();
+        self.emit_wave();
     }
     fn append_radio_batch(
         &mut self,
@@ -1885,13 +1923,26 @@ impl Worker {
         let Some(current) = self.queue.get(self.current) else {
             return Ok(());
         };
-        if !self
-            .queue_radio
-            .get(&self.occurrence_id(current))
-            .is_some_and(|context| context.account == account && context.session_id == session_id)
-        {
+        let belongs = |track: &Arc<Track>| {
+            self.queue_radio
+                .get(&self.occurrence_id(track))
+                .is_some_and(|context| {
+                    context.account == account && context.session_id == session_id
+                })
+        };
+        // The tail counts too: after a restart the current track may still be of the old session.
+        if !belongs(current) && !self.queue.last().is_some_and(belongs) {
             return Ok(());
         }
+        self.push_radio_batch(account, session_id, batch)
+    }
+    /// Appends the batch to the queue, the engine and the radio contexts.
+    fn push_radio_batch(
+        &mut self,
+        account: &str,
+        session_id: &str,
+        batch: &RadioBatch,
+    ) -> Result<()> {
         let tracks: Vec<_> = batch
             .tracks
             .iter()
@@ -2034,7 +2085,11 @@ impl Worker {
     fn timer_wait(&self) -> Option<Duration> {
         let checkpoint = (self.player.status == State::Playing)
             .then(|| Duration::from_secs(10).saturating_sub(self.last_checkpoint.elapsed()));
-        [checkpoint, self.like_wait()].into_iter().flatten().min()
+        let wave = self.wave.wait(Instant::now(), self.radio_busy);
+        [checkpoint, self.like_wait(), wave]
+            .into_iter()
+            .flatten()
+            .min()
     }
     fn background(&mut self, command: Command) -> Result<()> {
         self.catalog
@@ -2129,48 +2184,16 @@ impl Worker {
                 if self.view != View::Radio {
                     return Err("откройте Мою волну".into());
                 }
-                if self.radio_busy {
-                    return Err("запрос радио уже выполняется".into());
-                }
-                if self.account.is_empty() {
-                    return Err("войдите в аккаунт для радио".into());
-                }
-                let request = if matches!(command, Command::RadioStart) {
-                    CatalogRequest::RadioStart(self.view_generation, self.account.clone())
+                if matches!(command, Command::RadioStart) {
+                    self.start_radio(false, false, None)?;
                 } else {
-                    let (account, session, batches) = self
-                        .radio
-                        .as_ref()
-                        .filter(|(account, _, _)| account == &self.account && self.radio_can_more)
-                        .ok_or("начните новую радиосессию")?;
-                    let queue = batches
-                        .iter()
-                        .flat_map(|batch| batch.tracks.iter())
-                        .map(|track| RadioQueueItem {
-                            track: track.id.clone(),
-                            album: track.album.clone(),
-                        })
-                        .collect();
-                    CatalogRequest::RadioMore(
-                        self.view_generation,
-                        account.clone(),
-                        session.clone(),
-                        queue,
-                    )
-                };
-                if self
-                    .catalog
-                    .as_ref()
-                    .is_some_and(|catalog| catalog.send(request).is_ok())
-                {
-                    self.radio_busy = true;
-                    self.radio_notice = None;
-                    self.emit_radio_state();
-                } else {
-                    self.radio_notice = Some("каталог остановлен".into());
-                    self.emit_radio_state();
+                    self.request_radio_more()?;
                 }
             }
+            Command::RadioPlay => self.wave_play()?,
+            Command::RadioTune { mood, novelty } => self.wave_tune(mood, novelty),
+            Command::RadioMoreLikeThis => self.wave_more_like_this()?,
+            Command::RadioNotThis => self.wave_not_this()?,
             Command::ClearPlaylistMutationNotice(id) => {
                 if self
                     .playlist_edit_notice
@@ -2495,6 +2518,7 @@ impl Worker {
                     View::Radio => {
                         self.publish_radio();
                         self.emit_radio_state();
+                        self.wave_track_changed();
                     }
                 }
             }
@@ -3019,6 +3043,7 @@ impl Worker {
                 self.last_position = None;
                 self.restored_position = Duration::ZERO;
                 self.emit_queue();
+                self.wave_track_changed();
                 if let Some(track) = self.queue.get(self.current).cloned() {
                     let bitrate = self
                         .audio_bitrates
@@ -3069,6 +3094,7 @@ impl Worker {
                     state.bitrate_kbps = self.audio_bitrates.get(&occurrence).copied().flatten();
                     state.source_provider = self.audio_sources.get(&occurrence).cloned();
                     self.emit_queue();
+                    self.wave_track_changed();
                     (self.emit)(Event::Player(self.player.clone()));
                 }
                 let repeated = self.history_marker.take().is_some_and(|(index, previous)| {
@@ -3135,7 +3161,9 @@ struct SyncState {
 }
 
 enum CatalogRequest {
-    RadioStart(u64, String),
+    RadioStart(u64, String, RadioTuning),
+    /// Tells the provider that the track is not wanted; fire and forget.
+    Dislike(TrackId),
     RadioMore(u64, String, RadioSession, Vec<RadioQueueItem>),
     Command(u64, Command),
     EditPlaylist(u64, PlaylistSnapshot, PlaylistEdit),
@@ -3280,8 +3308,9 @@ impl Catalog {
                         }
                         let generation = match &request {
                             CatalogRequest::Command(generation, _) => *generation,
-                            CatalogRequest::RadioStart(generation, _)
+                            CatalogRequest::RadioStart(generation, _, _)
                             | CatalogRequest::RadioMore(generation, _, _, _) => *generation,
+                            CatalogRequest::Dislike(_) => 0,
                             CatalogRequest::EditPlaylist(generation, _, _) => *generation,
                             CatalogRequest::RefreshPlaylist(generation, _) => *generation,
                             CatalogRequest::Cover(_, _, generation, _) => *generation,
@@ -3535,17 +3564,44 @@ impl Catalog {
         }
     }
 
+    /// Starts a wave with the provider that owns the seed, or else the first one with radio.
+    /// Mood and novelty go only to a provider that declares `radio_tuning`; a seed always goes
+    /// along, and a provider without `radio_seed` refuses it.
+    fn radio_start(
+        &self,
+        account: &str,
+        tuning: &RadioTuning,
+    ) -> std::result::Result<RadioSession, RadioError> {
+        let radio = |p: &&Arc<dyn Provider>| {
+            self.providers.is_signed_in(p.as_ref()) && self.providers.effective(p.as_ref()).radio
+        };
+        let provider = match &tuning.seed {
+            Some(seed) => self.providers.for_track(seed).filter(radio),
+            None => self.providers.first_with(|c| c.radio),
+        }
+        .ok_or(ProviderError::Auth)?;
+        if provider.account()?.id != account {
+            return Err(ProviderError::Auth.into());
+        }
+        let mut tuning = tuning.clone();
+        if !self.providers.effective(provider.as_ref()).radio_tuning {
+            tuning.mood = None;
+            tuning.novelty = RadioTuning::default().novelty;
+        }
+        provider.radio_start(&tuning)
+    }
     fn request(&self, request: CatalogRequest) -> Result<CatalogReply> {
         match request {
-            CatalogRequest::RadioStart(_, account) => {
-                let result = match self.providers.first_with(|c| c.radio) {
-                    Some(provider) => match provider.account() {
-                        Ok(current) if current.id == account => provider.radio_start(),
-                        _ => Err(eagle_core::ProviderError::Auth.into()),
-                    },
-                    None => Err(eagle_core::ProviderError::Auth.into()),
-                };
+            CatalogRequest::RadioStart(_, account, tuning) => {
+                let result = self.radio_start(&account, &tuning);
                 Ok(CatalogReply::RadioResult(account, true, result))
+            }
+            CatalogRequest::Dislike(id) => {
+                let provider = self.provider_for(&id)?;
+                if self.providers.effective(provider.as_ref()).dislikes {
+                    provider.set_disliked(&id, true)?;
+                }
+                Ok(CatalogReply::Unchanged)
             }
             CatalogRequest::RadioMore(_, account, mut session, queue) => {
                 // The session belongs to the provider of its tracks, whatever the priority is now.
@@ -4691,7 +4747,7 @@ mod delta_tests {
         worker.command(Command::RadioStart).unwrap();
         assert!(matches!(
             catalog_rx.try_recv(),
-            Ok(CatalogRequest::RadioStart(_, _))
+            Ok(CatalogRequest::RadioStart(_, _, _))
         ));
         let track = (*row(1, false).track).clone();
         worker.radio_finished(
@@ -4743,6 +4799,257 @@ mod delta_tests {
         assert!(worker.command(Command::RadioMore).is_err());
         assert!(catalog_rx.try_recv().is_err());
         assert_eq!(worker.queue[0].id.to_string(), "yandex:9");
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A worker whose queue holds `count` tracks of one wave session, the first one current.
+    fn wave_worker(
+        name: &str,
+        count: u32,
+    ) -> (Worker, mpsc::Receiver<CatalogRequest>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("eg-wave-{name}-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        let (catalog_tx, catalog_rx) = mpsc::channel();
+        worker.catalog = Some(catalog_tx);
+        worker.account = "a".into();
+        worker.view = View::Radio;
+        worker.queue = (1..=count).map(|n| row(n, false).track).collect();
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        for track in worker.queue.clone() {
+            worker.queue_radio.insert(
+                worker.occurrence_id(&track),
+                eagle_store::RadioContext {
+                    account: "a".into(),
+                    session_id: "s".into(),
+                    batch_id: Some("b".into()),
+                },
+            );
+        }
+        (worker, catalog_rx, root)
+    }
+    fn queued_ids(worker: &Worker) -> Vec<String> {
+        worker.queue.iter().map(|t| t.id.to_string()).collect()
+    }
+    #[test]
+    fn tuning_waits_for_the_debounce_then_restarts_the_wave_with_the_last_value() {
+        let (mut worker, catalog_rx, root) = wave_worker("tune", 3);
+        worker
+            .command(Command::RadioTune {
+                mood: Some((0.0, 0.5)),
+                novelty: 0.9,
+            })
+            .unwrap();
+        worker
+            .command(Command::RadioTune {
+                mood: Some((0.0, 0.9)),
+                novelty: 0.9,
+            })
+            .unwrap();
+        let state = worker.wave_state();
+        assert_eq!(state.note, MOVED_NOTE);
+        assert_eq!(state.tuning.mood, Some((0.0, 0.9)));
+        // Nothing is sent while the value is still moving.
+        worker.wave_tick(Instant::now());
+        assert!(catalog_rx.try_recv().is_err());
+        assert!(worker.wave.wait(Instant::now(), false).is_some());
+        assert!(worker.wave.wait(Instant::now(), true).is_none());
+        worker.wave_tick(Instant::now() + Duration::from_secs(1));
+        let Ok(CatalogRequest::RadioStart(_, account, tuning)) = catalog_rx.try_recv() else {
+            panic!("expected one restart")
+        };
+        assert_eq!(account, "a");
+        assert_eq!(tuning.mood, Some((0.0, 0.9)));
+        assert_eq!(tuning.novelty, 0.9);
+        assert_eq!(tuning.seed, None);
+        assert!(catalog_rx.try_recv().is_err());
+        assert!(worker.radio_busy && worker.wave.replace);
+        let stored = worker.store.setting("radio_tuning").unwrap().unwrap();
+        assert_eq!(wave::decode_tuning(&stored), tuning);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn tuning_without_a_playing_wave_is_only_stored() {
+        let (mut worker, catalog_rx, root) = wave_worker("idle", 2);
+        worker.queue_radio.clear();
+        assert!(!worker.wave_active());
+        worker
+            .command(Command::RadioTune {
+                mood: None,
+                novelty: 0.1,
+            })
+            .unwrap();
+        assert!(worker.wave_state().note.is_empty());
+        worker.wave_tick(Instant::now() + Duration::from_secs(1));
+        assert!(catalog_rx.try_recv().is_err());
+        let stored = worker.store.setting("radio_tuning").unwrap().unwrap();
+        assert_eq!(wave::decode_tuning(&stored).novelty, 0.1);
+        drop(worker);
+        let (tx, _) = mpsc::channel();
+        let again = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        assert_eq!(again.wave.tuning.novelty, 0.1);
+        drop(again);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn more_like_this_restarts_from_the_current_track_and_swaps_only_the_upcoming_queue() {
+        let (mut worker, catalog_rx, root) = wave_worker("seed", 3);
+        worker.command(Command::RadioMoreLikeThis).unwrap();
+        assert!(worker.wave_state().note.starts_with("Ещё такого"));
+        worker.wave_tick(Instant::now());
+        let Ok(CatalogRequest::RadioStart(_, _, tuning)) = catalog_rx.try_recv() else {
+            panic!("expected a seeded start")
+        };
+        assert_eq!(
+            tuning.seed.as_ref().map(ToString::to_string).as_deref(),
+            Some("yandex:1")
+        );
+        let fresh = |n: u32| (*row(n, false).track).clone();
+        worker.radio_finished(
+            "a".into(),
+            true,
+            Ok(RadioSession {
+                id: "t".into(),
+                batch: RadioBatch {
+                    id: Some("fresh".into()),
+                    // The seed itself comes first, as services do; it is already playing.
+                    tracks: vec![fresh(1), fresh(7), fresh(8)],
+                },
+            }),
+        );
+        assert_eq!(worker.current, 0);
+        assert_eq!(queued_ids(&worker), ["yandex:1", "yandex:7", "yandex:8"]);
+        let ids: Vec<_> = worker
+            .queue
+            .iter()
+            .map(|t| worker.occurrence_id(t))
+            .collect();
+        assert_eq!(worker.queue_radio[&ids[1]].session_id, "t");
+        assert_eq!(worker.queue_radio[&ids[0]].session_id, "s");
+        assert_eq!(worker.queue_original.len(), 3);
+        assert!(worker.wave_active());
+        assert!(!worker.radio_busy && !worker.wave.replace);
+        let state = worker.wave_state();
+        assert_eq!(state.next.unwrap().id.to_string(), "yandex:7");
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_restart_that_arrives_after_the_wave_stopped_leaves_the_queue_alone() {
+        let (mut worker, catalog_rx, root) = wave_worker("stale", 3);
+        worker.command(Command::RadioMoreLikeThis).unwrap();
+        worker.wave_tick(Instant::now());
+        let _ = catalog_rx.try_recv().unwrap();
+        worker.queue_radio.clear();
+        worker.radio_finished(
+            "a".into(),
+            true,
+            Ok(RadioSession {
+                id: "t".into(),
+                batch: RadioBatch {
+                    id: None,
+                    tracks: vec![(*row(9, false).track).clone()],
+                },
+            }),
+        );
+        assert_eq!(queued_ids(&worker), ["yandex:1", "yandex:2", "yandex:3"]);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn not_this_marks_dislikes_and_skips_to_the_next_track() {
+        let (mut worker, catalog_rx, root) = wave_worker("skip", 3);
+        let skipped = worker.queue[0].clone();
+        worker.command(Command::RadioNotThis).unwrap();
+        let Ok(CatalogRequest::Dislike(id)) = catalog_rx.try_recv() else {
+            panic!("expected a dislike")
+        };
+        assert_eq!(id.to_string(), "yandex:1");
+        assert_eq!(worker.current, 1);
+        let state = worker.wave_state();
+        assert_eq!(state.previous.len(), 1);
+        assert_eq!(state.previous[0].track.id, skipped.id);
+        assert_eq!(state.previous[0].mark, WaveMark::Skipped);
+        assert_eq!(state.current.unwrap().track.id.to_string(), "yandex:2");
+        assert!(state.note.starts_with("Понял"));
+        // The note outlives the change that the skip itself causes, then goes.
+        worker.wave_track_changed();
+        assert!(worker.wave_state().note.starts_with("Понял"));
+        worker.wave_track_changed();
+        assert!(worker.wave_state().note.is_empty());
+        worker.queue_radio.clear();
+        assert!(worker.command(Command::RadioNotThis).is_err());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn the_feed_shows_two_previous_tracks_with_likes_and_the_next_one() {
+        let (mut worker, _catalog_rx, root) = wave_worker("feed", 5);
+        worker.current = 3;
+        worker.queue_likes.insert(worker.queue[2].id.clone());
+        let state = worker.wave_state();
+        let previous: Vec<_> = state
+            .previous
+            .iter()
+            .map(|e| (e.track.id.to_string(), e.mark))
+            .collect();
+        assert_eq!(
+            previous,
+            [
+                ("yandex:2".to_string(), WaveMark::None),
+                ("yandex:3".to_string(), WaveMark::Liked)
+            ]
+        );
+        assert_eq!(state.current.unwrap().track.id.to_string(), "yandex:4");
+        assert_eq!(state.next.unwrap().id.to_string(), "yandex:5");
+        // Tracks that did not come from the wave never appear in the feed.
+        let outsider = worker.occurrence_id(&worker.queue[4].clone());
+        worker.queue_radio.remove(&outsider);
+        assert!(worker.wave_state().next.is_none());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_nearly_empty_queue_asks_for_more_or_starts_a_new_session() {
+        let (mut worker, catalog_rx, root) = wave_worker("refill", 2);
+        let batch = RadioBatch {
+            id: None,
+            tracks: vec![
+                (*row(1, false).track).clone(),
+                (*row(2, false).track).clone(),
+            ],
+        };
+        worker.radio = Some((
+            "a".into(),
+            RadioSession {
+                id: "s".into(),
+                batch: batch.clone(),
+            },
+            vec![batch],
+        ));
+        worker.radio_can_more = true;
+        worker.wave_track_changed();
+        assert!(matches!(
+            catalog_rx.try_recv(),
+            Ok(CatalogRequest::RadioMore(..))
+        ));
+        // Busy: no second request.
+        worker.wave_track_changed();
+        assert!(catalog_rx.try_recv().is_err());
+        // The session is gone (restart of the application): a new one takes its place.
+        worker.radio_busy = false;
+        worker.radio = None;
+        worker.radio_can_more = false;
+        worker.wave_track_changed();
+        worker.wave_tick(Instant::now());
+        assert!(matches!(
+            catalog_rx.try_recv(),
+            Ok(CatalogRequest::RadioStart(..))
+        ));
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }

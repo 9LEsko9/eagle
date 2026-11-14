@@ -24,7 +24,7 @@ export component TrackMenu inherits Rectangle {
     private property <string> playlist-id;
     private property <string> revision;
     private property <length> anchor-y;
-    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0) - (Ui.route == Route.radio ? 1 : 0)) * 34px + 10px;
+    private property <length> menu-height: ((root.item.album-id != "" ? 4 : 3) + (root.editable ? 3 : 0)) * 34px + 10px;
     public function open(item: TrackItem, row-top: length, index: int) {
         root.item = item;
         root.row-index = index;
@@ -51,7 +51,7 @@ export component TrackMenu inherits Rectangle {
             drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 5px;
-                if Ui.route != Route.radio : MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
+                MenuItem { text: @tr("Играть следующим"); clicked => { Actions.enqueue-next(root.item.id); popup.close(); } }
                 MenuItem { init => { self.focus-item(); } text: @tr("Сохранить офлайн"); clicked => { Actions.save(root.item.id); popup.close(); } }
                 MenuItem { text: root.item.liked ? @tr("Убрать из любимых") : @tr("Нравится"); clicked => { Actions.like(root.item.id); popup.close(); } }
                 if root.item.album-id != "" : MenuItem { text: @tr("Открыть альбом"); clicked => { Actions.collection(Route.album, root.item.album-id); popup.close(); } }
@@ -135,7 +135,7 @@ export component CollectionScreen inherits VerticalLayout {
                 }
             }
             Text {
-                text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : Ui.route == Route.radio ? @tr("Моя волна") : Ui.route == Route.search ? @tr("Поиск") : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
+                text: Ui.route == Route.search ? @tr("Поиск") : Library.title != "" ? Library.title : Ui.route == Route.album ? @tr("Альбом") : Ui.route == Route.playlist ? @tr("Плейлист") : @tr("Медиатека");
                 color: Theme.t.tx;
                 font-size: Layout.compact ? Type.title : Type.display;
                 font-weight: 700;
@@ -153,7 +153,7 @@ export component CollectionScreen inherits VerticalLayout {
                 color: Theme.t.tx2;
                 font-size: Type.meta;
             }
-            if root.collection || Ui.route == Route.saved || Ui.route == Route.history || (Ui.route == Route.radio && Library.tracks.length > 0) : HorizontalLayout {
+            if root.collection || Ui.route == Route.saved || Ui.route == Route.history : HorizontalLayout {
                 spacing: 10px;
                 padding-top: 16px;
                 alignment: start;
@@ -193,16 +193,6 @@ export component CollectionScreen inherits VerticalLayout {
             TextButton { text: @tr("Обновить"); enabled: !Ui.playlist-busy; clicked => { Actions.refresh-playlist(Library.header-id); } }
         }
         Text { text: Ui.playlist-busy ? @tr("Сохраняем изменения…") : Player.track-id == "" ? @tr("Запустите трек, чтобы добавить его в плейлист.") : Player.album-id == "" ? @tr("Для добавления нужна информация об альбоме трека.") : @tr("Порядок и удаление — в меню трека."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
-    }
-    if Ui.route == Route.radio : VerticalLayout {
-        spacing: 6px;
-        HorizontalLayout {
-            alignment: start;
-            spacing: 8px;
-            TextButton { text: Ui.radio-ready ? @tr("Новая волна") : @tr("Получить рекомендации"); primary: Library.tracks.length == 0; outline: Library.tracks.length > 0; enabled: !Ui.radio-busy; clicked => { Actions.radio-start(); } }
-            if Ui.radio-ready : TextButton { text: @tr("Ещё треки"); enabled: !Ui.radio-busy; clicked => { Actions.radio-more(); } }
-        }
-        Text { text: Ui.radio-busy ? @tr("Подбираем музыку…") : Ui.radio-notice != "" ? Ui.radio-notice : @tr("Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
     }
     if Ui.route == Route.search : VerticalLayout {
         spacing: 12px;

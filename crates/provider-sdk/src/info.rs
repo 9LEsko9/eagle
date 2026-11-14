@@ -55,6 +55,10 @@ pub struct Capabilities {
     /// Needed by the artist's "all tracks" screen.
     pub artist_all_tracks: bool,
     pub radio: bool,
+    /// `radio_start` honours `RadioTuning::mood` and `novelty`.
+    pub radio_tuning: bool,
+    /// `radio_start` honours `RadioTuning::seed`.
+    pub radio_seed: bool,
     pub play_reporting: bool,
     pub offline: bool,
     pub lyrics: bool,
@@ -79,6 +83,8 @@ impl Capabilities {
             artist_page: false,
             artist_all_tracks: false,
             radio: false,
+            radio_tuning: false,
+            radio_seed: false,
             play_reporting: false,
             offline: false,
             lyrics: false,
@@ -101,6 +107,8 @@ impl Capabilities {
             artist_page: self.artist_page && other.artist_page,
             artist_all_tracks: self.artist_all_tracks && other.artist_all_tracks,
             radio: self.radio && other.radio,
+            radio_tuning: self.radio_tuning && other.radio_tuning,
+            radio_seed: self.radio_seed && other.radio_seed,
             play_reporting: self.play_reporting && other.play_reporting,
             offline: self.offline && other.offline,
             lyrics: self.lyrics && other.lyrics,

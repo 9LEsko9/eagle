@@ -3,7 +3,9 @@
 
 //! Conformance checks a provider runs from its own tests against recorded or fake responses.
 
-use crate::{Page, Provider, ProviderError, ProviderInfo, Quality, RadioError, Track, TrackId};
+use crate::{
+    Page, Provider, ProviderError, ProviderInfo, Quality, RadioError, RadioTuning, Track, TrackId,
+};
 use std::{fmt, time::SystemTime};
 
 /// Upper bound for followed `next` cursors; longer chains are reported as endless.
@@ -161,8 +163,20 @@ fn check_capabilities(provider: &dyn Provider, fixtures: &Fixtures, out: &mut Ve
         }
     }
     if caps.radio {
-        let result = provider.radio_start().map(drop).map_err(radio_error);
+        let result = provider
+            .radio_start(&RadioTuning::default())
+            .map(drop)
+            .map_err(radio_error);
         report_capability("capability.radio", result, fixtures, out);
+        if caps.radio_tuning {
+            let tuning = RadioTuning {
+                mood: Some((0.0, 1.0)),
+                novelty: 0.9,
+                seed: None,
+            };
+            let result = provider.radio_start(&tuning).map(drop).map_err(radio_error);
+            report_capability("capability.radio_tuning", result, fixtures, out);
+        }
     }
 }
 
@@ -388,8 +402,8 @@ mod tests {
         ) -> Result<Page<Track>, ProviderError> {
             self.inner.artist_tracks(id, cursor)
         }
-        fn radio_start(&self) -> Result<RadioSession, RadioError> {
-            self.inner.radio_start()
+        fn radio_start(&self, tuning: &crate::RadioTuning) -> Result<RadioSession, RadioError> {
+            self.inner.radio_start(tuning)
         }
         fn radio_next(
             &self,

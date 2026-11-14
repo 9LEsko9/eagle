@@ -4,7 +4,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use eagle_ui::{
         Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route,
-        Status, Storage, Theme, ThemeMode, TrackItem, Ui,
+        Status, Storage, Theme, ThemeMode, TrackItem, Ui, Wave, WaveColors, WaveTrack,
     };
     // Geometric placeholder artwork in the mockup's palette: background, disc, stripe.
     fn art(size: u32, back: [u8; 3], disc: [u8; 3], cx: f32, cy: f32) -> slint::Image {
@@ -197,6 +197,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<Player>().set_liked(false);
     ui.global::<Player>().on_position(|| 84.);
     ui.global::<Ui>().set_signed_in(true);
+    ui.global::<Wave>()
+        .set_dots(Rc::new(VecModel::from(eagle_ui::pad_dots())).into());
     let storage = ui.global::<Storage>();
     storage.set_cache_usage("4.0 МиБ".into());
     storage.set_saved_usage("8.0 МиБ".into());
@@ -214,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (file name, theme, route, panel open, drawer open, window width)
     let shots = [
         (
-            "radio-empty-wide",
+            "wave-wide",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -222,15 +224,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
-            "radio-empty-narrow",
-            ThemeMode::Graphite,
+            "wave-wide-paper",
+            ThemeMode::Paper,
             Route::Radio,
             false,
             false,
-            760.,
+            1280.,
         ),
         (
-            "radio-filled-wide",
+            "wave-starting-wide",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -238,7 +240,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
-            "radio-filled-narrow",
+            "wave-empty-wide",
+            ThemeMode::Graphite,
+            Route::Radio,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "wave-narrow",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -246,7 +256,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             760.,
         ),
         (
-            "radio-error-narrow",
+            "wave-narrow-paper",
+            ThemeMode::Paper,
+            Route::Radio,
+            false,
+            false,
+            760.,
+        ),
+        (
+            "wave-error-narrow",
             ThemeMode::Graphite,
             Route::Radio,
             false,
@@ -573,7 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let (name, mode, route, panel, drawer, width) = shots[n];
             let mut shown = tracks.clone();
-            if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
+            if name.starts_with("saved-empty") {
                 shown.clear();
             }
             ui.global::<Player>().set_status(
@@ -590,16 +608,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Library>()
                 .set_tracks(Rc::new(VecModel::from(shown)).into());
             ui.global::<Ui>().set_compact(name.starts_with("compact"));
-            ui.global::<Ui>().set_radio_ready(
-                name.starts_with("radio-filled") || name.starts_with("radio-error"),
-            );
-            ui.global::<Ui>().set_radio_busy(false);
+            ui.global::<Ui>().set_radio_ready(name.starts_with("wave-"));
             ui.global::<Ui>()
-                .set_radio_notice(if name.starts_with("radio-error") {
+                .set_radio_busy(name.starts_with("wave-starting"));
+            ui.global::<Ui>()
+                .set_radio_notice(if name.starts_with("wave-error") {
                     "Нет сети. Очередь воспроизведения сохранена.".into()
                 } else {
                     "".into()
                 });
+            let wave = ui.global::<Wave>();
+            let playing_wave = name.starts_with("wave-")
+                && !name.starts_with("wave-empty")
+                && !name.starts_with("wave-starting");
+            wave.set_active(playing_wave);
+            wave.set_mood_x(0.58);
+            wave.set_mood_y(0.52);
+            wave.set_novelty(0.5);
+            wave.set_has_next(true);
+            let wave_track = |index: usize, mark: &str| WaveTrack {
+                id: tracks[index].id.clone(),
+                title: tracks[index].title.clone(),
+                artist: tracks[index].artist.clone(),
+                cover: tracks[index].cover.clone(),
+                mark: mark.into(),
+            };
+            wave.set_played(
+                Rc::new(VecModel::from(vec![
+                    wave_track(7, "не то"),
+                    wave_track(1, "♥"),
+                ]))
+                .into(),
+            );
+            wave.set_next(wave_track(2, ""));
+            wave.set_why("Похож на «Северный свет» из твоих лайков".into());
+            wave.set_note(if playing_wave {
+                "Волна сместилась — изменится со следующего трека".into()
+            } else {
+                "".into()
+            });
             ui.global::<Ui>()
                 .set_error(if name.starts_with("playlist-conflict") {
                     "Плейлист изменился. Список обновлён; повторите действие.".into()
@@ -672,6 +719,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (bar, panel) =
                 eagle_palette::player_surfaces([38, 70, 83], background, eagle_palette::Tint::Soft);
             let color = |c: [u8; 3]| slint::Color::from_rgb_u8(c[0], c[1], c[2]);
+            let pad = eagle_palette::wave_pad([38, 70, 83], background);
+            ui.global::<Wave>().set_colors(WaveColors {
+                pad: color(pad.background),
+                ring: color(pad.ring),
+                tx: color(pad.text),
+                tx2: color(pad.secondary),
+                dot: color(pad.dot),
+                card: color(pad.card),
+            });
             ui.global::<Player>().set_colors(PlayerColors {
                 bg: color(panel.background),
                 bar: color(bar.background),

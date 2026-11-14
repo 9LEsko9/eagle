@@ -162,6 +162,95 @@ pub fn player_surfaces(
     panel.secondary = secondary;
     (bar, panel)
 }
+/// Colours of the wave screen: the mood pad, its labels and the card of the current track.
+#[derive(Clone, Copy, Debug)]
+pub struct WavePad {
+    pub background: [u8; 3],
+    /// The thin ring that marks the reach of the knob.
+    pub ring: [u8; 3],
+    /// Highlighted label and ink on the card.
+    pub text: [u8; 3],
+    /// Labels, readable on `background` and on `card`.
+    pub secondary: [u8; 3],
+    /// The dots of the field, the knob and the filled part of the slider.
+    pub dot: [u8; 3],
+    pub card: [u8; 3],
+}
+fn mix(from: [u8; 3], to: [u8; 3], t: f64) -> [u8; 3] {
+    std::array::from_fn(|i| (f64::from(from[i]) * (1. - t) + f64::from(to[i]) * t).round() as u8)
+}
+/// Moves `color` toward `ink` until it reads on every surface in `surfaces`.
+fn readable_on(color: [u8; 3], surfaces: &[[u8; 3]], ink: [u8; 3], minimum: f64) -> [u8; 3] {
+    (0..=20)
+        .map(|step| mix(color, ink, f64::from(step) / 20.))
+        .find(|&candidate| {
+            surfaces
+                .iter()
+                .all(|&surface| contrast(surface, candidate) >= minimum)
+        })
+        .unwrap_or(ink)
+}
+/// The wave pad takes the cover's colour; the theme background stays the dominant colour.
+/// Mixed in encoded sRGB; text roles keep WCAG AA contrast on the pad and on the card.
+pub fn wave_pad(cover: [u8; 3], background: [u8; 3]) -> WavePad {
+    let light = luminance(background) > 0.5;
+    if light {
+        let pad = mix(cover, background, 0.88);
+        let card = mix(cover, background, 0.94);
+        let ink = [0; 3];
+        WavePad {
+            background: pad,
+            ring: mix(cover, background, 0.74),
+            text: readable_on(mix(cover, ink, 0.45), &[pad, card], ink, 7.),
+            secondary: readable_on(mix(cover, background, 0.38), &[pad, card], ink, 4.5),
+            dot: mix(cover, ink, 0.2),
+            card,
+        }
+    } else {
+        let k = if background == [0; 3] { 0.86 } else { 0.8 };
+        let pad = mix(cover, background, k);
+        let card = mix(cover, background, 0.9);
+        let ink = [255; 3];
+        WavePad {
+            background: pad,
+            ring: mix(cover, background, 0.66),
+            text: readable_on(mix(ink, cover, 0.15), &[pad, card], ink, 7.),
+            secondary: readable_on(mix(cover, ink, 0.25), &[pad, card], ink, 4.5),
+            dot: mix(cover, ink, 0.45),
+            card,
+        }
+    }
+}
+#[cfg(test)]
+mod wave_pad_tests {
+    use super::*;
+    #[test]
+    fn labels_stay_readable_on_the_pad_and_the_card_for_every_cover_and_theme() {
+        for background in [[18, 18, 20], [250, 250, 247], [0; 3]] {
+            for r in (0..=255).step_by(17) {
+                for g in (0..=255).step_by(17) {
+                    for b in (0..=255).step_by(17) {
+                        let pad = wave_pad([r, g, b], background);
+                        for surface in [pad.background, pad.card] {
+                            assert!(contrast(surface, pad.text) >= 4.5);
+                            assert!(contrast(surface, pad.secondary) >= 4.5);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn the_pad_is_a_light_wash_of_the_cover_on_paper_and_dark_on_graphite() {
+        let cover = [38, 70, 83];
+        let paper = wave_pad(cover, [250, 250, 247]);
+        let graphite = wave_pad(cover, [18, 18, 20]);
+        assert!(luminance(paper.background) > 0.5);
+        assert!(luminance(graphite.background) < 0.2);
+        assert_ne!(paper.background, [250, 250, 247]);
+    }
+}
+
 fn colors_with_mix(cover: [u8; 3], background: [u8; 3], k: f64) -> PlayerColors {
     let bar = std::array::from_fn(|i| {
         (f64::from(cover[i]) * (1. - k) + f64::from(background[i]) * k).round() as u8
