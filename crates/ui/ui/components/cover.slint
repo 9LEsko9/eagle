@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { Theme } from "../globals/theme.slint";
+import { Theme, Motion } from "../globals/theme.slint";
 
 // Rounded artwork with a 1 px outline. A neutral wash stands in while the image loads.
 // On tinted surfaces pass `placeholder` and `outline` derived from the player ink.
@@ -11,7 +11,15 @@ export component Artwork inherits Rectangle {
     border-radius: radius;
     clip: true;
     background: placeholder;
-    Image { source: root.image; width: parent.width; height: parent.height; image-fit: cover; }
+    // Fades in once the image has arrived; the placeholder shows until then.
+    Image {
+        source: root.image;
+        width: parent.width;
+        height: parent.height;
+        image-fit: cover;
+        opacity: root.image.width > 0 ? 1 : 0;
+        animate opacity { duration: Motion.base; easing: ease-out; }
+    }
     @children
     Rectangle { border-radius: root.radius; border-width: 1px; border-color: root.outline; }
 }

@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion } from "../globals/theme.slint";
+
+// Small rotating arc for work in progress. Static with reduced motion; it only asks for
+// frames while it is on screen and motion is allowed.
+export component Spinner inherits Rectangle {
+    in property <color> fg: Theme.t.tx2;
+    in property <length> size: 16px;
+    width: root.size;
+    height: root.size;
+    accessible-role: progress-indicator;
+    accessible-label: @tr("Загрузка");
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../icons/spinner.svg");
+        colorize: root.fg;
+        transform-rotation: Motion.reduced ? 0deg : mod(animation-tick() / 800ms, 1) * 360deg;
+    }
+}
+
+// Pulsing wash for skeleton blocks. Put bars inside; the whole block pulses as one layer.
+export component SkeletonPulse inherits Rectangle {
+    opacity: Motion.reduced ? 1 : 0.6 + 0.4 * (0.5 + 0.5 * sin(animation-tick() / 1400ms * 360deg));
+}
+
+// One placeholder bar.
+export component SkeletonBar inherits Rectangle {
+    height: 12px;
+    border-radius: self.height / 2;
+    background: Theme.skeleton;
+}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { Theme, Motion, Type } from "../globals/theme.slint";
+import { Spinner } from "spinner.slint";
 
 // Segmented control; the chosen segment is filled with the text colour.
 export component Segmented inherits Rectangle {
@@ -82,6 +83,8 @@ export component Field inherits Rectangle {
     in property <bool> password;
     in property <image> icon;
     in-out property <string> text <=> input.text;
+    // Shows a spinner at the right edge.
+    in property <bool> busy;
     callback accepted(string);
     public function focus-input() { input.focus(); }
     out property <bool> has-focus: input.has-focus;
@@ -123,6 +126,11 @@ export component Field inherits Rectangle {
                 selection-foreground-color: Theme.t.tx;
                 accepted => { root.accepted(self.text); }
             }
+        }
+        // Last item of the row, so the text never runs under the spinner.
+        if root.busy : VerticalLayout {
+            alignment: center;
+            Spinner { size: 16px; fg: Theme.t.tx2; }
         }
     }
 }

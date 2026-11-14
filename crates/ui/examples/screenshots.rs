@@ -214,6 +214,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (file name, theme, route, panel open, drawer open, window width)
     let shots = [
         (
+            "loading-playlist",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-paper",
+            ThemeMode::Paper,
+            Route::Playlist,
+            true,
+            false,
+            1280.,
+        ),
+        (
+            "loading-albums",
+            ThemeMode::Graphite,
+            Route::Albums,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-artist",
+            ThemeMode::Graphite,
+            Route::Artist,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "loading-search",
+            ThemeMode::Graphite,
+            Route::Search,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "buffering",
+            ThemeMode::Graphite,
+            Route::Playlist,
+            false,
+            false,
+            1280.,
+        ),
+        (
             "radio-empty-wide",
             ThemeMode::Graphite,
             Route::Radio,
@@ -573,12 +621,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let (name, mode, route, panel, drawer, width) = shots[n];
             let mut shown = tracks.clone();
-            if name.starts_with("saved-empty") || name.starts_with("radio-empty") {
+            let loading = name.starts_with("loading-");
+            if name.starts_with("saved-empty") || name.starts_with("radio-empty") || loading {
                 shown.clear();
             }
             ui.global::<Player>().set_status(
                 if name.starts_with("saved-blocked") || name.starts_with("paused-") {
                     Status::Paused
+                } else if name == "buffering" {
+                    Status::Buffering
                 } else {
                     Status::Playing
                 },
@@ -614,7 +665,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.global::<Ui>()
                 .set_playlist_name("Вечерняя прогулка".into());
             ui.global::<Ui>().set_search_query("Сигнал".into());
-            ui.global::<Ui>().set_search_kind(2);
+            ui.global::<Ui>()
+                .set_search_kind(if name == "loading-search" { 0 } else { 2 });
+            ui.global::<Ui>().set_search_valid(true);
+            ui.global::<Ui>()
+                .set_search_pending(name == "loading-search");
+            ui.global::<Ui>()
+                .set_busy(loading && name != "loading-search");
             ui.global::<Ui>()
                 .set_confirm_delete(name == "delete-playlist");
             ui.global::<Library>()
@@ -664,6 +721,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     library.set_cover(cover_image.clone());
                     library.set_likeable(false);
                 }
+            }
+            if loading {
+                library.set_title("".into());
+                library.set_cover(slint::Image::default());
+                library.set_cards(Rc::new(VecModel::<CardItem>::default()).into());
             }
             ui.global::<Ui>().set_panel_open(panel);
             ui.global::<Ui>().set_drawer_open(drawer);

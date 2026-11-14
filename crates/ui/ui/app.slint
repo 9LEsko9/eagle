@@ -12,7 +12,8 @@ import { LoginScreen } from "screens/login.slint";
 import { ArtistScreen } from "screens/artist.slint";
 import { PlayerBar } from "player/player-bar.slint";
 import { NowPlayingPanel, NowPlayingCard } from "player/now-playing-panel.slint";
-export { Theme, ThemeMode, Motion, Type, Player, Library, Ui, Actions, Route, Storage, DownloadItem, QueueItem }
+import { Loading, LoadingDelays } from "globals/loading.slint";
+export { Theme, ThemeMode, Motion, Type, Player, Library, Ui, Actions, Route, Storage, DownloadItem, QueueItem, Loading }
 
 component Sidebar inherits VerticalLayout {
     // Every navigation also closes the drawer on narrow windows.
@@ -42,7 +43,11 @@ component Sidebar inherits VerticalLayout {
         height: 46px;
         Text { text: @tr("Плейлисты"); color: Theme.t.tx2; font-size: Type.small; font-weight: 500; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
-        IconButton { private property <bool> dialog-open: Ui.create-playlist; changed dialog-open => { if !self.dialog-open && !Layout.compact { self.focus-button(); } } size: 28px; icon-size: 16px; icon: @image-url("icons/plus.svg"); label: @tr("Создать плейлист"); clicked => { Ui.drawer-open = false; Ui.playlist-name = ""; Ui.error = ""; Ui.create-playlist = true; } }
+        // Centred on the label: a fixed-size child of a HorizontalLayout sits at the top otherwise.
+        VerticalLayout {
+            alignment: center;
+            IconButton { private property <bool> dialog-open: Ui.create-playlist; changed dialog-open => { if !self.dialog-open && !Layout.compact { self.focus-button(); } } size: 28px; icon-size: 16px; icon: @image-url("icons/plus.svg"); label: @tr("Создать плейлист"); clicked => { Ui.drawer-open = false; Ui.playlist-name = ""; Ui.error = ""; Ui.create-playlist = true; } }
+        }
     }
     if Ui.signed-in : Rectangle { height: 6px; }
     ListView {
@@ -182,4 +187,5 @@ export component DesktopWindow inherits Window {
         }
     }
     forward-focus: keys;
+    LoadingDelays { }
 }

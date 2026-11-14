@@ -24,3 +24,4 @@ These icons are from [Phosphor Icons core](https://github.com/phosphor-icons/cor
 | `volume.svg` | `speaker-high.svg` | regular |
 | `volume-off.svg` | `speaker-x.svg` | regular |
 | `plus.svg` | `plus.svg` | regular |
+| `spinner.svg` | `circle-notch.svg` | regular |
