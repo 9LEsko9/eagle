@@ -272,6 +272,9 @@ pub struct Track {
     pub duration_ms: u64,
     pub cover: Option<String>,
     pub availability: Availability,
+    /// Public link to the source work or uploader profile.
+    #[serde(default)]
+    pub source_url: Option<String>,
     /// Only set by providers whose `Capabilities::isrc` is true.
     #[serde(default)]
     pub isrc: Option<String>,
@@ -440,6 +443,10 @@ pub trait Provider: Send + Sync {
     }
 
     fn info(&self) -> &ProviderInfo;
+    /// Provider-supplied attribution logo as PNG, displayed on a dark background.
+    fn attribution_logo(&self) -> Option<&'static [u8]> {
+        None
+    }
     /// Capabilities available without an account for optional-token providers.
     fn guest_capabilities(&self) -> Capabilities {
         Capabilities::none()

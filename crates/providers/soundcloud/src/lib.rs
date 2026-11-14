@@ -24,6 +24,7 @@ impl SoundCloud {
     pub fn new(http: Arc<dyn Http>) -> Self {
         let mut capabilities = Capabilities::none();
         capabilities.search_tracks = true;
+        capabilities.likes_read = true;
         Self {
             http,
             client: Mutex::new(None),
@@ -212,6 +213,17 @@ fn playable(v: &Value, authenticated: bool) -> bool {
             || (authenticated && v["sharing"].as_str() == Some("private")))
         && v["streamable"].as_bool() == Some(true)
 }
+fn safe_permalink(value: Option<&str>) -> Option<String> {
+    let url = Url::parse(value?).ok()?;
+    (url.scheme() == "https"
+        && url.host_str() == Some("soundcloud.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then(|| url.into())
+}
 fn parse_track(v: &Value, authenticated: bool) -> Result<Track, ProviderError> {
     let user = &v["user"];
     Ok(Track {
@@ -236,6 +248,11 @@ fn parse_track(v: &Value, authenticated: bool) -> Result<Track, ProviderError> {
             Availability::Available
         } else {
             Availability::Unknown
+        },
+        source_url: if v["sharing"].as_str() == Some("private") {
+            safe_permalink(user["permalink_url"].as_str())
+        } else {
+            safe_permalink(v["permalink_url"].as_str())
         },
         isrc: None,
     })
@@ -277,8 +294,13 @@ impl Provider for SoundCloud {
     fn info(&self) -> &ProviderInfo {
         &self.info
     }
+    fn attribution_logo(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("../assets/logo-white.png"))
+    }
     fn guest_capabilities(&self) -> Capabilities {
-        self.info.capabilities
+        let mut capabilities = self.info.capabilities;
+        capabilities.likes_read = false;
+        capabilities
     }
     fn login(&self, token: Token) -> Result<Account, ProviderError> {
         let account = self.validate_session(&token)?;
@@ -309,42 +331,12 @@ impl Provider for SoundCloud {
                 ("offset", offset.to_string()),
             ],
         )?;
-        let mut items = v["collection"]
+        let items = v["collection"]
             .as_array()
             .ok_or(ProviderError::ApiChanged)?
             .iter()
             .map(|v| parse_track(v, authenticated))
             .collect::<Result<Vec<_>, _>>()?;
-        // Include a bounded page of this account's likes in the first search page.
-        // This is discovery only: it does not synchronize the local likes library.
-        if index == 0
-            && authenticated
-            && let Ok(account) = self.account()
-            && let Ok((likes, true)) = self.get(
-                &format!("/users/{}/track_likes", account.id),
-                &[("limit", LIMIT.to_string()), ("offset", "0".into())],
-            )
-            && let Some(collection) = likes["collection"].as_array()
-        {
-            let needle = query.to_lowercase();
-            for entry in collection {
-                if select_hls(&entry["track"], Quality::High, true).is_err() {
-                    continue;
-                }
-                let Ok(track) = parse_track(&entry["track"], true) else {
-                    continue;
-                };
-                if (track.title.to_lowercase().contains(&needle)
-                    || track
-                        .artists
-                        .iter()
-                        .any(|a| a.name.to_lowercase().contains(&needle)))
-                    && !items.iter().any(|item| item.id == track.id)
-                {
-                    items.push(track);
-                }
-            }
-        }
         let next = if v["next_href"].as_str().is_some() {
             Some(
                 offset
@@ -370,8 +362,36 @@ impl Provider for SoundCloud {
     fn playlists(&self, _: Option<&str>) -> Result<Page<Playlist>, ProviderError> {
         Err(ProviderError::Unavailable)
     }
-    fn likes(&self, _: Option<&str>) -> Result<Page<Track>, ProviderError> {
-        Err(ProviderError::Unavailable)
+    fn likes(&self, cursor: Option<&str>) -> Result<Page<Track>, ProviderError> {
+        let account = self.account()?;
+        let offset = match cursor {
+            Some(value) => value.parse::<u32>().map_err(|_| ProviderError::InvalidId)?,
+            None => 0,
+        };
+        let (value, authenticated) = self.get(
+            &format!("/users/{}/track_likes", account.id),
+            &[("limit", LIMIT.to_string()), ("offset", offset.to_string())],
+        )?;
+        if !authenticated {
+            return Err(ProviderError::Auth);
+        }
+        let items = value["collection"]
+            .as_array()
+            .ok_or(ProviderError::ApiChanged)?
+            .iter()
+            .map(|entry| parse_track(&entry["track"], true))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = if value["next_href"].as_str().is_some() {
+            Some(
+                offset
+                    .checked_add(LIMIT)
+                    .ok_or(ProviderError::ApiChanged)?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        Ok(Page { items, next })
     }
     fn set_liked(&self, _: &TrackId, _: bool) -> Result<(), ProviderError> {
         Err(ProviderError::Unavailable)
@@ -467,10 +487,14 @@ mod tests {
                 let mut private = track();
                 private["id"] = 13.into();
                 private["sharing"] = "private".into();
-                serde_json::to_vec(
-                    &serde_json::json!({"collection": [{"track": private}, {"track": track()}]}),
-                )
-                .unwrap()
+                if url.contains("offset=50") {
+                    serde_json::to_vec(
+                        &serde_json::json!({"collection": [{"track": private}], "next_href": null}),
+                    )
+                    .unwrap()
+                } else {
+                    serde_json::to_vec(&serde_json::json!({"collection": [{"track": track()}], "next_href": "next"})).unwrap()
+                }
             } else if url.contains("/media/example?") {
                 if req.token.is_some() {
                     assert!(url.contains("track_authorization=fixture-secret"));
@@ -519,10 +543,7 @@ mod tests {
         assert!(searches[0].contains("q=fixture"));
         assert!(searches[1].contains("q=fixture"));
         drop(requests);
-        assert!(matches!(
-            provider.likes(None),
-            Err(ProviderError::Unavailable)
-        ));
+        assert!(matches!(provider.likes(None), Err(ProviderError::Auth)));
         assert!(matches!(
             provider.login(Token::new("invalid".into())),
             Err(ProviderError::Auth)
@@ -557,10 +578,17 @@ mod tests {
             )
             .contains("fixture-secret")
         );
-        let results = provider.search("Fixture", 0).unwrap();
-        assert_eq!(results.items.len(), 2);
-        assert!(results.items.iter().any(|t| t.id == private_id));
-        assert_eq!(provider.search("Fixture", 1).unwrap().items.len(), 1);
+        let first = provider.likes(None).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.next.as_deref(), Some("50"));
+        let second = provider.likes(first.next.as_deref()).unwrap();
+        assert_eq!(second.items[0].id, private_id);
+        assert!(second.next.is_none());
+        assert!(matches!(
+            provider.likes(Some("invalid")),
+            Err(ProviderError::InvalidId)
+        ));
+        assert_eq!(provider.search("Fixture", 0).unwrap().items.len(), 1);
         assert!(provider.resolve_stream(&private_id, Quality::High).is_ok());
         provider.logout();
         assert!(matches!(provider.account(), Err(ProviderError::Auth)));
@@ -576,6 +604,30 @@ mod tests {
             provider.resolve_stream(&private_id, Quality::High),
             Err(ProviderError::Unavailable)
         ));
+    }
+    #[test]
+    fn attribution_uses_public_track_or_private_uploader_without_secret_links() {
+        let mut value = track();
+        value["permalink_url"] = "https://soundcloud.com/artist/song".into();
+        value["user"]["permalink_url"] = "https://soundcloud.com/artist".into();
+        assert_eq!(
+            parse_track(&value, false).unwrap().source_url.as_deref(),
+            Some("https://soundcloud.com/artist/song")
+        );
+        value["sharing"] = "private".into();
+        value["permalink_url"] = "https://soundcloud.com/artist/song?secret_token=secret".into();
+        assert_eq!(
+            parse_track(&value, true).unwrap().source_url.as_deref(),
+            Some("https://soundcloud.com/artist")
+        );
+        for link in [
+            "https://evil.example/artist",
+            "http://soundcloud.com/artist",
+            "https://soundcloud.com/artist?secret=x",
+            "https://user@soundcloud.com/artist",
+        ] {
+            assert!(safe_permalink(Some(link)).is_none());
+        }
     }
     #[test]
     fn only_public_full_unencrypted_non_premium_formats_are_selected() {

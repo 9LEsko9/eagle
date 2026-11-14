@@ -14,11 +14,11 @@ share it in chat. See the [Music Assistant instructions](https://www.music-assis
 for locating it; enter the token value without the `OAuth ` prefix. Eagle does
 not read browser cookies itself. Signing out removes the local token; guest
 search remains available. A valid account may access a private `ALLOW` track by
-its known ID when the server permits it. Search also checks the first 50 liked
-tracks for a title or artist match; it does not search later likes or sync the
-likes library. Eagle has no private-link import or account library browsing.
+its known ID when the server permits it. The account’s liked tracks are read page by page into the existing collection.
+Likes are read-only on SoundCloud: changes in Eagle remain local and do not change
+the SoundCloud account. Eagle has no private-link import.
 Track metadata obtained through search is cached locally and is not erased on
-sign-out. Likes, playlists, downloads, previews, encrypted and
+sign-out. Remote like changes, playlists, downloads, previews, encrypted and
 restricted streams are not supported. Account playback has not been verified
 with a live account.
 
@@ -28,9 +28,8 @@ discontinuities are unsupported. Segments load on demand with at most one in
 memory; seeking reopens and decodes from the start when fast seeking is
 unavailable. The CLI playback path does not support HLS.
 
-The current player does not yet display the SoundCloud logo or a link to the
-original work as required by the [API guide](https://developers.soundcloud.com/docs/api/guide)
-for custom players; this integration is experimental and not ready for distribution.
+Search and collection rows and the player panel credit the uploader and link the
+provider’s logo to the original work, or to the uploader profile for a private track. This integration remains experimental.
 
 # SoundCloud: русский
 
@@ -48,11 +47,11 @@ Eagle проверит его через веб-API и сохранит в си�
 вводите только значение без префикса `OAuth `. Eagle не читает cookies браузера.
 Выход удаляет локальный токен, гостевой поиск сохраняется. При наличии доступа
 сервер может разрешить приватный трек с политикой `ALLOW` по известному ID.
-Поиск также проверяет первые 50 понравившихся треков по названию и исполнителю;
-остальные лайки не ищутся, библиотека лайков не синхронизируется. Импорт
-приватных ссылок и просмотр библиотеки аккаунта не поддерживаются. Метаданные
+Понравившиеся треки аккаунта постранично загружаются в существующую медиатеку.
+Лайки SoundCloud доступны только для чтения: изменения в Eagle остаются локальными
+и не меняют аккаунт SoundCloud. Импорт приватных ссылок не поддерживается. Метаданные
 найденных треков сохраняются локально и не удаляются при выходе.
-Лайки, плейлисты, загрузки, превью, шифрованные и ограниченные потоки не
+Изменение лайков на сервере, плейлисты, загрузки, превью, шифрованные и ограниченные потоки не
 поддерживаются. Воспроизведение с аккаунтом пока не проверено на живом аккаунте.
 
 В настольном приложении поддерживаются конечные незашифрованные AAC HLS-плейлисты
@@ -62,7 +61,5 @@ Eagle проверит его через веб-API и сохранит в си�
 поддерживается, выполняется повторное открытие и декодирование с начала. CLI
 не воспроизводит HLS.
 
-Текущий проигрыватель пока не показывает логотип SoundCloud и ссылку на оригинал,
-которые [руководство API](https://developers.soundcloud.com/docs/api/guide)
-требует для собственных плееров; интеграция экспериментальная и не готова к
-распространению.
+В строках поиска и медиатеки и в панели плеера указан автор загрузки; логотип
+провайдера ведёт на оригинал или профиль автора для приватного трека. Интеграция остаётся экспериментальной.

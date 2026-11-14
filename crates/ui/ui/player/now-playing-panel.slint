@@ -172,6 +172,15 @@ export component NowPlayingCard inherits Rectangle {
                 height: self.preferred-height + 6px;
                 vertical-alignment: bottom;
             }
+            if Player.source-url != "" : Rectangle {
+                height: 32px;
+                background: #121212;
+                accessible-role: button;
+                accessible-label: Player.source;
+                accessible-action-default => { Actions.open-url(Player.source-url); }
+                Image { source: Player.source-logo; width: 120px; height: 15px; x: 6px; y: (parent.height - self.height) / 2; image-fit: contain; }
+                TouchArea { mouse-cursor: pointer; clicked => { Actions.open-url(Player.source-url); } }
+            }
             Text {
                 text: @tr("Далее"); color: Player.colors.tx2; font-size: Type.small;
                 font-weight: 600; height: 40px; vertical-alignment: center;

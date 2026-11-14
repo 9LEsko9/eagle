@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 export enum Status { idle, loading, playing, paused, buffering }
 export enum Route { saved, history, library, search, album, playlist, settings, albums, artists, artist, radio }
-export struct TrackItem { occurrence: string, blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
+export struct TrackItem { source-url: string, source-logo: image, source-name: string, occurrence: string, blocked-reason: string, id: string, album-id: string, album: string, cover: image, title: string, artist: string, duration: string, liked: bool, available: bool }
 export struct CollectionItem { id: string, title: string }
 // Album or artist tile. `key` routes artwork; `id` opens it.
 export struct CardItem { id: string, key: string, title: string, subtitle: string, cover: image, round: bool, route: Route }
@@ -27,7 +27,9 @@ export struct SignInMethodItem { kind: SignInKind, hint: string, help-url: strin
 export struct ProviderItem {
     id: string,
     name: string,
+    attribution-logo: image,
     signed-in: bool,
+    guest: bool,
     account: string,
     methods: [SignInMethodItem],
     phase: SignInPhase,
@@ -60,6 +62,8 @@ export global Player {
     in property <string> album;
     in property <string> artist-id;
     in property <string> source;
+    in property <string> source-url;
+    in property <image> source-logo;
     in property <string> title;
     in property <string> artist;
     in property <image> cover;

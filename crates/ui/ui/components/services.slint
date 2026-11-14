@@ -120,6 +120,7 @@ component ServiceRow inherits VerticalLayout {
             alignment: center;
             Text { text: root.item.name; color: Theme.t.tx; font-size: Type.body; font-weight: 600; overflow: elide; }
             if root.item.signed-in && root.item.account != "" : Text { text: root.item.account; color: Theme.t.tx2; font-size: Type.small; overflow: elide; }
+            if root.item.guest : Text { text: @tr("Доступен без аккаунта"); color: Theme.t.tx2; font-size: Type.small; overflow: elide; }
         }
         if root.item.methods.length > 0 : VerticalLayout {
             alignment: center;

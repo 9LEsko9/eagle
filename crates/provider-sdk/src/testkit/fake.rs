@@ -442,6 +442,7 @@ pub fn fake_track(
         duration_ms,
         cover: None,
         availability: Availability::Available,
+        source_url: None,
         isrc: None,
     }
 }

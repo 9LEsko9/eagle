@@ -232,6 +232,24 @@ impl Store {
     /// removed locally only if it has not been set again since that sync. A like the provider
     /// never listed, or a track whose unlike has not reached the provider yet, is left alone.
     pub fn sync_provider_likes(&self, provider: &str, ids: &[TrackId]) -> Result<LikeSync, Error> {
+        self.sync_provider_likes_inner(provider, ids, false)
+    }
+
+    /// Read-only providers cannot acknowledge a local unlike; retain that local choice.
+    pub fn sync_readonly_provider_likes(
+        &self,
+        provider: &str,
+        ids: &[TrackId],
+    ) -> Result<LikeSync, Error> {
+        self.sync_provider_likes_inner(provider, ids, true)
+    }
+
+    fn sync_provider_likes_inner(
+        &self,
+        provider: &str,
+        ids: &[TrackId],
+        read_only: bool,
+    ) -> Result<LikeSync, Error> {
         let provider = provider.to_owned();
         let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         self.write(move |c| {
@@ -272,7 +290,7 @@ impl Store {
                 }
                 let held_back: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM like_outbox WHERE provider=?1 AND track=?2 AND liked=0) OR EXISTS(SELECT 1 FROM profile_state WHERE kind='like' AND key=?2 AND deleted=1 AND hlc>?3)",
-                    params![provider, track, previous.unwrap_or(i64::MIN)],
+                    params![provider, track, if read_only { i64::MIN } else { previous.unwrap_or(i64::MIN) }],
                     |r| r.get(0),
                 )?;
                 let already: bool = tx.query_row(
@@ -402,6 +420,7 @@ mod tests {
             duration_ms,
             cover: None,
             availability: Availability::Available,
+            source_url: None,
             isrc: None,
         }
     }
@@ -657,6 +676,29 @@ mod tests {
             .sync_provider_likes("fakea", &[id("fakea:1")])
             .unwrap();
         assert!(liked_ids(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn readonly_sync_preserves_local_unlike_across_repeated_reads() {
+        let (store, dir) = device_with("readonly", &[track("fakea:1", "One", 100_000)]);
+        let id = id("fakea:1");
+        store
+            .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+            .unwrap();
+        store.like(&id, false, &[]).unwrap();
+        for _ in 0..2 {
+            store
+                .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+                .unwrap();
+            assert!(liked_ids(&store).is_empty());
+        }
+        store.like(&id, true, &[]).unwrap();
+        store
+            .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+            .unwrap();
+        assert_eq!(liked_ids(&store), ["fakea:1"]);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

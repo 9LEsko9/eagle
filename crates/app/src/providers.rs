@@ -21,6 +21,7 @@ pub fn builtin(net: Arc<Client>) -> Vec<Arc<dyn Provider>> {
 pub struct ProviderStatus {
     pub id: String,
     pub name: String,
+    pub attribution_logo: Option<&'static [u8]>,
     /// Ways to sign in, preferred first; empty when the provider needs no account.
     pub sign_in: Vec<SignInMethod>,
     /// Name of the signed-in account, when the provider reports one.
@@ -135,6 +136,7 @@ impl Providers {
                 ProviderStatus {
                     id: p.info().id.to_owned(),
                     name: p.info().name.to_owned(),
+                    attribution_logo: p.attribution_logo(),
                     sign_in: p.info().sign_in.to_vec(),
                     account_name: self.account(p.info().id).and_then(|account| account.name),
                     signed_in,

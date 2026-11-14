@@ -33,9 +33,19 @@ fn image(cover: &eagle_palette::Cover) -> slint::Image {
         ),
     )
 }
-fn track_item(item: LibraryItem) -> TrackItem {
+fn track_item(item: LibraryItem, ui: &DesktopWindow) -> TrackItem {
     let seconds = item.track.duration_ms / 1000;
+    let source = ui
+        .global::<Ui>()
+        .get_providers()
+        .iter()
+        .find(|p| p.id == item.track.id.provider());
     TrackItem {
+        source_url: item.track.source_url.as_deref().unwrap_or_default().into(),
+        source_logo: source
+            .as_ref()
+            .map_or_else(slint::Image::default, |p| p.attribution_logo.clone()),
+        source_name: source.map_or_else(Default::default, |p| p.name),
         occurrence: Default::default(),
         blocked_reason: item.blocked_reason.clone().unwrap_or_default().into(),
         id: item.track.id.to_string().into(),
@@ -239,11 +249,25 @@ fn provider_item(
     let mut item = ProviderItem {
         id: status.id.as_str().into(),
         name: status.name.as_str().into(),
+        attribution_logo: status
+            .attribution_logo
+            .and_then(|bytes| image::load_from_memory(bytes).ok())
+            .map_or_else(slint::Image::default, |image| {
+                let rgba = image.to_rgba8();
+                slint::Image::from_rgba8(
+                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &rgba,
+                        rgba.width(),
+                        rgba.height(),
+                    ),
+                )
+            }),
         signed_in: if status.sign_in.is_empty() {
             status.signed_in
         } else {
             status.account_connected
         },
+        guest: status.signed_in && !status.account_connected && !status.sign_in.is_empty(),
         account: status.account_name.clone().unwrap_or_default().into(),
         methods: Rc::new(VecModel::from(methods)).into(),
         phase: SignInPhase::Idle,
@@ -351,7 +375,7 @@ impl Bridge {
                             .any(|id| id.provider() == provider.as_str())
                 })
                 .cloned()
-                .map(track_item)
+                .map(|item| track_item(item, ui))
                 .collect::<Vec<_>>(),
         );
         self.refresh_rows(ui);
@@ -774,12 +798,15 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .into_iter()
                 .enumerate()
                 .map(|(index, track)| {
-                    let mut item = track_item(LibraryItem {
-                        sources: Vec::new(),
-                        blocked_reason: None,
-                        track,
-                        liked: false,
-                    });
+                    let mut item = track_item(
+                        LibraryItem {
+                            sources: Vec::new(),
+                            blocked_reason: None,
+                            track,
+                            liked: false,
+                        },
+                        ui,
+                    );
                     item.occurrence = ids
                         .get(start + index)
                         .map_or_else(String::new, u64::to_string)
@@ -896,6 +923,13 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                     .find(|p| p.id == key)
                     .map_or_else(|| key.into(), |p| p.name);
                 player.set_source(name);
+                player.set_source_url(track.source_url.as_deref().unwrap_or_default().into());
+                player.set_source_logo(
+                    providers
+                        .iter()
+                        .find(|p| p.id == key)
+                        .map_or_else(slint::Image::default, |p| p.attribution_logo),
+                );
                 player.set_artist(
                     track
                         .artists
@@ -914,6 +948,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 player.set_title("".into());
                 player.set_artist("".into());
                 player.set_source("".into());
+                player.set_source_url("".into());
+                player.set_source_logo(slint::Image::default());
                 player.set_length(0.);
                 player.set_shown(0.);
                 player.set_cover(slint::Image::default());
@@ -978,10 +1014,10 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 match change {
                     LibraryDelta::Insert { index, item } => {
                         structural = true;
-                        rows.insert(index, track_item(item));
+                        rows.insert(index, track_item(item, ui));
                     }
                     LibraryDelta::Update { index, item } => {
-                        let mut row = track_item(item);
+                        let mut row = track_item(item, ui);
                         // Keep loaded artwork across like toggles: no flicker.
                         if let Some(old) = rows.row_data(index)
                             && old.id == row.id
@@ -1007,7 +1043,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 return;
             }
             bridge.clear_rows();
-            rows.set_vec(items.into_iter().map(track_item).collect::<Vec<_>>());
+            rows.set_vec(
+                items
+                    .into_iter()
+                    .map(|item| track_item(item, ui))
+                    .collect::<Vec<_>>(),
+            );
             bridge.refresh_rows(ui);
         }
         Event::Storage {
@@ -2266,11 +2307,13 @@ pub(super) mod tests {
         assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
         ui.global::<Library>()
             .set_playlists(Rc::new(VecModel::<CollectionItem>::default()).into());
-        let track = item("7").track;
+        let mut track = item("7").track;
+        Arc::make_mut(&mut track).source_url = Some("https://example.test/track".into());
         let snapshot = eagle_app::session::SessionSnapshot {
             providers: vec![eagle_app::providers::ProviderStatus {
                 id: "fakea".into(),
                 name: "Test Service".into(),
+                attribution_logo: None,
                 sign_in: vec![eagle_core::SignInMethod::Token {
                     hint: "Token",
                     help_url: None,
@@ -2335,6 +2378,10 @@ pub(super) mod tests {
             u64::MAX.to_string()
         );
         assert_eq!(ui.global::<Player>().get_quality().as_str(), "128 кбит/с");
+        assert_eq!(
+            ui.global::<Player>().get_source_url().as_str(),
+            "https://example.test/track"
+        );
         let queue = ui.global::<Library>().get_queue_order();
         assert_eq!(queue.row_count(), 2);
         assert_eq!(queue.row_data(0).unwrap().id.as_str(), "1");
@@ -2372,6 +2419,7 @@ pub(super) mod tests {
         assert_eq!(ui.global::<Library>().get_title(), "Local");
         apply(&ui, Event::Player(Arc::default()), &bridge);
         assert_eq!(ui.global::<Player>().get_track_id(), "");
+        assert_eq!(ui.global::<Player>().get_source_url().as_str(), "");
         assert_eq!(ui.global::<Player>().get_shown(), 0.);
     }
     #[test]
