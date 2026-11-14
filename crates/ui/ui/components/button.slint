@@ -9,6 +9,8 @@ export component TextButton inherits Rectangle {
     in property <bool> primary;
     in property <bool> outline;
     in property <bool> enabled: true;
+    // Space before and after the label when there is no icon or spinner.
+    in property <length> pad-x: 16px;
     out property <bool> hovered: touch.has-hover;
     // Work started by this button is running: a spinner replaces the icon, clicks are ignored.
     in property <bool> busy;
@@ -39,8 +41,8 @@ export component TextButton inherits Rectangle {
     animate background { duration: Motion.fast; }
     HorizontalLayout {
         // The spinner takes the icon's slot, so the label keeps its place.
-        padding-left: (root.busy || root.icon.width > 0) ? 12px : 16px;
-        padding-right: (root.busy || root.icon.width > 0) ? 18px : 16px;
+        padding-left: (root.busy || root.icon.width > 0) ? 12px : root.pad-x;
+        padding-right: (root.busy || root.icon.width > 0) ? 18px : root.pad-x;
         spacing: 8px;
         alignment: center;
         if root.busy || root.icon.width > 0 : VerticalLayout {

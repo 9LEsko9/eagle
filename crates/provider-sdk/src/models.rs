@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use crate::{Capabilities, ProviderInfo, SignedUrl, Token};
+use crate::{Capabilities, ProviderInfo, SignInMethod, SignedUrl, Token};
 use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr, time::SystemTime};
+use std::{
+    fmt,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 /// Provider-qualified identity; also the SQLite representation.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -303,6 +307,9 @@ pub struct Stream {
 pub struct Account {
     pub id: String,
     pub subscription: bool,
+    /// Name shown to the user (login or display name); absent when the provider has none.
+    #[serde(default)]
+    pub name: Option<String>,
     /// What this account may use (subscription, region); narrows `ProviderInfo::capabilities`.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -330,6 +337,79 @@ pub enum ProviderError {
     #[error("системное хранилище секретов недоступно")]
     Keyring,
 }
+/// Opaque in-memory state of a sign-in flow (e.g. a device code). The host hands it back to
+/// the provider and never stores, shows or logs it.
+#[derive(Clone)]
+pub struct SignInFlow(pub Token);
+
+impl fmt::Debug for SignInFlow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SignInFlow([REDACTED])")
+    }
+}
+
+/// What the user typed for `Provider::sign_in_start`.
+pub enum SignInInput {
+    /// Methods that need no input (`DeviceCode`, `Browser`).
+    None,
+    Password {
+        login: String,
+        password: Token,
+    },
+}
+
+impl fmt::Debug for SignInInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Password { .. } => f.write_str("Password([REDACTED])"),
+        }
+    }
+}
+
+/// Where a multi-step sign-in stands. The host shows it, waits and calls
+/// `Provider::sign_in_continue`; the provider never sleeps or spawns threads itself.
+pub enum SignInStep {
+    /// Show `code` and ask the user to enter it at `url`, then poll every `interval`
+    /// until `expires_in` has passed.
+    ShowCode {
+        code: String,
+        url: String,
+        interval: Duration,
+        expires_in: Duration,
+        flow: SignInFlow,
+    },
+    /// Open `url` in the system browser, then poll every `interval`.
+    OpenBrowser {
+        url: String,
+        interval: Duration,
+        flow: SignInFlow,
+    },
+    /// Ask the user for a second factor and pass it to `sign_in_continue`; `hint` says where
+    /// the code comes from, e.g. "из приложения".
+    SecondFactor { hint: String, flow: SignInFlow },
+    /// Not finished yet: poll again after the last `interval`.
+    Pending,
+    /// The code or the flow is no longer valid; start over.
+    Expired,
+    /// Signed in. The host passes the token to `Provider::login` and stores it.
+    Done(Token),
+}
+
+impl fmt::Debug for SignInStep {
+    // Codes and tokens never reach logs, not even through `{:?}`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ShowCode { .. } => "ShowCode",
+            Self::OpenBrowser { .. } => "OpenBrowser",
+            Self::SecondFactor { .. } => "SecondFactor",
+            Self::Pending => "Pending",
+            Self::Expired => "Expired",
+            Self::Done(_) => "Done",
+        })
+    }
+}
+
 /// Blocking provider boundary; cursors are opaque to app and engine.
 pub struct Page<T> {
     pub items: Vec<T>,
@@ -367,6 +447,25 @@ pub trait Provider: Send + Sync {
     }
     /// Forgets the token held in memory.
     fn logout(&self) {}
+    /// Starts a sign-in method from `info().sign_in` other than `Token` (which goes through
+    /// `login`). A method the provider does not list returns `Unavailable` without touching
+    /// the network.
+    fn sign_in_start(
+        &self,
+        _method: SignInMethod,
+        _input: SignInInput,
+    ) -> Result<SignInStep, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+    /// Polls a code or browser flow (`code: None`) or submits a second factor (`code: Some`).
+    /// The host calls it no more often than the flow's `interval`.
+    fn sign_in_continue(
+        &self,
+        _flow: &SignInFlow,
+        _code: Option<Token>,
+    ) -> Result<SignInStep, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
     /// All tracks of an artist, page by page; `cursor` is opaque.
     fn artist_tracks(
         &self,

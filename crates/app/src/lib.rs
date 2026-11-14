@@ -12,6 +12,7 @@ pub mod music;
 mod playback;
 pub mod providers;
 pub mod session;
+mod sign_in;
 mod source;
 mod storage;
 pub mod tokens;

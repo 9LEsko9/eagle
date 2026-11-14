@@ -39,6 +39,9 @@ pub struct Request {
     pub body: Option<Vec<u8>>,
     pub range: Option<(u64, u64)>,
     pub limit: usize,
+    /// Return a 4xx answer as a `Response` with its body instead of `HttpError::Status`,
+    /// for services that explain a refusal in the body (e.g. OAuth `authorization_pending`).
+    pub error_body: bool,
 }
 impl Request {
     pub fn get(url: SignedUrl) -> Self {
@@ -51,6 +54,7 @@ impl Request {
             body: None,
             range: None,
             limit: 16 * 1024 * 1024,
+            error_body: false,
         }
     }
 }

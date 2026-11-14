@@ -123,10 +123,10 @@ impl Provider for Fixture {
         static INFO: ProviderInfo = ProviderInfo {
             id: "fixture",
             name: "fixture",
-            auth: AuthMethod::Token {
+            sign_in: &[SignInMethod::Token {
                 hint: "",
                 help_url: None,
-            },
+            }],
             capabilities: capabilities(),
         };
         &INFO
@@ -137,6 +137,7 @@ impl Provider for Fixture {
     fn account(&self) -> Result<Account, ProviderError> {
         Ok(Account {
             id: "fixture".into(),
+            name: None,
             subscription: true,
             capabilities: capabilities(),
         })

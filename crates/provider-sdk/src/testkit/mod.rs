@@ -4,6 +4,8 @@
 //! Test kit for provider authors: an in-memory provider and conformance checks.
 
 mod fake;
-pub use fake::{FakeProvider, fake_track};
+pub use fake::{
+    FAKE_SECOND_FACTOR, FAKE_SIGN_IN_TOKEN, FAKE_WRONG_PASSWORD, FakeProvider, fake_track,
+};
 pub mod conformance;
 pub mod replay;

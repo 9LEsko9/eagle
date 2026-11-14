@@ -1,0 +1,357 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Motion, Type } from "../globals/theme.slint";
+import { Ui, Actions, ProviderItem, SignInKind, SignInPhase, OfferPhase } from "../globals/bridge.slint";
+import { TextButton } from "button.slint";
+import { Field } from "controls.slint";
+import { Spinner } from "spinner.slint";
+
+// Plain text button: secondary colour, primary on hover or focus.
+component TextLink inherits Rectangle {
+    in property <string> text;
+    in property <color> tone: Theme.t.tx2;
+    in property <bool> strong;
+    in property <length> line: 24px;
+    callback clicked();
+    height: root.line;
+    horizontal-stretch: 0;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.t.tx;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    forward-focus: focus;
+    HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        Text {
+            text: root.text;
+            color: (touch.has-hover || focus.has-focus) ? Theme.t.tx : root.tone;
+            font-size: Type.body;
+            font-weight: root.strong ? 600 : 400;
+            vertical-alignment: center;
+            animate color { duration: Motion.fast; }
+        }
+    }
+    focus := FocusScope {
+        key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// Caption above a field.
+component LabelledField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in property <bool> password;
+    in-out property <string> text <=> field.text;
+    callback accepted(string);
+    public function focus-input() { field.focus-input(); }
+    spacing: 8px;
+    Text { text: root.label; color: Theme.t.tx2; font-size: Type.small; wrap: word-wrap; }
+    field := Field {
+        outlined: true;
+        label: root.label;
+        placeholder: root.placeholder;
+        password: root.password;
+        accepted(text) => { root.accepted(text); }
+    }
+}
+
+// Content that drops in when it appears: it fades in and slides 8 px down. Without motion it just appears.
+component DropIn inherits Rectangle {
+    private property <bool> shown;
+    private property <duration> time: Motion.reduced ? 0ms : 300ms;
+    preferred-height: body.preferred-height;
+    min-height: body.min-height;
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: root.time; easing: ease-out; }
+    init => { root.shown = true; }
+    body := VerticalLayout {
+        width: root.width;
+        height: root.height;
+        y: root.shown ? 0px : -8px;
+        animate y { duration: root.time; easing: ease-out; }
+        @children
+    }
+}
+
+component ServiceRow inherits VerticalLayout {
+    in property <ProviderItem> item;
+    private property <bool> open: Ui.service-open == root.item.id;
+    private property <int> mi: Ui.service-method < root.item.methods.length ? Ui.service-method : 0;
+    // The method the «other way» link leads to.
+    private property <int> next: root.mi + 1 < root.item.methods.length ? root.mi + 1 : 0;
+    pure function method-label(kind: SignInKind) -> string {
+        return kind == SignInKind.token ? @tr("Войти по токену")
+            : kind == SignInKind.device-code ? @tr("Войти по коду")
+            : kind == SignInKind.browser ? @tr("Через браузер")
+            : @tr("По паролю");
+    }
+    private property <SignInKind> kind: root.item.methods.length > 0 ? root.item.methods[root.mi].kind : SignInKind.token;
+    private property <bool> busy: root.item.phase == SignInPhase.busy;
+    private property <bool> asking-code: root.kind == SignInKind.device-code && (root.item.phase == SignInPhase.idle || root.busy);
+    // The device code and the browser flow start on their own; the other methods wait for input.
+    function begin(index: int) {
+        if root.item.methods[index].kind == SignInKind.device-code {
+            Actions.sign-in-start(root.item.id, index);
+        }
+    }
+    function connect() {
+        if Ui.service-open != "" && Ui.service-open != root.item.id {
+            Actions.sign-in-cancel(Ui.service-open);
+        }
+        Ui.service-open = root.item.id;
+        Ui.service-method = 0;
+        root.begin(0);
+    }
+    function switch-to(index: int) {
+        Actions.sign-in-cancel(root.item.id);
+        Ui.service-method = index;
+        root.begin(index);
+    }
+    spacing: 0px;
+    HorizontalLayout {
+        height: 56px;
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            alignment: center;
+            Text { text: root.item.name; color: Theme.t.tx; font-size: Type.body; font-weight: 600; overflow: elide; }
+            if root.item.signed-in && root.item.account != "" : Text { text: root.item.account; color: Theme.t.tx2; font-size: Type.small; overflow: elide; }
+        }
+        if root.item.methods.length > 0 : VerticalLayout {
+            alignment: center;
+            TextLink {
+                line: 40px;
+                strong: true;
+                tone: (root.open && !root.item.signed-in) ? Theme.t.tx2 : Theme.t.tx;
+                text: root.item.signed-in ? (root.open ? @tr("Свернуть") : @tr("Выйти")) : (root.open ? @tr("Отмена") : @tr("Подключить"));
+                clicked => {
+                    if root.item.signed-in {
+                        if root.open { Ui.service-open = ""; } else { Actions.logout(root.item.id); }
+                    } else if root.open {
+                        Ui.service-open = "";
+                        Actions.sign-in-cancel(root.item.id);
+                    } else {
+                        root.connect();
+                    }
+                }
+            }
+        }
+        if root.item.methods.length == 0 : VerticalLayout {
+            alignment: center;
+            Text { text: @tr("Вход не нужен"); color: Theme.t.tx2; font-size: Type.body; }
+        }
+    }
+    if root.open : DropIn {
+        VerticalLayout {
+            padding-top: 8px;
+            padding-bottom: 32px;
+            spacing: 16px;
+
+            // Signed in: the answer about likes, or just a confirmation.
+            if root.item.signed-in && root.item.offer == OfferPhase.asking : VerticalLayout {
+                spacing: 16px;
+                Text { text: root.item.offer-text; color: Theme.t.tx; font-size: Type.body; wrap: word-wrap; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+                    TextButton { height: 40px; pad-x: 24px; primary: true; text: @tr("Отправить"); clicked => { Actions.likes-backfill(root.item.id, true); } }
+                    TextButton { height: 40px; pad-x: 24px; outline: true; text: @tr("Не надо"); clicked => { Actions.likes-backfill(root.item.id, false); } }
+                }
+            }
+            if root.item.signed-in && root.item.offer == OfferPhase.sent : Text { text: @tr("Отправляем в фоне"); color: Theme.t.tx2; font-size: Type.body; }
+            if root.item.signed-in && root.item.offer == OfferPhase.skipped : Text { text: @tr("Лайки остались только в eagle"); color: Theme.t.tx2; font-size: Type.body; }
+            if root.item.signed-in && root.item.offer == OfferPhase.none : Text { text: @tr("Подключено"); color: Theme.t.tx2; font-size: Type.body; }
+
+            // Device code.
+            if !root.item.signed-in && root.kind == SignInKind.device-code && root.item.phase == SignInPhase.code : VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    alignment: start;
+                    Text { text: @tr("Введите этот код на "); color: Theme.t.tx; font-size: Type.body; vertical-alignment: center; }
+                    TextLink { text: root.item.link-label; strong: true; tone: Theme.t.tx; clicked => { Actions.open-url(root.item.link); } }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Rectangle {
+                        height: 48px;
+                        code := Text {
+                            text: root.item.code;
+                            color: root.item.expired ? Theme.t.tx2 : Theme.t.tx;
+                            font-size: 40px;
+                            font-weight: 600;
+                            letter-spacing: 1.6px;
+                            vertical-alignment: center;
+                        }
+                        if root.item.expired : Rectangle { y: parent.height / 2; width: code.preferred-width; height: 2px; background: Theme.t.tx2; }
+                    }
+                }
+                Text { text: @tr("Можно с телефона. Когда подтвердите вход, eagle подключится сам."); color: Theme.t.tx2; font-size: Type.body; wrap: word-wrap; }
+            }
+            if !root.item.signed-in && root.asking-code : HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Spinner { size: 16px; fg: Theme.t.tx2; }
+                }
+                Text { text: @tr("Запрашиваем код"); color: Theme.t.tx2; font-size: Type.body; }
+            }
+
+            // Token.
+            if !root.item.signed-in && root.kind == SignInKind.token : HorizontalLayout {
+                spacing: 8px;
+                token := LabelledField {
+                    horizontal-stretch: 1;
+                    label: root.item.methods[root.mi].hint;
+                    password: true;
+                    accepted(text) => { if text != "" { Actions.login(root.item.id, text); } }
+                }
+                VerticalLayout {
+                    alignment: end;
+                    TextButton {
+                        height: 40px;
+                        pad-x: 24px;
+                        primary: true;
+                        text: @tr("Подключить");
+                        busy: root.busy;
+                        enabled: token.text != "";
+                        clicked => { Actions.login(root.item.id, token.text); }
+                    }
+                }
+            }
+
+            // Password, then the second factor.
+            if !root.item.signed-in && root.kind == SignInKind.password && root.item.phase != SignInPhase.second-factor : HorizontalLayout {
+              alignment: start;
+              VerticalLayout {
+                preferred-width: 320px;
+                max-width: 320px;
+                spacing: 16px;
+                login := LabelledField { label: root.item.methods[root.mi].hint; }
+                secret := LabelledField {
+                    label: @tr("Пароль");
+                    password: true;
+                    accepted(text) => { Actions.sign-in-password(root.item.id, login.text, text); }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    TextButton {
+                        height: 40px;
+                        pad-x: 24px;
+                        primary: true;
+                        text: @tr("Войти");
+                        busy: root.busy;
+                        enabled: login.text != "" && secret.text != "";
+                        clicked => { Actions.sign-in-password(root.item.id, login.text, secret.text); }
+                    }
+                }
+              }
+            }
+            if !root.item.signed-in && root.kind == SignInKind.password && root.item.phase == SignInPhase.second-factor : HorizontalLayout {
+              alignment: start;
+              HorizontalLayout {
+                preferred-width: 320px;
+                max-width: 320px;
+                spacing: 8px;
+                factor := LabelledField {
+                    horizontal-stretch: 1;
+                    label: @tr("Код ") + root.item.detail;
+                    placeholder: "000 000";
+                    accepted(text) => { Actions.sign-in-second-factor(root.item.id, text); }
+                }
+                VerticalLayout {
+                    alignment: end;
+                    TextButton {
+                        height: 40px;
+                        pad-x: 24px;
+                        primary: true;
+                        text: @tr("Готово");
+                        busy: root.busy;
+                        enabled: factor.text != "";
+                        clicked => { Actions.sign-in-second-factor(root.item.id, factor.text); }
+                    }
+                }
+              }
+            }
+
+            // Browser.
+            if !root.item.signed-in && root.kind == SignInKind.browser && (root.item.phase == SignInPhase.idle || root.item.phase == SignInPhase.failed || root.busy) : HorizontalLayout {
+                alignment: start;
+                TextButton {
+                    height: 40px;
+                    pad-x: 24px;
+                    primary: true;
+                    text: @tr("Открыть браузер");
+                    busy: root.busy;
+                    clicked => { Actions.sign-in-start(root.item.id, root.mi); }
+                }
+            }
+            if !root.item.signed-in && root.kind == SignInKind.browser && root.item.phase == SignInPhase.browser : Text {
+                text: @tr("Ждём вход в браузере");
+                color: Theme.t.tx2;
+                font-size: Type.body;
+            }
+
+            // Links: the error, helpers and the other ways to sign in.
+            if !root.item.signed-in : HorizontalLayout {
+                alignment: start;
+                spacing: 24px;
+                if root.item.phase == SignInPhase.code && !root.item.expired : TextLink {
+                    text: @tr("Скопировать");
+                    clicked => { copier.select-all(); copier.copy(); }
+                }
+                if root.item.phase == SignInPhase.code && root.item.expired : TextLink {
+                    text: @tr("Код истёк — новый код");
+                    tone: Theme.t.tx;
+                    clicked => { Actions.sign-in-start(root.item.id, root.mi); }
+                }
+                if root.item.phase == SignInPhase.failed : Text {
+                    text: root.item.detail;
+                    color: Theme.t.tx;
+                    font-size: Type.body;
+                    vertical-alignment: center;
+                }
+                if root.item.phase == SignInPhase.failed && root.kind == SignInKind.device-code : TextLink {
+                    text: @tr("Получить код снова");
+                    clicked => { Actions.sign-in-start(root.item.id, root.mi); }
+                }
+                if root.item.phase == SignInPhase.browser : TextLink {
+                    text: @tr("Открыть ещё раз");
+                    clicked => { Actions.open-url(root.item.link); }
+                }
+                if root.item.phase == SignInPhase.browser || root.item.phase == SignInPhase.second-factor : TextLink {
+                    text: @tr("Назад");
+                    clicked => { Actions.sign-in-cancel(root.item.id); }
+                }
+                if root.kind == SignInKind.token && root.item.methods[root.mi].help-url != "" : TextLink {
+                    text: @tr("Где взять токен");
+                    clicked => { Actions.open-url(root.item.methods[root.mi].help-url); }
+                }
+                if root.item.methods.length > 1 && root.item.phase != SignInPhase.browser && root.item.phase != SignInPhase.second-factor : TextLink {
+                    text: root.method-label(root.item.methods[root.next].kind);
+                    clicked => { root.switch-to(root.next); }
+                }
+                // The clipboard goes through a text field that never shows: select it and copy.
+                copier := TextInput {
+                    width: 0px;
+                    height: 0px;
+                    read-only: true;
+                    visible: false;
+                    text: root.item.code;
+                }
+            }
+        }
+    }
+    Rectangle { height: 1px; background: Theme.t.ln; }
+}
+
+// The «Сервисы» rows: a hairline above the first and below each.
+export component ServicesSection inherits VerticalLayout {
+    spacing: 0px;
+    Rectangle { height: 1px; background: Theme.t.ln; }
+    for provider in Ui.providers : ServiceRow { item: provider; }
+}

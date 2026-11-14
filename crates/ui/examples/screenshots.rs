@@ -3,8 +3,9 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use eagle_ui::{
-        Actions, CardItem, CollectionItem, DesktopWindow, Library, Player, PlayerColors, Route,
-        Status, Storage, Theme, ThemeMode, TrackItem, Ui, Wave, WaveColors, WaveTrack,
+        Actions, CardItem, CollectionItem, DesktopWindow, Library, OfferPhase, Player,
+        PlayerColors, ProviderItem, Route, SignInKind, SignInMethodItem, SignInPhase, Status,
+        Storage, Theme, ThemeMode, TrackItem, Ui, Wave, WaveColors, WaveTrack,
     };
     // Geometric placeholder artwork in the mockup's palette: background, disc, stripe.
     fn art(size: u32, back: [u8; 3], disc: [u8; 3], cx: f32, cy: f32) -> slint::Image {
@@ -553,6 +554,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1280.,
         ),
         (
+            "services-code",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-expired",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-token",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-password",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-offer",
+            ThemeMode::Graphite,
+            Route::Settings,
+            false,
+            false,
+            1280.,
+        ),
+        (
+            "services-compact",
+            ThemeMode::Paper,
+            Route::Settings,
+            false,
+            false,
+            780.,
+        ),
+        (
             "settings-paper",
             ThemeMode::Paper,
             Route::Settings,
@@ -731,6 +780,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width,
                 if width > 1600. { 1080. } else { 880. },
             ));
+            if name.starts_with("services-") {
+                let method = |kind, hint: &str| SignInMethodItem {
+                    kind,
+                    hint: hint.into(),
+                    help_url: Default::default(),
+                };
+                let first = ProviderItem {
+                    id: "fixture:a".into(),
+                    name: "Яндекс Музыка".into(),
+                    signed_in: name == "services-offer",
+                    account: if name == "services-offer" {
+                        "anna.k".into()
+                    } else {
+                        "".into()
+                    },
+                    methods: Rc::new(VecModel::from(vec![
+                        method(SignInKind::DeviceCode, ""),
+                        method(SignInKind::Token, "OAuth-токен Яндекс Музыки"),
+                    ]))
+                    .into(),
+                    phase: match name {
+                        "services-code" | "services-expired" => SignInPhase::Code,
+                        _ => SignInPhase::Idle,
+                    },
+                    code: "QW7-K4P".into(),
+                    link: "https://ya.ru/device".into(),
+                    link_label: "ya.ru/device".into(),
+                    expired: name == "services-expired",
+                    offer: if name == "services-offer" {
+                        OfferPhase::Asking
+                    } else {
+                        OfferPhase::None
+                    },
+                    offer_text: "Отправить 128 лайков из eagle в этот сервис?".into(),
+                    ..Default::default()
+                };
+                let second = ProviderItem {
+                    id: "fixture:b".into(),
+                    name: "VK Музыка".into(),
+                    methods: Rc::new(VecModel::from(vec![
+                        method(SignInKind::Password, "Телефон или почта"),
+                        method(SignInKind::Browser, ""),
+                    ]))
+                    .into(),
+                    phase: SignInPhase::Idle,
+                    ..Default::default()
+                };
+                let (open, index) = match name {
+                    "services-password" => ("fixture:b", 0),
+                    _ => ("fixture:a", if name == "services-token" { 1 } else { 0 }),
+                };
+                ui.global::<Ui>().set_service_open(open.into());
+                ui.global::<Ui>().set_service_method(index);
+                ui.global::<Ui>()
+                    .set_providers(Rc::new(VecModel::from(vec![first, second])).into());
+            }
             ui.global::<Theme>().set_mode(mode);
             ui.global::<Ui>().set_route(route);
             let library = ui.global::<Library>();

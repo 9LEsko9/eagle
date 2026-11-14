@@ -80,22 +80,26 @@ export component Switch inherits Rectangle {
 // Single-line text field in theme colours.
 export component Field inherits Rectangle {
     in property <string> placeholder;
+    // Names the field for assistive tools when a caption outside it says what it is.
+    in property <string> label;
     in property <bool> password;
     in property <image> icon;
     in-out property <string> text <=> input.text;
     // Shows a spinner at the right edge.
     in property <bool> busy;
+    // Transparent with a hairline border that turns solid on focus, for forms on the page.
+    in property <bool> outlined;
     callback accepted(string);
     public function focus-input() { input.focus(); }
     out property <bool> has-focus: input.has-focus;
     height: 40px;
-    border-radius: 10px;
-    background: Theme.t.surf;
+    border-radius: root.outlined ? 8px : 10px;
+    background: root.outlined ? transparent : Theme.t.surf;
     border-width: 1px;
-    border-color: input.has-focus ? Theme.t.tx2 : Theme.t.ln;
+    border-color: input.has-focus ? (root.outlined ? Theme.t.tx : Theme.t.tx2) : Theme.t.ln;
     animate border-color { duration: Motion.fast; }
     accessible-role: text-input;
-    accessible-label: placeholder;
+    accessible-label: root.label != "" ? root.label : placeholder;
     forward-focus: input;
     HorizontalLayout {
         padding-left: 12px;

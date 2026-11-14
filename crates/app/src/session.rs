@@ -3,10 +3,12 @@
 use crate::providers::{
     ProviderStatus, Providers, account_key, liked_albums_key, liked_artists_key,
 };
+pub use crate::sign_in::SignInState;
+use crate::sign_in::{self, SignInUpdate, SignIns};
 use eagle_core::{
-    Album, Artist, AuthMethod, Capabilities, Playlist, PlaylistEdit, PlaylistEditError,
-    PlaylistSnapshot, PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError,
-    RadioQueueItem, RadioSession, RadioTuning, Track, TrackId,
+    Album, Artist, Capabilities, Playlist, PlaylistEdit, PlaylistEditError, PlaylistSnapshot,
+    PlaylistTrack, Provider, ProviderError, RadioBatch, RadioError, RadioQueueItem, RadioSession,
+    RadioTuning, SignInInput, SignInMethod, Track, TrackId,
 };
 pub use eagle_core::{Availability, Quality, Token};
 use eagle_engine::{Config, Engine, PositionAnchor, State};
@@ -178,7 +180,6 @@ pub enum View {
     Search,
     Album,
     Playlist,
-    Login,
     Settings,
     /// Liked albums grid.
     Albums,
@@ -271,6 +272,29 @@ pub enum Command {
     Login {
         provider: String,
         token: Token,
+    },
+    /// Starts the provider's sign-in method number `method` (an index into
+    /// `ProviderStatus::sign_in`) that needs no input: a device code or the browser. Progress
+    /// arrives as `Event::SignIn`. A token is entered with `Login`, a password with
+    /// `SignInPassword`.
+    SignInStart {
+        provider: String,
+        method: usize,
+    },
+    /// Signs in with a login and password.
+    SignInPassword {
+        provider: String,
+        login: String,
+        password: Token,
+    },
+    /// Answers the second factor that `SignInState::SecondFactor` asked for.
+    SignInSecondFactor {
+        provider: String,
+        code: Token,
+    },
+    /// Abandons the provider's running sign-in.
+    SignInCancel {
+        provider: String,
     },
     /// Forgets the provider's token. Offline saves of its account go too unless `keep_saved`;
     /// likes and playlists stay.
@@ -425,6 +449,14 @@ pub struct SessionSnapshot {
 pub enum Event {
     /// Every provider with its sign-in state; sent whenever any of them changes.
     Providers(Vec<ProviderStatus>),
+    /// First start with nothing signed in: the UI should show the services, unless the user is
+    /// already somewhere else.
+    ServicesIntro,
+    /// The sign-in of one provider changed what it shows.
+    SignIn {
+        provider: String,
+        state: SignInState,
+    },
     /// `count` local likes could be sent to the connected `provider`; nothing is sent until the
     /// user answers with `Command::LikesBackfill`.
     LikesBackfillOffer {
@@ -630,6 +662,8 @@ enum Message {
     Source(u64, u64, TrackId),
     /// The network became reachable: deferred likes are sent now.
     NetworkOnline,
+    /// Progress of a provider's sign-in flow; generation 0 is a token sign-in.
+    SignIn(String, u64, SignInUpdate),
 }
 #[derive(Clone)]
 pub struct CommandSender(mpsc::Sender<Message>);
@@ -771,6 +805,10 @@ struct Worker {
     clock: Clock,
     /// When the earliest deferred like is due, if any is pending in the future.
     like_retry_at: Option<i64>,
+    /// Sign-in flows that are waiting for the user, by provider.
+    sign_ins: SignIns,
+    /// Whether the first answer about saved sign-ins has been looked at.
+    services_checked: bool,
 }
 impl Worker {
     #[cfg(test)]
@@ -915,6 +953,8 @@ impl Worker {
             view_generation: 0,
             search_ui_id: None,
             view: View::Library,
+            sign_ins: SignIns::default(),
+            services_checked: false,
             playlist_id: None,
             playlist_snapshot: None,
             playlist_edit_busy: false,
@@ -1238,6 +1278,11 @@ impl Worker {
                         self.engine_event(event)
                     }
                     Message::Engine(_, _) => {}
+                    Message::SignIn(provider, generation, update) => {
+                        if let Err(error) = self.sign_in_update(provider, generation, update) {
+                            (self.emit)(Event::Error(error.to_string()));
+                        }
+                    }
                     Message::NetworkOnline => self.send_flush_likes(true),
                     Message::Bitrate(generation, id, bitrate) => {
                         self.apply_bitrate(generation, id, bitrate);
@@ -1401,11 +1446,13 @@ impl Worker {
                                 self.downloads.account(self.account.clone());
                                 (self.emit)(Event::Account);
                                 (self.emit)(Event::Providers(self.providers.statuses()));
+                                self.show_services_once()?;
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
                             Ok(CatalogReply::Providers) => {
                                 (self.emit)(Event::Providers(self.providers.statuses()));
+                                self.show_services_once()?;
                                 self.background(Command::SyncCollections)?;
                                 self.background(Command::SyncLibrary)?;
                             }
@@ -1622,6 +1669,130 @@ impl Worker {
     }
     /// Forgets one provider's session. Its likes and playlists stay; offline saves of the
     /// account that owns them are removed unless `keep_saved`.
+    fn sign_in_event(&self, provider: &str, state: SignInState) {
+        (self.emit)(Event::SignIn {
+            provider: provider.to_owned(),
+            state,
+        });
+    }
+    fn sign_in_provider(&self, provider_id: &str) -> Result<Arc<dyn Provider>> {
+        Ok(self
+            .providers
+            .get(provider_id)
+            .ok_or("провайдер недоступен")?
+            .clone())
+    }
+    /// Starts `task` on a flow thread, replacing the provider's running flow.
+    fn sign_in_flow(&mut self, provider: Arc<dyn Provider>, task: sign_in::Task) -> Result<()> {
+        let id = provider.info().id;
+        let (generation, cancel) = self.sign_ins.begin(id);
+        self.sign_in_event(id, SignInState::Busy);
+        let tx = self.tx.clone();
+        let name = id.to_owned();
+        let spawned = sign_in::spawn(provider, task, cancel, move |update| {
+            tx.send(Message::SignIn(name.clone(), generation, update))
+                .is_ok()
+        });
+        if let Err(error) = spawned {
+            self.sign_ins.cancel(id);
+            self.sign_in_event(id, SignInState::Idle);
+            return Err(error.into());
+        }
+        log::info!(provider = id; "sign-in started");
+        Ok(())
+    }
+    /// Applies what a flow thread reported; reports of a replaced or cancelled flow are dropped.
+    fn sign_in_update(
+        &mut self,
+        provider: String,
+        generation: u64,
+        update: SignInUpdate,
+    ) -> Result<()> {
+        // Generation 0 is a token sign-in, which has no flow to look up.
+        match update {
+            SignInUpdate::Finished => {
+                self.sign_in_event(&provider, SignInState::Idle);
+                return Ok(());
+            }
+            SignInUpdate::Failed(text) if generation == 0 => {
+                self.sign_in_event(&provider, SignInState::Failed(text));
+                return Ok(());
+            }
+            _ => {}
+        }
+        let Some(active) = self.sign_ins.current(&provider, generation) else {
+            return Ok(());
+        };
+        match update {
+            SignInUpdate::Code { code, url } => {
+                active.shown = Some((code.clone(), url.clone()));
+                self.sign_in_event(
+                    &provider,
+                    SignInState::Code {
+                        code,
+                        url,
+                        expired: false,
+                    },
+                );
+            }
+            SignInUpdate::Browser { url } => {
+                active.browser = true;
+                self.sign_in_event(&provider, SignInState::Browser { url });
+            }
+            SignInUpdate::SecondFactor { hint, flow } => {
+                active.flow = Some(flow);
+                self.sign_in_event(&provider, SignInState::SecondFactor { hint });
+            }
+            SignInUpdate::Expired => {
+                let shown = active.shown.take().filter(|_| !active.browser);
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(
+                    &provider,
+                    match shown {
+                        Some((code, url)) => SignInState::Code {
+                            code,
+                            url,
+                            expired: true,
+                        },
+                        None => SignInState::Failed("Время на вход вышло".into()),
+                    },
+                );
+            }
+            SignInUpdate::Failed(text) => {
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(&provider, SignInState::Failed(text));
+            }
+            SignInUpdate::Done(token) => {
+                self.sign_ins.cancel(&provider);
+                log::info!(provider = provider.as_str(); "sign-in confirmed by the user");
+                // The same path as a typed token: saved only after the provider accepts it.
+                self.command(Command::Login { provider, token })?;
+            }
+            SignInUpdate::Finished => {}
+        }
+        Ok(())
+    }
+    /// The first time the app starts with nothing signed in, shows Settings, where the
+    /// services are the first section. Later starts keep the screen the user left.
+    fn show_services_once(&mut self) -> Result<()> {
+        if std::mem::replace(&mut self.services_checked, true) {
+            return Ok(());
+        }
+        if self.store.setting("services_intro")?.is_some() {
+            return Ok(());
+        }
+        self.store.put_setting("services_intro", "1".into())?;
+        let needs_account = self
+            .providers
+            .all()
+            .iter()
+            .any(|p| p.info().needs_sign_in());
+        let signed_in = self.providers.signed_in().any(|p| p.info().needs_sign_in());
+        if needs_account && !signed_in {
+            (self.emit)(Event::ServicesIntro);
+        }
+        Ok(())
+    }
     fn logout(&mut self, provider_id: &str, keep_saved: bool) -> Result<()> {
         let provider = self
             .providers
@@ -1629,6 +1800,8 @@ impl Worker {
             .ok_or("провайдер недоступен")?
             .clone();
         let id = provider.info().id;
+        self.sign_ins.cancel(id);
+        self.sign_in_event(id, SignInState::Idle);
         let owns_account = self.providers.account_provider().map(|p| p.info().id) == Some(id);
         let mut failure = None;
         if owns_account && !keep_saved {
@@ -2174,10 +2347,13 @@ impl Worker {
                 | Command::EnqueueNext(_)
                 | Command::Next
         );
-        if let Command::Login { provider, .. } = &command
-            && self.providers.account_provider().map(|p| p.info().id) == Some(provider.as_str())
-        {
-            self.downloads.account(String::new());
+        if let Command::Login { provider, .. } = &command {
+            if self.providers.account_provider().map(|p| p.info().id) == Some(provider.as_str()) {
+                self.downloads.account(String::new());
+            }
+            // A token typed now replaces whatever flow was waiting for the user.
+            self.sign_ins.cancel(provider);
+            self.sign_in_event(provider, SignInState::Busy);
         }
         match command {
             Command::RadioStart | Command::RadioMore => {
@@ -2514,7 +2690,7 @@ impl Worker {
                         (self.emit)(Event::LibraryReset(Vec::new()));
                     }
                     View::Album | View::Playlist | View::Artist => self.publish(Vec::new()),
-                    View::Login | View::Settings => {}
+                    View::Settings => {}
                     View::Radio => {
                         self.publish_radio();
                         self.emit_radio_state();
@@ -2597,6 +2773,65 @@ impl Worker {
                 provider,
                 keep_saved,
             } => self.logout(&provider, keep_saved)?,
+            Command::SignInStart { provider, method } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let method = provider
+                    .info()
+                    .sign_in
+                    .get(method)
+                    .copied()
+                    .ok_or("такого способа входа нет")?;
+                match method {
+                    SignInMethod::DeviceCode | SignInMethod::Browser => self.sign_in_flow(
+                        provider,
+                        sign_in::Task::Start {
+                            method,
+                            input: SignInInput::None,
+                        },
+                    )?,
+                    _ => return Err("этому способу входа нужны данные от пользователя".into()),
+                }
+            }
+            Command::SignInPassword {
+                provider,
+                login,
+                password,
+            } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let method = provider
+                    .info()
+                    .sign_in
+                    .iter()
+                    .copied()
+                    .find(|method| matches!(method, SignInMethod::Password { .. }))
+                    .ok_or("вход по паролю не поддерживается")?;
+                self.sign_in_flow(
+                    provider,
+                    sign_in::Task::Start {
+                        method,
+                        input: SignInInput::Password { login, password },
+                    },
+                )?;
+            }
+            Command::SignInSecondFactor { provider, code } => {
+                let provider = self.sign_in_provider(&provider)?;
+                let flow = self
+                    .sign_ins
+                    .get(provider.info().id)
+                    .and_then(|active| active.flow.take())
+                    .ok_or("вход не ждёт код")?;
+                self.sign_in_flow(
+                    provider,
+                    sign_in::Task::Continue {
+                        flow,
+                        code: Some(code),
+                    },
+                )?;
+            }
+            Command::SignInCancel { provider } => {
+                self.sign_ins.cancel(&provider);
+                self.sign_in_event(&provider, SignInState::Idle);
+            }
             Command::Album(id) => {
                 self.title.clear();
                 self.header = Header::default();
@@ -3328,6 +3563,13 @@ impl Catalog {
                             let _ =
                                 replies.send(Message::Catalog(generation, Box::new(Ok(partial))));
                         };
+                        let login = match &request {
+                            CatalogRequest::Command(_, Command::Login { provider, .. }) => {
+                                Some(provider.clone())
+                            }
+                            _ => None,
+                        };
+                        let mut login_failure = None;
                         let reply =
                             match &request {
                                 CatalogRequest::Command(_, Command::Search(query)) => {
@@ -3342,15 +3584,33 @@ impl Catalog {
                                     .search_cards_merged(CardKind::Playlists, query, &send_partial),
                                 _ => self.request(request),
                             }
-                            .map_err(|e| e.to_string());
+                            .map_err(|e| {
+                                if login.is_some() {
+                                    login_failure = Some(match e.downcast_ref::<ProviderError>() {
+                                        Some(error) => sign_in::failure_text(error, true),
+                                        None => "Не получилось войти".into(),
+                                    });
+                                }
+                                e.to_string()
+                            });
                         let reply = if mutation {
                             Ok(reply.unwrap_or_else(CatalogReply::PlaylistFailed))
                         } else {
                             reply
                         };
+                        let sign_in_update = login.map(|provider| {
+                            let update = match &reply {
+                                Ok(_) => SignInUpdate::Finished,
+                                Err(_) => {
+                                    SignInUpdate::Failed(login_failure.take().unwrap_or_default())
+                                }
+                            };
+                            Message::SignIn(provider, 0, update)
+                        });
                         if replies
                             .send(Message::Catalog(generation, Box::new(reply)))
                             .is_err()
+                            || sign_in_update.is_some_and(|message| replies.send(message).is_err())
                             || !self.report_likes_pending(&replies)
                         {
                             break;
@@ -4331,7 +4591,7 @@ impl Catalog {
                     .get(&provider)
                     .ok_or("провайдер недоступен")?
                     .clone();
-                if !matches!(provider.info().auth, AuthMethod::Token { .. }) {
+                if !provider.info().accepts_token() {
                     return Err("этот провайдер не требует входа токеном".into());
                 }
                 let account = self.providers.sign_in(provider.as_ref(), token)?;
@@ -6304,10 +6564,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::Token {
+                sign_in: &[SignInMethod::Token {
                     hint: "",
                     help_url: None,
-                },
+                }],
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -6315,6 +6575,7 @@ mod sync_tests {
         fn account(&self) -> std::result::Result<Account, ProviderError> {
             Ok(Account {
                 id: "1".into(),
+                name: None,
                 subscription: true,
                 capabilities: Capabilities::default(),
             })
@@ -6590,6 +6851,7 @@ mod sync_tests {
             "yandex",
             Some(Account {
                 id: "1".into(),
+                name: None,
                 subscription: true,
                 capabilities: fixture_capabilities(),
             }),
@@ -6621,10 +6883,10 @@ mod sync_tests {
             static INFO: ProviderInfo = ProviderInfo {
                 id: "yandex",
                 name: "yandex",
-                auth: AuthMethod::Token {
+                sign_in: &[SignInMethod::Token {
                     hint: "",
                     help_url: None,
-                },
+                }],
                 capabilities: fixture_capabilities(),
             };
             &INFO
@@ -8252,5 +8514,251 @@ mod like_delivery_tests {
         h.worker.refresh_like_deadline();
         assert_eq!(h.worker.like_wait(), None);
         assert!(!h.worker.like_due());
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+    use eagle_provider_sdk::testkit::{FAKE_SECOND_FACTOR, FakeProvider};
+
+    struct Harness {
+        session: Option<Session>,
+        events: mpsc::Receiver<Event>,
+        root: PathBuf,
+    }
+    impl Harness {
+        fn start(tag: &str, provider: Arc<FakeProvider>) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("eagle-sign-in-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            Self::restart(root, provider)
+        }
+        fn restart(root: PathBuf, provider: Arc<FakeProvider>) -> Self {
+            let (tx, events) = mpsc::channel();
+            let session =
+                Session::start_with_providers(root.clone(), vec![provider], move |event| {
+                    let _ = tx.send(event);
+                })
+                .unwrap();
+            Self {
+                session: Some(session),
+                events,
+                root,
+            }
+        }
+        fn send(&self, command: Command) {
+            self.session
+                .as_ref()
+                .unwrap()
+                .sender()
+                .send(command)
+                .unwrap();
+        }
+        /// Skips events until `predicate` holds for one of them.
+        fn wait(&self, what: &str, predicate: impl Fn(&Event) -> bool) -> Event {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match self.events.recv_timeout(left) {
+                    Ok(event) if predicate(&event) => return event,
+                    Ok(_) => {}
+                    Err(_) => panic!("no event: {what}"),
+                }
+            }
+        }
+        fn state(&self, what: &str, predicate: impl Fn(&SignInState) -> bool) -> SignInState {
+            match self.wait(
+                what,
+                |event| matches!(event, Event::SignIn { state, .. } if predicate(state)),
+            ) {
+                Event::SignIn { state, .. } => state,
+                _ => unreachable!(),
+            }
+        }
+        fn signed_in(&self) {
+            self.wait("signed in", |event| {
+                matches!(event, Event::Providers(all) if all.iter().any(|p| p.id == "fakea" && p.signed_in))
+            });
+        }
+        fn quit(mut self) {
+            drop(self.session.take());
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    fn start_flow() -> Command {
+        Command::SignInStart {
+            provider: "fakea".into(),
+            method: 0,
+        }
+    }
+
+    #[test]
+    fn device_code_flow_shows_the_code_and_signs_in() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_device_code(2));
+        let h = Harness::start("code", fake.clone());
+        h.send(start_flow());
+        h.state("busy", |s| *s == SignInState::Busy);
+        let code = h.state("code", |s| matches!(s, SignInState::Code { .. }));
+        assert_eq!(
+            code,
+            SignInState::Code {
+                code: "ABC-123".into(),
+                url: "https://example.test/device".into(),
+                expired: false
+            }
+        );
+        h.signed_in();
+        h.state("idle", |s| *s == SignInState::Idle);
+        assert_eq!(fake.sign_in_starts(), 1);
+        h.quit();
+    }
+
+    #[test]
+    fn expired_code_is_kept_on_screen_marked_expired_and_nobody_signs_in() {
+        let fake = Arc::new(
+            FakeProvider::new("fakea")
+                .signed_out()
+                .with_device_code(0)
+                .expiring(),
+        );
+        let h = Harness::start("expired", fake);
+        h.send(start_flow());
+        let state = h.state("expired", |s| {
+            matches!(s, SignInState::Code { expired: true, .. })
+        });
+        assert!(matches!(state, SignInState::Code { code, .. } if code == "ABC-123"));
+        // A new code can be requested right away.
+        h.send(start_flow());
+        h.state("second code", |s| {
+            matches!(s, SignInState::Code { expired: false, .. })
+        });
+        h.quit();
+    }
+
+    #[test]
+    fn cancelling_stops_the_polling() {
+        let fake = Arc::new(
+            FakeProvider::new("fakea")
+                .signed_out()
+                .with_device_code(usize::MAX),
+        );
+        let h = Harness::start("cancel", fake.clone());
+        h.send(start_flow());
+        h.state("code", |s| matches!(s, SignInState::Code { .. }));
+        h.send(Command::SignInCancel {
+            provider: "fakea".into(),
+        });
+        h.state("idle", |s| *s == SignInState::Idle);
+        thread::sleep(Duration::from_millis(100));
+        let polls = fake.sign_in_polls();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(fake.sign_in_polls(), polls);
+        h.quit();
+    }
+
+    #[test]
+    fn password_then_second_factor_signs_in() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("password", fake);
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("secret".into()),
+        });
+        let state = h.state("second factor", |s| {
+            matches!(s, SignInState::SecondFactor { .. })
+        });
+        assert_eq!(
+            state,
+            SignInState::SecondFactor {
+                hint: "из приложения".into()
+            }
+        );
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new(FAKE_SECOND_FACTOR.into()),
+        });
+        h.signed_in();
+        h.quit();
+    }
+
+    #[test]
+    fn wrong_password_and_wrong_second_factor_fail() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("password-fail", fake);
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("wrong".into()),
+        });
+        h.state("failed", |s| {
+            *s == SignInState::Failed("Не получилось войти".into())
+        });
+        h.send(Command::SignInPassword {
+            provider: "fakea".into(),
+            login: "anna".into(),
+            password: Token::new("secret".into()),
+        });
+        h.state("second factor", |s| {
+            matches!(s, SignInState::SecondFactor { .. })
+        });
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new("111111".into()),
+        });
+        h.state("failed again", |s| matches!(s, SignInState::Failed(_)));
+        h.quit();
+    }
+
+    #[test]
+    fn second_factor_without_a_waiting_flow_is_an_error() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out().with_password(true));
+        let h = Harness::start("no-flow", fake);
+        h.send(Command::SignInSecondFactor {
+            provider: "fakea".into(),
+            code: Token::new("000000".into()),
+        });
+        h.wait("error", |event| matches!(event, Event::Error(_)));
+        h.quit();
+    }
+
+    #[test]
+    fn rejected_token_keeps_the_provider_signed_out() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out());
+        let h = Harness::start("token", fake);
+        h.send(Command::Login {
+            provider: "fakea".into(),
+            token: Token::new(String::new()),
+        });
+        h.state("busy", |s| *s == SignInState::Busy);
+        h.state("failed", |s| {
+            *s == SignInState::Failed("Токен не подошёл".into())
+        });
+        h.send(Command::Login {
+            provider: "fakea".into(),
+            token: Token::new("good".into()),
+        });
+        h.signed_in();
+        h.state("idle", |s| *s == SignInState::Idle);
+        h.quit();
+    }
+
+    #[test]
+    fn first_start_without_accounts_opens_settings_once() {
+        let fake = Arc::new(FakeProvider::new("fakea").signed_out());
+        let h = Harness::start("intro", fake.clone());
+        h.wait("intro", |event| matches!(event, Event::ServicesIntro));
+        let root = h.root.clone();
+        drop(h.session);
+        let h = Harness::restart(root, fake);
+        h.wait("providers", |event| matches!(event, Event::Providers(_)));
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !h.events
+                .try_iter()
+                .any(|event| matches!(event, Event::ServicesIntro))
+        );
+        h.quit();
     }
 }

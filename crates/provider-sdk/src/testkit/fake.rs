@@ -3,11 +3,11 @@
 
 //! In-memory provider with a configurable catalog, sign-in state and failure injection.
 
-use crate::AuthMethod;
 use crate::{
     Account, Album, Artist, ArtistPage, Availability, Capabilities, Encryption, Page, Playlist,
     PlaylistSnapshot, Provider, ProviderError, ProviderInfo, Quality, RadioBatch, RadioError,
-    RadioSession, RadioTuning, SignedUrl, Stream, Token, Track, TrackId,
+    RadioSession, RadioTuning, SignInFlow, SignInInput, SignInMethod, SignInStep, SignedUrl,
+    Stream, Token, Track, TrackId,
 };
 use std::{
     sync::{Mutex, MutexGuard, PoisonError},
@@ -20,6 +20,28 @@ const PAGE_SIZE: usize = 20;
 
 type Failure = Box<dyn Fn() -> ProviderError + Send + Sync>;
 
+/// The token a successful scripted sign-in produces; `login` accepts it.
+pub const FAKE_SIGN_IN_TOKEN: &str = "fake-sign-in-token";
+/// Second factor accepted by the scripted password flow.
+pub const FAKE_SECOND_FACTOR: &str = "000000";
+/// Password rejected by the scripted password flow.
+pub const FAKE_WRONG_PASSWORD: &str = "wrong";
+
+/// Scripted multi-step sign-in of a `FakeProvider`.
+#[derive(Clone, Default)]
+struct SignInScript {
+    /// Polls of the device-code flow that answer `Pending` before the flow ends.
+    device_code: Option<usize>,
+    /// Polls of the browser flow that answer `Pending` before it ends.
+    browser: Option<usize>,
+    /// The device-code and browser flows end with `Expired` instead of `Done`.
+    expires: bool,
+    password: bool,
+    second_factor: bool,
+    interval: Duration,
+    expires_in: Duration,
+}
+
 /// Configurable provider for host and provider tests.
 ///
 /// Every network-like method checks, in order, the injected failure and the sign-in state.
@@ -31,6 +53,7 @@ pub struct FakeProvider {
     failure: Option<Failure>,
     track_failure: Option<Failure>,
     delay: Duration,
+    script: SignInScript,
     state: Mutex<State>,
 }
 
@@ -44,6 +67,8 @@ struct State {
     set_liked_calls: Vec<(TrackId, bool)>,
     radio_tunings: Vec<RadioTuning>,
     search_calls: usize,
+    sign_in_starts: usize,
+    sign_in_polls: usize,
 }
 
 impl FakeProvider {
@@ -69,10 +94,10 @@ impl FakeProvider {
             info: ProviderInfo {
                 id,
                 name: id,
-                auth: AuthMethod::Token {
+                sign_in: &[SignInMethod::Token {
                     hint: "fake token",
                     help_url: None,
-                },
+                }],
                 capabilities,
             },
             tracks: Vec::new(),
@@ -81,6 +106,11 @@ impl FakeProvider {
             failure: None,
             track_failure: None,
             delay: Duration::ZERO,
+            script: SignInScript {
+                interval: Duration::from_millis(5),
+                expires_in: Duration::from_secs(300),
+                ..SignInScript::default()
+            },
             state: Mutex::new(State {
                 signed_in: true,
                 failing: false,
@@ -90,6 +120,8 @@ impl FakeProvider {
                 set_liked_calls: Vec::new(),
                 radio_tunings: Vec::new(),
                 search_calls: 0,
+                sign_in_starts: 0,
+                sign_in_polls: 0,
             }),
         }
     }
@@ -116,6 +148,69 @@ impl FakeProvider {
     pub fn signed_out(mut self) -> Self {
         self.state_mut().signed_in = false;
         self
+    }
+
+    /// Replaces the sign-in methods the provider declares (the default is one token method).
+    pub fn with_sign_in_methods(mut self, methods: &'static [SignInMethod]) -> Self {
+        self.info.sign_in = methods;
+        self
+    }
+
+    /// Adds a device-code flow as the preferred method: `sign_in_start` answers `ShowCode`,
+    /// then `sign_in_continue` answers `Pending` `pending` times and finishes with
+    /// `Done(FAKE_SIGN_IN_TOKEN)`.
+    pub fn with_device_code(mut self, pending: usize) -> Self {
+        self.script.device_code = Some(pending);
+        self.add_method(SignInMethod::DeviceCode);
+        self
+    }
+
+    /// Adds a browser flow with the same polling script as `with_device_code`.
+    pub fn with_browser_sign_in(mut self, pending: usize) -> Self {
+        self.script.browser = Some(pending);
+        self.add_method(SignInMethod::Browser);
+        self
+    }
+
+    /// Makes the device-code and browser flows end with `Expired` instead of `Done`.
+    pub fn expiring(mut self) -> Self {
+        self.script.expires = true;
+        self
+    }
+
+    /// Adds a password flow: a password other than `FAKE_WRONG_PASSWORD` is accepted; with
+    /// `second_factor` the host must then submit `FAKE_SECOND_FACTOR`.
+    pub fn with_password(mut self, second_factor: bool) -> Self {
+        self.script.password = true;
+        self.script.second_factor = second_factor;
+        self.add_method(SignInMethod::Password {
+            login_hint: "fake login",
+        });
+        self
+    }
+
+    /// Polling interval and code lifetime reported by the scripted flows.
+    pub fn with_sign_in_timing(mut self, interval: Duration, expires_in: Duration) -> Self {
+        self.script.interval = interval;
+        self.script.expires_in = expires_in;
+        self
+    }
+
+    /// Number of `sign_in_start` calls that started a scripted flow.
+    pub fn sign_in_starts(&self) -> usize {
+        self.lock().sign_in_starts
+    }
+
+    /// Number of `sign_in_continue` calls, including second-factor submissions.
+    pub fn sign_in_polls(&self) -> usize {
+        self.lock().sign_in_polls
+    }
+
+    /// Declares `method` first; the slice is leaked, which is fine for a test double.
+    fn add_method(&mut self, method: SignInMethod) {
+        let mut methods = vec![method];
+        methods.extend_from_slice(self.info.sign_in);
+        self.info.sign_in = Box::leak(methods.into_boxed_slice());
     }
 
     /// Local ids for which `resolve_stream` returns `Unavailable`.
@@ -211,6 +306,7 @@ impl FakeProvider {
     fn account_value(&self) -> Account {
         Account {
             id: "fake-uid".into(),
+            name: Some("fake-user".into()),
             subscription: true,
             capabilities: self.info.capabilities,
         }
@@ -398,6 +494,92 @@ impl Provider for FakeProvider {
         }
         self.lock().signed_in = true;
         Ok(self.account_value())
+    }
+
+    fn sign_in_start(
+        &self,
+        method: SignInMethod,
+        input: SignInInput,
+    ) -> Result<SignInStep, ProviderError> {
+        let declared = self
+            .info
+            .sign_in
+            .iter()
+            .any(|m| std::mem::discriminant(m) == std::mem::discriminant(&method));
+        if !declared {
+            return Err(ProviderError::Unavailable);
+        }
+        let script = &self.script;
+        let step = match (method, input) {
+            (SignInMethod::DeviceCode, _) if script.device_code.is_some() => SignInStep::ShowCode {
+                code: "ABC-123".into(),
+                url: "https://example.test/device".into(),
+                interval: script.interval,
+                expires_in: script.expires_in,
+                flow: SignInFlow(Token::new("device".into())),
+            },
+            (SignInMethod::Browser, _) if script.browser.is_some() => SignInStep::OpenBrowser {
+                url: "https://example.test/login".into(),
+                interval: script.interval,
+                flow: SignInFlow(Token::new("browser".into())),
+            },
+            (SignInMethod::Password { .. }, SignInInput::Password { login, password })
+                if script.password =>
+            {
+                if login.is_empty()
+                    || password.expose().is_empty()
+                    || password.expose() == FAKE_WRONG_PASSWORD
+                {
+                    return Err(ProviderError::Auth);
+                }
+                if script.second_factor {
+                    SignInStep::SecondFactor {
+                        hint: "из приложения".into(),
+                        flow: SignInFlow(Token::new("second-factor".into())),
+                    }
+                } else {
+                    SignInStep::Done(Token::new(FAKE_SIGN_IN_TOKEN.into()))
+                }
+            }
+            _ => return Err(ProviderError::Unavailable),
+        };
+        self.lock().sign_in_starts += 1;
+        Ok(step)
+    }
+
+    fn sign_in_continue(
+        &self,
+        flow: &SignInFlow,
+        code: Option<Token>,
+    ) -> Result<SignInStep, ProviderError> {
+        let polls = {
+            let mut state = self.lock();
+            state.sign_in_polls += 1;
+            state.sign_in_polls
+        };
+        let script = &self.script;
+        match (flow.0.expose(), code) {
+            ("device" | "browser", None) => {
+                let pending = if flow.0.expose() == "device" {
+                    script.device_code
+                } else {
+                    script.browser
+                }
+                .unwrap_or(0);
+                Ok(if polls <= pending {
+                    SignInStep::Pending
+                } else if script.expires {
+                    SignInStep::Expired
+                } else {
+                    SignInStep::Done(Token::new(FAKE_SIGN_IN_TOKEN.into()))
+                })
+            }
+            ("second-factor", Some(code)) if code.expose() == FAKE_SECOND_FACTOR => {
+                Ok(SignInStep::Done(Token::new(FAKE_SIGN_IN_TOKEN.into())))
+            }
+            ("second-factor", Some(_)) => Err(ProviderError::Auth),
+            _ => Err(ProviderError::Unavailable),
+        }
     }
 
     fn logout(&self) {
