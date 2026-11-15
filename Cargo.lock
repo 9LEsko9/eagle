@@ -1530,12 +1530,14 @@ dependencies = [
  "eagle-palette",
  "eagle-platform",
  "eagle-provider-sdk",
+ "eagle-soundcloud",
  "eagle-store",
  "eagle-yandex",
  "log",
  "rpassword",
  "serde_json",
  "sha2",
+ "url",
 ]
 
 [[package]]
@@ -1648,6 +1650,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eagle-soundcloud"
+version = "0.1.0"
+dependencies = [
+ "eagle-provider-sdk",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "eagle-store"
 version = "0.1.0"
 dependencies = [
@@ -1667,8 +1678,10 @@ dependencies = [
  "eagle-app",
  "eagle-core",
  "eagle-engine",
+ "eagle-net",
  "eagle-palette",
  "eagle-platform",
+ "eagle-provider-sdk",
  "eagle-store",
  "i-slint-backend-testing",
  "image",

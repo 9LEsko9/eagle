@@ -426,6 +426,7 @@ pub struct Collection {
 }
 #[derive(Clone)]
 pub struct SessionSnapshot {
+    pub providers: Vec<crate::providers::ProviderStatus>,
     pub view: View,
     pub rows: Vec<LibraryItem>,
     pub cards: Vec<Card>,
@@ -1148,6 +1149,7 @@ impl Worker {
     }
     fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
+            providers: self.providers.statuses(),
             view: self.view,
             rows: self.rows.clone(),
             cards: self.cards.clone(),
@@ -1800,7 +1802,11 @@ impl Worker {
             .all()
             .iter()
             .any(|p| p.info().needs_sign_in());
-        let signed_in = self.providers.signed_in().any(|p| p.info().needs_sign_in());
+        let signed_in = self
+            .providers
+            .all()
+            .iter()
+            .any(|p| self.providers.account(p.info().id).is_some());
         if needs_account && !signed_in {
             (self.emit)(Event::ServicesIntro);
         }
@@ -1828,7 +1834,20 @@ impl Worker {
                 }
             }
         }
-        self.providers.sign_out(provider.as_ref())?;
+        let sign_out = self.providers.sign_out(provider.as_ref());
+        if let Some(search_id) = self.search_ui_id {
+            self.view_generation += 1;
+            self.rows.clear();
+            self.cards.clear();
+            self.busy = false;
+            (self.emit)(Event::Busy(false));
+            (self.emit)(Event::SearchResults {
+                id: search_id,
+                rows: Vec::new(),
+                cards: Vec::new(),
+            });
+        }
+        sign_out?;
         let account_setting = account_key(id);
         self.store.write(move |c| {
             c.execute("DELETE FROM settings WHERE key=?1", [account_setting])?;
@@ -3699,7 +3718,7 @@ impl Catalog {
     /// Next signed-in provider with likes that this sync run has not handled yet.
     fn next_likes_provider(&self, state: &SyncState) -> Option<Arc<dyn Provider>> {
         self.providers
-            .with_capability(|c| c.likes)
+            .with_capability(|c| c.likes || c.likes_read)
             .find(|p| !state.done.iter().any(|d| d == p.info().id))
             .cloned()
     }
@@ -3787,10 +3806,21 @@ impl Catalog {
                     .iter()
                     .filter_map(|id| id.parse().ok())
                     .collect();
-                match self.store.sync_provider_likes(provider_id, &ids) {
+                let writable = self.providers.effective(provider.as_ref()).likes;
+                let synced = if writable {
+                    self.store.sync_provider_likes(provider_id, &ids)
+                } else {
+                    self.store.sync_readonly_provider_likes(provider_id, &ids)
+                };
+                match synced {
                     Ok(_) => {
                         self.resolve_unresolved_likes(provider.as_ref());
-                        Ok((Some(self.backfill_after_sync(provider_id)), false))
+                        let reply = if writable {
+                            self.backfill_after_sync(provider_id)
+                        } else {
+                            CatalogReply::Synced
+                        };
+                        Ok((Some(reply), false))
                     }
                     Err(error) => {
                         log::warn!(provider = provider_id, error = error.to_string().as_str(); "liked tracks sync failed");
@@ -4393,6 +4423,9 @@ impl Catalog {
                 let mut restored = false;
                 let mut changed = false;
                 for provider in self.providers.all() {
+                    if !provider.info().needs_sign_in() {
+                        continue;
+                    }
                     let Ok(account) = self.providers.restore(provider.as_ref()) else {
                         continue;
                     };
@@ -4697,6 +4730,7 @@ fn seed_track(store: &Store, id: &str) {
                 duration_ms: 1000,
                 cover: None,
                 availability: Availability::Available,
+                source_url: None,
                 isrc: None,
             })
             .unwrap();
@@ -5558,6 +5592,7 @@ mod delta_tests {
                 duration_ms: 1000,
                 cover: None,
                 availability: Availability::Available,
+                source_url: None,
                 isrc: None,
             }),
             liked,
@@ -6429,6 +6464,7 @@ mod lifecycle_tests {
                     duration_ms: 1000,
                     cover: None,
                     availability: Availability::Available,
+                    source_url: None,
                     isrc: None,
                 })
                 .unwrap();
@@ -6484,6 +6520,7 @@ mod lifecycle_tests {
                     duration_ms: 1000,
                     cover: None,
                     availability: Availability::Available,
+                    source_url: None,
                     isrc: None,
                 })
                 .unwrap();
@@ -6728,6 +6765,7 @@ mod sync_tests {
                 duration_ms: 1,
                 cover: None,
                 availability: Availability::Available,
+                source_url: None,
                 isrc: None,
             };
             let snapshot = PlaylistSnapshot {
@@ -6932,6 +6970,7 @@ mod sync_tests {
                     duration_ms: 1,
                     cover: None,
                     availability: Availability::Available,
+                    source_url: None,
                     isrc: None,
                 }],
                 cover: Some("image/%%".into()),
@@ -7049,6 +7088,7 @@ mod sync_tests {
                 duration_ms: 1,
                 cover: None,
                 availability: Availability::Available,
+                source_url: None,
                 isrc: None,
             };
             Ok(Page {
@@ -7973,6 +8013,22 @@ mod sync_tests {
             .collect()
     }
     #[test]
+    fn logout_invalidates_in_flight_search() {
+        let (mut worker, _, _) = logout_worker("search");
+        worker.search_ui_id = Some(42);
+        let generation = worker.view_generation;
+        worker
+            .command(Command::Logout {
+                provider: "fakeb".into(),
+                keep_saved: true,
+            })
+            .unwrap();
+        assert!(worker.view_generation > generation);
+        assert!(worker.rows.is_empty());
+        assert!(worker.cards.is_empty());
+    }
+
+    #[test]
     fn logout_forgets_one_provider_and_keeps_likes_and_the_others_data() {
         let (mut worker, tokens, seen) = logout_worker("forget");
         assert_eq!(saved(&worker), ["fakea:1", "fakeb:2"]);
@@ -8098,6 +8154,32 @@ mod sync_tests {
             }
         }
         last.unwrap()
+    }
+    #[test]
+    fn readonly_likes_sync_without_remote_writes_or_backfill_offer() {
+        use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
+        let track = fake_track("fakea", "1", "Song", "Artist", 1000);
+        let mut capabilities = Capabilities::none();
+        capabilities.likes_read = true;
+        let fake = Arc::new(
+            FakeProvider::new("fakea")
+                .with_capabilities(capabilities)
+                .with_tracks(vec![track.clone()]),
+        );
+        fake.set_liked(&track.id, true).unwrap();
+        let all: Vec<Arc<dyn Provider>> = vec![fake.clone()];
+        let providers = Arc::new(Providers::new(all, &[]));
+        providers.set_account("fakea", Some(fake.login(Token::new("t".into())).unwrap()));
+        let c = catalog_with(providers);
+        assert!(matches!(sync_likes_of(&c, "fakea"), CatalogReply::Synced));
+        assert!(c.store.is_liked(&track.id).unwrap());
+        c.command(Command::Like(track.id.clone())).unwrap();
+        assert!(!c.store.is_liked(&track.id).unwrap());
+        assert!(matches!(sync_likes_of(&c, "fakea"), CatalogReply::Synced));
+        assert!(matches!(sync_likes_of(&c, "fakea"), CatalogReply::Synced));
+        assert!(!c.store.is_liked(&track.id).unwrap());
+        assert_eq!(fake.set_liked_calls().len(), 1);
+        assert_eq!(pending_likes(&c, "fakea"), 0);
     }
     #[test]
     fn old_likes_are_offered_to_a_new_provider_and_sent_only_after_consent() {

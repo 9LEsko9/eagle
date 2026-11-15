@@ -33,9 +33,19 @@ fn image(cover: &eagle_palette::Cover) -> slint::Image {
         ),
     )
 }
-fn track_item(item: LibraryItem) -> TrackItem {
+fn track_item(item: LibraryItem, ui: &DesktopWindow) -> TrackItem {
     let seconds = item.track.duration_ms / 1000;
+    let source = ui
+        .global::<Ui>()
+        .get_providers()
+        .iter()
+        .find(|p| p.id == item.track.id.provider());
     TrackItem {
+        source_url: item.track.source_url.as_deref().unwrap_or_default().into(),
+        source_logo: source
+            .as_ref()
+            .map_or_else(slint::Image::default, |p| p.attribution_logo.clone()),
+        source_name: source.map_or_else(Default::default, |p| p.name),
         occurrence: Default::default(),
         blocked_reason: item.blocked_reason.clone().unwrap_or_default().into(),
         id: item.track.id.to_string().into(),
@@ -239,7 +249,25 @@ fn provider_item(
     let mut item = ProviderItem {
         id: status.id.as_str().into(),
         name: status.name.as_str().into(),
-        signed_in: status.signed_in,
+        attribution_logo: status
+            .attribution_logo
+            .and_then(|bytes| image::load_from_memory(bytes).ok())
+            .map_or_else(slint::Image::default, |image| {
+                let rgba = image.to_rgba8();
+                slint::Image::from_rgba8(
+                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &rgba,
+                        rgba.width(),
+                        rgba.height(),
+                    ),
+                )
+            }),
+        signed_in: if status.sign_in.is_empty() {
+            status.signed_in
+        } else {
+            status.account_connected
+        },
+        guest: status.signed_in && !status.account_connected && !status.sign_in.is_empty(),
         account: status.account_name.clone().unwrap_or_default().into(),
         methods: Rc::new(VecModel::from(methods)).into(),
         phase: SignInPhase::Idle,
@@ -347,7 +375,7 @@ impl Bridge {
                             .any(|id| id.provider() == provider.as_str())
                 })
                 .cloned()
-                .map(track_item)
+                .map(|item| track_item(item, ui))
                 .collect::<Vec<_>>(),
         );
         self.refresh_rows(ui);
@@ -597,6 +625,7 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
             let radio_notice = snapshot.radio_notice.clone();
             let wave = snapshot.wave.clone();
             ui.global::<Ui>().set_signed_in(snapshot.signed_in);
+            apply(ui, Event::Providers(snapshot.providers), bridge);
             apply(ui, Event::View(snapshot.view), bridge);
             apply(ui, Event::Collections(snapshot.collections), bridge);
             apply(
@@ -769,12 +798,15 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .into_iter()
                 .enumerate()
                 .map(|(index, track)| {
-                    let mut item = track_item(LibraryItem {
-                        sources: Vec::new(),
-                        blocked_reason: None,
-                        track,
-                        liked: false,
-                    });
+                    let mut item = track_item(
+                        LibraryItem {
+                            sources: Vec::new(),
+                            blocked_reason: None,
+                            track,
+                            liked: false,
+                        },
+                        ui,
+                    );
                     item.occurrence = ids
                         .get(start + index)
                         .map_or_else(String::new, u64::to_string)
@@ -891,6 +923,13 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                     .find(|p| p.id == key)
                     .map_or_else(|| key.into(), |p| p.name);
                 player.set_source(name);
+                player.set_source_url(track.source_url.as_deref().unwrap_or_default().into());
+                player.set_source_logo(
+                    providers
+                        .iter()
+                        .find(|p| p.id == key)
+                        .map_or_else(slint::Image::default, |p| p.attribution_logo),
+                );
                 player.set_artist(
                     track
                         .artists
@@ -909,6 +948,8 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 player.set_title("".into());
                 player.set_artist("".into());
                 player.set_source("".into());
+                player.set_source_url("".into());
+                player.set_source_logo(slint::Image::default());
                 player.set_length(0.);
                 player.set_shown(0.);
                 player.set_cover(slint::Image::default());
@@ -973,10 +1014,10 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 match change {
                     LibraryDelta::Insert { index, item } => {
                         structural = true;
-                        rows.insert(index, track_item(item));
+                        rows.insert(index, track_item(item, ui));
                     }
                     LibraryDelta::Update { index, item } => {
-                        let mut row = track_item(item);
+                        let mut row = track_item(item, ui);
                         // Keep loaded artwork across like toggles: no flicker.
                         if let Some(old) = rows.row_data(index)
                             && old.id == row.id
@@ -1002,7 +1043,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 return;
             }
             bridge.clear_rows();
-            rows.set_vec(items.into_iter().map(track_item).collect::<Vec<_>>());
+            rows.set_vec(
+                items
+                    .into_iter()
+                    .map(|item| track_item(item, ui))
+                    .collect::<Vec<_>>(),
+            );
             bridge.refresh_rows(ui);
         }
         Event::Storage {
@@ -1632,6 +1678,12 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     });
     let tx = sender.clone();
     actions.on_logout(move |provider| {
+        with_bridge(|bridge| {
+            bridge.search_id.set(bridge.search_id.get().wrapping_add(1));
+            bridge.search_rows.borrow_mut().clear();
+            bridge.search_cards.borrow_mut().clear();
+        });
+        let _ = tx.send(Command::InvalidateSearch);
         let _ = tx.send(Command::Logout {
             provider: provider.to_string(),
             keep_saved: false,
@@ -1773,6 +1825,126 @@ pub(super) mod tests {
             Some(Event::Position(_))
         ));
     }
+    #[test]
+    fn provider_list_is_restored_from_each_window_snapshot() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root =
+            std::env::temp_dir().join(format!("eagle-provider-snapshot-{}", std::process::id()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let providers: Vec<Arc<dyn eagle_core::Provider>> = ["fakea", "fakeb"]
+            .into_iter()
+            .map(|id| {
+                Arc::new(eagle_provider_sdk::testkit::FakeProvider::new(id).signed_out())
+                    as Arc<dyn eagle_core::Provider>
+            })
+            .collect();
+        let session = eagle_app::session::Session::start_with_providers(
+            root.clone(),
+            providers,
+            move |event| {
+                let _ = tx.send(event);
+            },
+        )
+        .unwrap();
+        let bridge = Bridge {
+            services: Services::default(),
+            rows: Rc::new(VecModel::default()),
+            search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
+            search_id: Cell::new(0),
+            cards: Rc::new(VecModel::default()),
+            anchor: Arc::new(Mutex::new(None)),
+            sender: session.sender(),
+            row_window: Cell::new((0, 0)),
+            card_window: Cell::new((0, 0)),
+            images: RefCell::new(HashMap::new()),
+            queue_ids: RefCell::new(Vec::new()),
+            queue_current: Cell::new(None),
+        };
+        for _ in 0..2 {
+            // A new window starts with an empty model; earlier provider events may have been dropped.
+            bridge.services.attached.set(false);
+            let ui = DesktopWindow::new().unwrap();
+            assert_eq!(ui.global::<Ui>().get_providers().row_count(), 0);
+            session.sender().send(Command::Snapshot).unwrap();
+            let snapshot = loop {
+                match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    Event::Snapshot(snapshot) => break snapshot,
+                    _ => continue,
+                }
+            };
+            apply(&ui, Event::Snapshot(snapshot), &bridge);
+            let model = ui.global::<Ui>().get_providers();
+            assert_eq!(model.row_count(), 2);
+            assert_eq!(model.row_data(0).unwrap().id.as_str(), "fakea");
+            assert_eq!(model.row_data(1).unwrap().id.as_str(), "fakeb");
+            assert!(!model.row_data(0).unwrap().signed_in);
+            assert!(!model.row_data(1).unwrap().signed_in);
+        }
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builtin_provider_list_reaches_each_window_snapshot() {
+        i_slint_backend_testing::init_no_event_loop();
+        let root =
+            std::env::temp_dir().join(format!("eagle-builtin-snapshot-{}", std::process::id()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let providers = eagle_app::providers::builtin(Arc::new(eagle_net::Client::new().unwrap()));
+        let session = eagle_app::session::Session::start_with_providers(
+            root.clone(),
+            providers,
+            move |event| {
+                let _ = tx.send(event);
+            },
+        )
+        .unwrap();
+        let bridge = Bridge {
+            services: Services::default(),
+            rows: Rc::new(VecModel::default()),
+            search_rows: RefCell::new(Vec::new()),
+            search_cards: RefCell::new(Vec::new()),
+            search_id: Cell::new(0),
+            cards: Rc::new(VecModel::default()),
+            anchor: Arc::new(Mutex::new(None)),
+            sender: session.sender(),
+            row_window: Cell::new((0, 0)),
+            card_window: Cell::new((0, 0)),
+            images: RefCell::new(HashMap::new()),
+            queue_ids: RefCell::new(Vec::new()),
+            queue_current: Cell::new(None),
+        };
+        for _ in 0..2 {
+            // A new window starts with an empty model; earlier provider events may have been dropped.
+            bridge.services.attached.set(false);
+            let ui = DesktopWindow::new().unwrap();
+            assert_eq!(ui.global::<Ui>().get_providers().row_count(), 0);
+            session.sender().send(Command::Snapshot).unwrap();
+            let snapshot = loop {
+                match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    Event::Snapshot(snapshot) => break snapshot,
+                    _ => continue,
+                }
+            };
+            apply(&ui, Event::Snapshot(snapshot), &bridge);
+            let model = ui.global::<Ui>().get_providers();
+            assert_eq!(model.row_count(), 2);
+            assert_eq!(model.row_data(0).unwrap().id.as_str(), "yandex");
+            assert_eq!(model.row_data(1).unwrap().id.as_str(), "soundcloud");
+            assert_eq!(model.row_data(0).unwrap().name.as_str(), "Яндекс Музыка");
+            assert_eq!(model.row_data(1).unwrap().name.as_str(), "SoundCloud");
+            assert!(!model.row_data(0).unwrap().signed_in);
+            assert!(!model.row_data(1).unwrap().signed_in);
+            assert_eq!(model.row_data(1).unwrap().methods.row_count(), 1);
+            let searchable = ui.global::<Ui>().get_searchable_providers();
+            assert_eq!(searchable.row_count(), 1);
+            assert_eq!(searchable.row_data(0).unwrap().id.as_str(), "soundcloud");
+        }
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn search_stale_results_are_dropped_and_previous_results_stay_until_new_ones_arrive() {
         i_slint_backend_testing::init_no_event_loop();
@@ -2135,8 +2307,22 @@ pub(super) mod tests {
         assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
         ui.global::<Library>()
             .set_playlists(Rc::new(VecModel::<CollectionItem>::default()).into());
-        let track = item("7").track;
+        let mut track = item("7").track;
+        Arc::make_mut(&mut track).source_url = Some("https://example.test/track".into());
         let snapshot = eagle_app::session::SessionSnapshot {
+            providers: vec![eagle_app::providers::ProviderStatus {
+                id: "fakea".into(),
+                name: "Test Service".into(),
+                attribution_logo: None,
+                sign_in: vec![eagle_core::SignInMethod::Token {
+                    hint: "Token",
+                    help_url: None,
+                }],
+                account_name: None,
+                signed_in: false,
+                account_connected: false,
+                capabilities: eagle_core::Capabilities::none(),
+            }],
             view: View::Library,
             rows: vec![item("7")],
             cards: vec![],
@@ -2172,6 +2358,10 @@ pub(super) mod tests {
             }),
         };
         apply(&ui, Event::Snapshot(Box::new(snapshot)), &bridge);
+        let providers = ui.global::<Ui>().get_providers();
+        assert_eq!(providers.row_count(), 1);
+        assert_eq!(providers.row_data(0).unwrap().name.as_str(), "Test Service");
+        assert!(!providers.row_data(0).unwrap().signed_in);
         assert!(ui.global::<Ui>().get_playlist_busy());
         assert_eq!(
             ui.global::<Ui>().get_error().as_str(),
@@ -2188,6 +2378,10 @@ pub(super) mod tests {
             u64::MAX.to_string()
         );
         assert_eq!(ui.global::<Player>().get_quality().as_str(), "128 кбит/с");
+        assert_eq!(
+            ui.global::<Player>().get_source_url().as_str(),
+            "https://example.test/track"
+        );
         let queue = ui.global::<Library>().get_queue_order();
         assert_eq!(queue.row_count(), 2);
         assert_eq!(queue.row_data(0).unwrap().id.as_str(), "1");
@@ -2225,6 +2419,7 @@ pub(super) mod tests {
         assert_eq!(ui.global::<Library>().get_title(), "Local");
         apply(&ui, Event::Player(Arc::default()), &bridge);
         assert_eq!(ui.global::<Player>().get_track_id(), "");
+        assert_eq!(ui.global::<Player>().get_source_url().as_str(), "");
         assert_eq!(ui.global::<Player>().get_shown(), 0.);
     }
     #[test]

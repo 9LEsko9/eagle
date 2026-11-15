@@ -142,13 +142,16 @@ impl Decoder {
                 })
             })
             .filter(|t| t.start.checked_add(t.length).is_some());
-        let duration = trim
-            .map(|t| t.length as f64 / rate as f64)
-            .or_else(|| params.n_frames.map(|n| n as f64 / rate as f64));
+        let duration = trim.map(|t| t.length as f64 / rate as f64).or_else(|| {
+            params
+                .n_frames
+                .filter(|&n| n > 0)
+                .map(|n| n as f64 / rate as f64)
+        });
         let trust_frame_count =
             !estimated_mp3 && (params.codec != CODEC_TYPE_AAC || head.get(4..8) == Some(b"ftyp"));
         let limit = trim.map(|t| t.length).or(if trust_frame_count {
-            params.n_frames
+            params.n_frames.filter(|&n| n > 0)
         } else {
             None
         });
@@ -260,7 +263,7 @@ impl Symphonia {
                         .tracks()
                         .iter()
                         .find(|t| t.id == self.track)
-                        .and_then(|t| t.codec_params.n_frames);
+                        .and_then(|t| t.codec_params.n_frames.filter(|&n| n > 0));
                 }
                 self.limit_known = true;
             }
@@ -362,7 +365,7 @@ impl Symphonia {
                     .tracks()
                     .iter()
                     .find(|t| t.id == self.track)
-                    .and_then(|t| t.codec_params.n_frames);
+                    .and_then(|t| t.codec_params.n_frames.filter(|&n| n > 0));
             }
             let decoded = match self.decoder.decode(&packet) {
                 Ok(d) => d,
@@ -521,6 +524,39 @@ impl Opus {
 mod buffer_tests {
     use super::*;
     use symphonia::core::audio::{Channels, SignalSpec};
+
+    #[test]
+    fn fragmented_mp4_decodes_without_known_length() {
+        struct UnknownLength(std::fs::File);
+        impl std::io::Read for UnknownLength {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(out)
+            }
+        }
+        impl std::io::Seek for UnknownLength {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        impl symphonia::core::io::MediaSource for UnknownLength {
+            fn is_seekable(&self) -> bool {
+                false
+            }
+            fn byte_len(&self) -> Option<u64> {
+                None
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hls-aac-fmp4.mp4");
+        let mut decoder =
+            Decoder::open(Box::new(UnknownLength(std::fs::File::open(path).unwrap()))).unwrap();
+        assert_eq!(decoder.duration(), None);
+        let mut frames = 0usize;
+        while let Some(chunk) = decoder.next().unwrap() {
+            frames += chunk.frames.len();
+        }
+        assert!(frames > 80_000, "decoded {frames} frames");
+    }
 
     #[test]
     fn sample_buffer_grows_and_is_reused() {

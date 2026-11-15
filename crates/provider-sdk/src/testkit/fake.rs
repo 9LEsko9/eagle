@@ -144,6 +144,12 @@ impl FakeProvider {
         self
     }
 
+    /// Uses a public catalog without requiring a token.
+    pub fn without_auth(mut self) -> Self {
+        self.info.sign_in = &[];
+        self
+    }
+
     /// Starts signed out; `login` with a non-empty token signs in.
     pub fn signed_out(mut self) -> Self {
         self.state_mut().signed_in = false;
@@ -436,6 +442,7 @@ pub fn fake_track(
         duration_ms,
         cover: None,
         availability: Availability::Available,
+        source_url: None,
         isrc: None,
     }
 }

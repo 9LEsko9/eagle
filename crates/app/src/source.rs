@@ -131,6 +131,20 @@ impl SourceContext {
                 Quality::High,
             )?)
         };
+        if prefetched
+            .as_ref()
+            .is_some_and(|(_, stream)| stream.codec == "hls-aac")
+        {
+            let (id, stream) = prefetched.ok_or("источник не выбран")?;
+            (self.on_source)(&id);
+            (self.on_bitrate)(stream.bitrate_kbps);
+            let provider = self
+                .providers
+                .for_track(&id)
+                .ok_or("провайдер недоступен")?
+                .clone();
+            return Ok(crate::hls::source(self.net.clone(), stream, provider, id));
+        }
         let id = prefetched.as_ref().map_or(first, |(id, _)| id.clone());
         (self.on_source)(&id);
         let owner = if self.account_provider.as_deref() == Some(id.provider()) {

@@ -381,6 +381,7 @@ pub fn bench_store(root: &Path) -> Result<()> {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            source_url: None,
             isrc: None,
         })?;
     }
@@ -489,6 +490,7 @@ mod metadata_tests {
             duration_ms: 1000,
             cover: None,
             availability: eagle_core::Availability::Available,
+            source_url: None,
             isrc: None,
         };
         metadata(&store, &net, &root, &track).unwrap();

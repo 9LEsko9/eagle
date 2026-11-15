@@ -23,6 +23,7 @@ fn tracks(count: usize) -> Vec<Track> {
                 duration_ms: 30_000,
                 cover: None,
                 availability: Availability::Available,
+                source_url: None,
                 isrc: None,
             })
         })

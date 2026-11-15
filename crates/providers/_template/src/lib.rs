@@ -67,6 +67,7 @@ fn catalog() -> Result<Vec<Track>, ProviderError> {
             duration_ms,
             cover: None,
             availability: Availability::Available,
+            source_url: None,
             isrc: None,
         })
     };

@@ -277,6 +277,7 @@ mod tests {
             duration_ms,
             cover: None,
             availability: Availability::Available,
+            source_url: None,
             isrc: isrc.map(str::to_owned),
         }
     }

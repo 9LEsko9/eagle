@@ -28,6 +28,8 @@ slint-build = "=1.17.0"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dev-dependencies]
 i-slint-backend-testing = "=1.17.0"
+eagle-provider-sdk = { path = "../provider-sdk", features = ["testkit"] }
+eagle-net = { path = "../net" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

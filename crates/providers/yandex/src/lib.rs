@@ -126,6 +126,7 @@ pub fn parse_track(v: &Value) -> Result<Track, ProviderError> {
         } else {
             Availability::Unknown
         },
+        source_url: None,
         isrc: None,
     })
 }

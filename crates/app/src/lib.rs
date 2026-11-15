@@ -8,6 +8,7 @@ pub mod fixture;
 
 mod covers;
 mod downloads;
+mod hls;
 pub mod music;
 mod playback;
 pub mod providers;

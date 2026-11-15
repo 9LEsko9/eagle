@@ -55,6 +55,15 @@
 
 `ProviderInfo::sign_in` — список способов входа (`SignInMethod`), предпочтительный первым.
 Пустой список значит, что каталог работает без входа (`ProviderInfo::needs_sign_in()` ложно).
+Если вход необязателен, провайдер объявляет способы входа и переопределяет
+`Provider::guest_capabilities()`: эти возможности доступны без аккаунта;
+при входе возможности определяются пересечением `info().capabilities` и
+`Account::capabilities`.
+
+For optional sign-in, declare the sign-in methods and override
+`Provider::guest_capabilities()` with the capabilities available without an
+account. After sign-in, the host intersects `info().capabilities` with
+`Account::capabilities`.
 Приложение показывает в «Настройки → Сервисы» первый способ, остальные предлагает ссылками
 рядом, в порядке списка. Названия сервисов и тексты способов приложение берёт из `ProviderInfo`.
 

@@ -506,6 +506,7 @@ mod tests {
             duration_ms: 1000,
             cover: None,
             availability: Availability::Available,
+            source_url: None,
             isrc: None,
         }
     }

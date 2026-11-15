@@ -121,6 +121,16 @@ export component TrackRowView inherits Rectangle {
                 }
             }
         }
+        if root.item.source-url != "" : Rectangle {
+            width: 126px;
+            height: 25px;
+            background: #121212;
+            accessible-role: button;
+            accessible-label: root.item.source-name;
+            accessible-action-default => { Actions.open-url(root.item.source-url); }
+            Image { source: root.item.source-logo; width: 120px; height: 15px; x: 3px; y: (parent.height - self.height) / 2; image-fit: contain; }
+            TouchArea { mouse-cursor: pointer; clicked => { Actions.open-url(root.item.source-url); } }
+        }
         HorizontalLayout {
             width: TrackColumns.actions;
             spacing: 2px;

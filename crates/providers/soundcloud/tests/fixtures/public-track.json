@@ -1,0 +1,36 @@
+{
+  "duration": 1988769,
+  "id": 12,
+  "sharing": "public",
+  "streamable": true,
+  "title": "Fixture",
+  "media": {
+    "transcodings": [
+      {
+        "url": "https://api-v2.soundcloud.com/media/example",
+        "preset": "aac_96k",
+        "duration": 1988769,
+        "snipped": false,
+        "format": {
+          "protocol": "hls"
+        },
+        "quality": "lq"
+      },
+      {
+        "url": "https://api-v2.soundcloud.com/media/example",
+        "preset": "abr_sq",
+        "duration": 1988769,
+        "snipped": false,
+        "format": {
+          "protocol": "hls"
+        },
+        "quality": "sq"
+      }
+    ]
+  },
+  "policy": "ALLOW",
+  "user": {
+    "id": 34,
+    "username": "Uploader"
+  }
+}
