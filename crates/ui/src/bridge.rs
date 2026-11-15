@@ -894,9 +894,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 if player.get_track_id().as_str() != track.id.to_string() {
                     *anchor.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     player.set_shown(0.);
-                    player.set_cover(slint::Image::default());
-                    COVER_COLOR.with(|c| *c.borrow_mut() = [128; 3]);
-                    apply_colors(ui);
+                    // Keep the displayed artwork until the replacement is decoded.
+                    if track.cover.is_none() {
+                        player.set_cover(slint::Image::default());
+                        COVER_COLOR.with(|c| *c.borrow_mut() = [128; 3]);
+                        apply_colors(ui);
+                    }
                 }
                 player.set_track_id(track.id.to_string().into());
                 player.set_album_id(
@@ -2307,6 +2310,54 @@ pub(super) mod tests {
         assert_eq!(rows.row_data(0).unwrap().cover.size().width, 1);
         ui.global::<Library>()
             .set_playlists(Rc::new(VecModel::<CollectionItem>::default()).into());
+        let player_state = |id: &str, has_cover: bool| {
+            let mut track = (*item(id).track).clone();
+            track.cover = has_cover.then(|| "https://example.test/cover.png".into());
+            Event::Player(Arc::new(eagle_app::session::PlayerState {
+                track: Some(Arc::new(track)),
+                ..Default::default()
+            }))
+        };
+        let target = eagle_app::session::CoverTarget::Player;
+        apply(&ui, player_state("1", true), &bridge);
+        apply(
+            &ui,
+            Event::Cover(target, "yandex:1".parse().unwrap(), cover.clone()),
+            &bridge,
+        );
+        let displayed = ui.global::<Player>().get_cover();
+        apply(&ui, player_state("2", true), &bridge);
+        assert_eq!(ui.global::<Player>().get_cover(), displayed);
+        assert_eq!(COVER_COLOR.with(|c| *c.borrow()), cover.dominant);
+        let replacement = Arc::new(eagle_palette::Cover {
+            rgba: vec![0, 0, 0, 255],
+            width: 1,
+            height: 1,
+            dominant: [10; 3],
+        });
+        apply(
+            &ui,
+            Event::Cover(target, "yandex:1".parse().unwrap(), replacement.clone()),
+            &bridge,
+        );
+        assert_eq!(ui.global::<Player>().get_cover(), displayed);
+        apply(
+            &ui,
+            Event::Cover(target, "yandex:2".parse().unwrap(), replacement),
+            &bridge,
+        );
+        assert_ne!(ui.global::<Player>().get_cover(), displayed);
+        assert_eq!(COVER_COLOR.with(|c| *c.borrow()), [10; 3]);
+        apply(&ui, player_state("3", false), &bridge);
+        assert_eq!(ui.global::<Player>().get_cover().size().width, 0);
+        apply(&ui, player_state("2", true), &bridge);
+        apply(
+            &ui,
+            Event::Cover(target, "yandex:2".parse().unwrap(), cover.clone()),
+            &bridge,
+        );
+        apply(&ui, Event::Player(Arc::default()), &bridge);
+        assert_eq!(ui.global::<Player>().get_cover().size().width, 0);
         let mut track = item("7").track;
         Arc::make_mut(&mut track).source_url = Some("https://example.test/track".into());
         let snapshot = eagle_app::session::SessionSnapshot {
