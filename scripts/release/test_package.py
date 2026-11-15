@@ -38,6 +38,11 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(tar.getmember("eagle-desktop").mode & 0o777, 0o755)
             self.assertEqual(tar.getmember("eagle-cli").mode & 0o777, 0o755)
 
+    def test_archive_modes_ignore_host_permissions(self):
+        with patch.object(Path, "chmod", side_effect=AssertionError("host chmod used")):
+            self.test_linux_archive_modes()
+            self.test_mac_bundle()
+
     def test_windows_zip(self):
         with zipfile.ZipFile(self.build("x86_64-pc-windows-msvc")) as zf:
             self.assertEqual(set(zf.namelist()), {"eagle-desktop.exe", "eagle-cli.exe", "LICENSE", "EXCEPTIONS.md"})

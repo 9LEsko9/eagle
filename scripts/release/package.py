@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 import zipfile
@@ -36,7 +37,6 @@ def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
         for name in ("eagle-desktop", "eagle-cli"):
             destination = stage / (name + extension)
             shutil.copyfile(bin_dir / (name + extension), destination)
-            destination.chmod(0o755)
         for name in ("LICENSE", "EXCEPTIONS.md"):
             shutil.copyfile(ROOT / name, stage / name)
         if platform == "macos":
@@ -63,12 +63,22 @@ def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
         if platform == "linux":
             with tarfile.open(archive, "w:gz") as tar:
                 for path in sorted(stage.iterdir()):
-                    tar.add(path, arcname=path.name)
+                    info = tar.gettarinfo(path, arcname=path.name)
+                    info.mode = 0o755 if path.name in ("eagle-desktop", "eagle-cli") else 0o644
+                    with path.open("rb") as source:
+                        tar.addfile(info, source)
         else:
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
                 for path in sorted(stage.rglob("*")):
                     if path.is_file():
-                        zf.write(path, path.relative_to(stage))
+                        relative = path.relative_to(stage)
+                        info = zipfile.ZipInfo.from_file(path, relative.as_posix())
+                        info.create_system = 3
+                        mode = 0o755 if path.name in ("eagle-desktop", "eagle-cli") else 0o644
+                        info.external_attr = (stat.S_IFREG | mode) << 16
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        with path.open("rb") as source, zf.open(info, "w") as dest:
+                            shutil.copyfileobj(source, dest)
     return archive
 
 
