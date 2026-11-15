@@ -142,9 +142,12 @@ impl Decoder {
                 })
             })
             .filter(|t| t.start.checked_add(t.length).is_some());
-        let duration = trim
-            .map(|t| t.length as f64 / rate as f64)
-            .or_else(|| params.n_frames.map(|n| n as f64 / rate as f64));
+        let duration = trim.map(|t| t.length as f64 / rate as f64).or_else(|| {
+            params
+                .n_frames
+                .filter(|&n| n > 0)
+                .map(|n| n as f64 / rate as f64)
+        });
         let trust_frame_count =
             !estimated_mp3 && (params.codec != CODEC_TYPE_AAC || head.get(4..8) == Some(b"ftyp"));
         let limit = trim.map(|t| t.length).or(if trust_frame_count {
@@ -547,6 +550,7 @@ mod buffer_tests {
             .join("tests/fixtures/hls-aac-fmp4.mp4");
         let mut decoder =
             Decoder::open(Box::new(UnknownLength(std::fs::File::open(path).unwrap()))).unwrap();
+        assert_eq!(decoder.duration(), None);
         let mut frames = 0usize;
         while let Some(chunk) = decoder.next().unwrap() {
             frames += chunk.frames.len();

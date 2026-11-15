@@ -163,6 +163,42 @@ pub(crate) struct PlaybackHooks {
         Arc<dyn Fn() -> std::result::Result<bool, eagle_engine::SourceError> + Send + Sync>,
 }
 
+fn lazy_dispatch(
+    choose: impl Fn() -> std::result::Result<Source, eagle_engine::SourceError> + Send + Sync + 'static,
+) -> Source {
+    let chosen = Mutex::new(None::<Source>);
+    Source::new(move |interrupt| {
+        let selected = {
+            let mut chosen = chosen.lock().unwrap_or_else(|p| p.into_inner());
+            if chosen.is_none() {
+                *chosen = Some(choose()?);
+            }
+            chosen.clone().ok_or("источник не выбран")?
+        };
+        selected.open_reader(interrupt)
+    })
+}
+
+fn select_cli_stream(
+    stream: eagle_core::Stream,
+    saving: bool,
+    net: Arc<Client>,
+    provider: Arc<dyn eagle_core::Provider>,
+    id: TrackId,
+    prefetched: &Mutex<Option<eagle_core::Stream>>,
+    fallback: &Source,
+) -> std::result::Result<Source, eagle_engine::SourceError> {
+    if stream.codec == "hls-aac" {
+        if saving {
+            return Err("сохранение HLS не поддерживается".into());
+        }
+        Ok(crate::hls::source(net, stream, provider, id))
+    } else {
+        *prefetched.lock().unwrap_or_else(|p| p.into_inner()) = Some(stream);
+        Ok(fallback.clone())
+    }
+}
+
 pub(crate) fn streamed_with_hooks(
     store: Arc<Store>,
     cache: Arc<Cache>,
@@ -330,6 +366,7 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
                 item.parse()?
             };
             {
+                let prefetched = Arc::new(Mutex::new(None));
                 let resolve: Arc<eagle_net::growing::Resolve> = if is_url {
                     let url = SignedUrl::new(item.clone());
                     Arc::new(move || Ok(url.clone().into()))
@@ -341,12 +378,19 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
                     let store = store.clone();
                     let root = root.to_owned();
                     let metadata_net = net.clone();
+                    let prefetched = prefetched.clone();
                     Arc::new(move || {
-                        let stream = provider.resolve_stream(&id, quality).map_err(|_| {
-                            eagle_net::Error::Source(
-                                "не удалось получить аудиоссылку; проверьте вход и доступ к треку",
-                            )
-                        })?;
+                        let stream = match prefetched.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                            Some(stream) => stream,
+                            None => provider.resolve_stream(&id, quality).map_err(|_| {
+                                eagle_net::Error::Source(
+                                    "не удалось получить аудиоссылку; проверьте вход и доступ к треку",
+                                )
+                            })?,
+                        };
+                        if stream.codec == "hls-aac" {
+                            return Err(eagle_net::Error::Source("HLS не поддерживается в кэше"));
+                        }
                         if !matches!(stream.encryption, Encryption::None) {
                             return Err(eagle_net::Error::Source(
                                 "шифрованные потоки не поддерживаются",
@@ -372,6 +416,39 @@ pub fn run(args: &[String], root: &Path, net: Arc<Client>) -> Result<()> {
                     quality,
                     resolve,
                 )?;
+                let source = if is_url {
+                    source
+                } else {
+                    let provider = providers
+                        .for_track(&id)
+                        .cloned()
+                        .ok_or("провайдер недоступен")?;
+                    let store = store.clone();
+                    let cache = cache.clone();
+                    let net = net.clone();
+                    let id = id.clone();
+                    let saving = options.save || options.download_only;
+                    lazy_dispatch(move || {
+                        let selected = if cache_hit(&store, &cache, &id, quality)
+                            .map_err(|e| e.to_string())?
+                            .is_some()
+                        {
+                            source.clone()
+                        } else {
+                            let stream = provider.resolve_stream(&id, quality)?;
+                            select_cli_stream(
+                                stream,
+                                saving,
+                                net.clone(),
+                                provider.clone(),
+                                id.clone(),
+                                &prefetched,
+                                &source,
+                            )?
+                        };
+                        Ok(selected)
+                    })
+                };
                 if options.download_only || options.save {
                     complete(&source)?;
                     if options.save {
@@ -546,6 +623,39 @@ fn interact(engine: &Engine, net: &Client, print_stats: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hls_save_is_rejected_only_when_the_source_is_opened() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let net = Arc::new(Client::new().unwrap());
+        let provider = Arc::new(eagle_provider_sdk::testkit::FakeProvider::new("fake"));
+        let source = lazy_dispatch(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            select_cli_stream(
+                eagle_core::Stream {
+                    url: SignedUrl::new("https://example.test/list".into()),
+                    codec: "hls-aac".into(),
+                    bitrate_kbps: None,
+                    expires_at: std::time::SystemTime::now() + Duration::from_secs(60),
+                    encryption: Encryption::None,
+                },
+                true,
+                net.clone(),
+                provider.clone(),
+                "fake:1".parse().unwrap(),
+                &Mutex::new(None),
+                &Source::file("unused"),
+            )
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let error = match source.open_reader(idle_interrupt()) {
+            Ok(_) => panic!("HLS save must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("HLS"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
     #[test]
     fn mixed_queue_flags_apply_to_the_whole_list_and_paths_can_start_with_dash() {
         let args = [

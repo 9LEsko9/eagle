@@ -100,6 +100,19 @@ impl SoundCloud {
         self.get_with_params(url)
     }
     fn get_with_params(&self, url: Url) -> Result<(Value, bool), ProviderError> {
+        let token = self
+            .session
+            .lock()
+            .map_err(|_| ProviderError::ApiChanged)?
+            .as_ref()
+            .map(|(token, _)| token.clone());
+        self.get_with_token(url, token)
+    }
+    fn get_with_token(
+        &self,
+        url: Url,
+        token: Option<Token>,
+    ) -> Result<(Value, bool), ProviderError> {
         let original_query = url.query().map(str::to_owned);
         let mut url = url;
         if url.scheme() != "https"
@@ -117,12 +130,7 @@ impl SoundCloud {
                 .append_pair("client_id", client.expose());
             let mut req = Request::get(SignedUrl::new(url.clone().into()));
             req.limit = 4 * 1024 * 1024;
-            req.token = self
-                .session
-                .lock()
-                .map_err(|_| ProviderError::ApiChanged)?
-                .as_ref()
-                .map(|(token, _)| token.clone());
+            req.token = token.clone();
             let authenticated = req.token.is_some();
             if !authenticated
                 && url
@@ -137,14 +145,8 @@ impl SoundCloud {
                         .map_err(|_| ProviderError::ApiChanged)?;
                     return Ok((value, authenticated));
                 }
-                Err(HttpError::Status(401)) if attempt == 0 && !authenticated => {
-                    let mut cached = self.client.lock().map_err(|_| ProviderError::ApiChanged)?;
-                    if cached
-                        .as_ref()
-                        .is_some_and(|old| old.expose() == client.expose())
-                    {
-                        *cached = None;
-                    }
+                Err(HttpError::Status(401)) if attempt == 0 => {
+                    self.invalidate_client(&client)?;
                 }
                 Err(e) => return Err(net_error(e)),
             }
@@ -152,31 +154,49 @@ impl SoundCloud {
         Err(ProviderError::Auth)
     }
 
+    fn invalidate_client(&self, client: &Token) -> Result<(), ProviderError> {
+        let mut cached = self.client.lock().map_err(|_| ProviderError::ApiChanged)?;
+        if cached
+            .as_ref()
+            .is_some_and(|old| old.expose() == client.expose())
+        {
+            *cached = None;
+        }
+        Ok(())
+    }
+
     fn validate_session(&self, token: &Token) -> Result<Account, ProviderError> {
-        let mut url = Url::parse("https://api-v2.soundcloud.com/me")
-            .map_err(|_| ProviderError::ApiChanged)?;
-        let client = self.client()?;
-        url.query_pairs_mut()
-            .append_pair("client_id", client.expose());
-        let mut req = Request::get(SignedUrl::new(url.into()));
-        req.token = Some(token.clone());
-        req.limit = 1024 * 1024;
-        let response = self
-            .http
-            .request(Priority::Metadata, req, None)
-            .map_err(net_error)?;
-        let value: Value =
-            serde_json::from_slice(&response.bytes).map_err(|_| ProviderError::ApiChanged)?;
-        let id = value["id"]
-            .as_u64()
-            .ok_or(ProviderError::ApiChanged)?
-            .to_string();
-        Ok(Account {
-            id,
-            subscription: false,
-            name: value["username"].as_str().map(str::to_owned),
-            capabilities: self.info.capabilities,
-        })
+        for attempt in 0..2 {
+            let mut url = Url::parse("https://api-v2.soundcloud.com/me")
+                .map_err(|_| ProviderError::ApiChanged)?;
+            let client = self.client()?;
+            url.query_pairs_mut()
+                .append_pair("client_id", client.expose());
+            let mut req = Request::get(SignedUrl::new(url.into()));
+            req.token = Some(token.clone());
+            req.limit = 1024 * 1024;
+            let response = match self.http.request(Priority::Metadata, req, None) {
+                Ok(response) => response,
+                Err(HttpError::Status(401)) if attempt == 0 => {
+                    self.invalidate_client(&client)?;
+                    continue;
+                }
+                Err(error) => return Err(net_error(error)),
+            };
+            let value: Value =
+                serde_json::from_slice(&response.bytes).map_err(|_| ProviderError::ApiChanged)?;
+            let id = value["id"]
+                .as_u64()
+                .ok_or(ProviderError::ApiChanged)?
+                .to_string();
+            return Ok(Account {
+                id,
+                subscription: false,
+                name: value["username"].as_str().map(str::to_owned),
+                capabilities: self.info.capabilities,
+            });
+        }
+        Err(ProviderError::Auth)
     }
 }
 fn extract_client_id(script: &str) -> Option<&str> {
@@ -363,15 +383,22 @@ impl Provider for SoundCloud {
         Err(ProviderError::Unavailable)
     }
     fn likes(&self, cursor: Option<&str>) -> Result<Page<Track>, ProviderError> {
-        let account = self.account()?;
+        let (token, account) = self
+            .session
+            .lock()
+            .map_err(|_| ProviderError::ApiChanged)?
+            .clone()
+            .ok_or(ProviderError::Auth)?;
         let offset = match cursor {
             Some(value) => value.parse::<u32>().map_err(|_| ProviderError::InvalidId)?,
             None => 0,
         };
-        let (value, authenticated) = self.get(
-            &format!("/users/{}/track_likes", account.id),
-            &[("limit", LIMIT.to_string()), ("offset", offset.to_string())],
-        )?;
+        let mut url = Url::parse(&format!("{API}/users/{}/track_likes", account.id))
+            .map_err(|_| ProviderError::ApiChanged)?;
+        url.query_pairs_mut()
+            .append_pair("limit", &LIMIT.to_string())
+            .append_pair("offset", &offset.to_string());
+        let (value, authenticated) = self.get_with_token(url, Some(token))?;
         if !authenticated {
             return Err(ProviderError::Auth);
         }
@@ -445,6 +472,7 @@ mod tests {
     struct Fake {
         requests: Mutex<Vec<String>>,
         invalid_once: AtomicUsize,
+        me_invalid_once: AtomicUsize,
     }
     impl Http for Fake {
         fn request(
@@ -460,7 +488,9 @@ mod tests {
                 assert!(url.contains("/me?") || token.expose() == "valid");
             }
             let bytes = if url.starts_with("https://api-v2.soundcloud.com/me?") {
-                if req.token.as_ref().map(Token::expose) != Some("valid") {
+                if req.token.as_ref().map(Token::expose) != Some("valid")
+                    || self.me_invalid_once.fetch_add(1, Ordering::SeqCst) == 0
+                {
                     return Err(HttpError::Status(401));
                 }
                 br#"{"id":123}"#.to_vec()
@@ -516,6 +546,7 @@ mod tests {
         let fake = Arc::new(Fake {
             requests: Mutex::new(Vec::new()),
             invalid_once: AtomicUsize::new(0),
+            me_invalid_once: AtomicUsize::new(1),
         });
         let provider = SoundCloud::new(fake.clone());
         assert!(matches!(
@@ -604,6 +635,106 @@ mod tests {
             provider.resolve_stream(&private_id, Quality::High),
             Err(ProviderError::Unavailable)
         ));
+    }
+    #[test]
+    fn likes_retry_keeps_account_token_after_logout() {
+        use std::sync::Barrier;
+
+        struct BlockingFake {
+            inner: Fake,
+            reached: Barrier,
+            resume: Barrier,
+            tokens: Mutex<Vec<Option<String>>>,
+        }
+        impl Http for BlockingFake {
+            fn request(
+                &self,
+                priority: Priority,
+                req: Request,
+                refresh: Option<&(dyn Fn() -> Result<Token, HttpError> + Sync)>,
+            ) -> Result<Response, HttpError> {
+                if req.url.expose().contains("/users/123/track_likes?") {
+                    let mut tokens = self.tokens.lock().unwrap();
+                    tokens.push(req.token.as_ref().map(|token| token.expose().to_owned()));
+                    let first = tokens.len() == 1;
+                    drop(tokens);
+                    if first {
+                        self.reached.wait();
+                        self.resume.wait();
+                        return Err(HttpError::Status(401));
+                    }
+                }
+                self.inner.request(priority, req, refresh)
+            }
+        }
+        let fake = Arc::new(BlockingFake {
+            inner: Fake {
+                requests: Mutex::new(Vec::new()),
+                invalid_once: AtomicUsize::new(0),
+                me_invalid_once: AtomicUsize::new(1),
+            },
+            reached: Barrier::new(2),
+            resume: Barrier::new(2),
+            tokens: Mutex::new(Vec::new()),
+        });
+        let provider = SoundCloud::new(fake.clone());
+        provider.login(Token::new("valid".into())).unwrap();
+        std::thread::scope(|scope| {
+            let request = scope.spawn(|| provider.likes(None));
+            fake.reached.wait();
+            provider.logout();
+            fake.resume.wait();
+            assert_eq!(request.join().unwrap().unwrap().items.len(), 1);
+        });
+        assert_eq!(
+            *fake.tokens.lock().unwrap(),
+            vec![Some("valid".into()), Some("valid".into())]
+        );
+    }
+    #[test]
+    fn login_refreshes_expired_client_id() {
+        let fake = Arc::new(Fake {
+            requests: Mutex::new(Vec::new()),
+            invalid_once: AtomicUsize::new(0),
+            me_invalid_once: AtomicUsize::new(0),
+        });
+        let provider = SoundCloud::new(fake.clone());
+        assert_eq!(
+            provider.login(Token::new("valid".into())).unwrap().id,
+            "123"
+        );
+        assert_eq!(
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|url| url.as_str() == HOME)
+                .count(),
+            2
+        );
+    }
+    #[test]
+    fn authenticated_search_refreshes_expired_client_id() {
+        let fake = Arc::new(Fake {
+            requests: Mutex::new(Vec::new()),
+            invalid_once: AtomicUsize::new(0),
+            me_invalid_once: AtomicUsize::new(1),
+        });
+        let provider = SoundCloud::new(fake.clone());
+        provider.login(Token::new("valid".into())).unwrap();
+        assert_eq!(provider.search("fixture", 0).unwrap().items.len(), 1);
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(
+            requests.iter().filter(|url| url.as_str() == HOME).count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|url| url.contains("/search/tracks?"))
+                .count(),
+            2
+        );
     }
     #[test]
     fn attribution_uses_public_track_or_private_uploader_without_secret_links() {

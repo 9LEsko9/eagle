@@ -279,6 +279,14 @@ impl Store {
                         .optional()?;
                     if at.is_some_and(|at| at <= synced_at) {
                         set_liked_in(&tx, track, false)?;
+                        if read_only {
+                            // Distinguish this remote removal from a later local unlike.
+                            let key = format!("readonly_unlike:{provider}:{track}");
+                            tx.execute(
+                                "INSERT OR REPLACE INTO settings SELECT ?1, CAST(hlc AS TEXT) FROM profile_state WHERE kind='like' AND key=?2 AND deleted=1",
+                                params![key, track],
+                            )?;
+                        }
                         outcome.removed += 1;
                     }
                 }
@@ -289,8 +297,8 @@ impl Store {
                     continue;
                 }
                 let held_back: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM like_outbox WHERE provider=?1 AND track=?2 AND liked=0) OR EXISTS(SELECT 1 FROM profile_state WHERE kind='like' AND key=?2 AND deleted=1 AND hlc>?3)",
-                    params![provider, track, if read_only { i64::MIN } else { previous.unwrap_or(i64::MIN) }],
+                    "SELECT EXISTS(SELECT 1 FROM like_outbox WHERE provider=?1 AND track=?2 AND liked=0) OR EXISTS(SELECT 1 FROM profile_state WHERE kind='like' AND key=?2 AND deleted=1 AND hlc>?3 AND (?4=0 OR CAST(hlc AS TEXT) != COALESCE((SELECT value FROM settings WHERE key=?5), '')))",
+                    params![provider, track, if read_only { i64::MIN } else { previous.unwrap_or(i64::MIN) }, read_only, format!("readonly_unlike:{provider}:{track}")],
                     |r| r.get(0),
                 )?;
                 let already: bool = tx.query_row(
@@ -301,6 +309,12 @@ impl Store {
                 if !held_back && !already {
                     set_liked_in(&tx, track, true)?;
                     outcome.added += 1;
+                }
+                if read_only && !held_back {
+                    tx.execute(
+                        "DELETE FROM settings WHERE key=?1",
+                        [format!("readonly_unlike:{provider}:{track}")],
+                    )?;
                 }
             }
             let now = profile_ops::next_hlc(&tx)?;
@@ -695,6 +709,29 @@ mod tests {
             assert!(liked_ids(&store).is_empty());
         }
         store.like(&id, true, &[]).unwrap();
+        store
+            .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+            .unwrap();
+        assert_eq!(liked_ids(&store), ["fakea:1"]);
+        store.sync_readonly_provider_likes("fakea", &[]).unwrap();
+        store.like(&id, false, &[]).unwrap();
+        store
+            .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+            .unwrap();
+        assert!(liked_ids(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn readonly_sync_imports_a_remote_like_again_after_remote_removal() {
+        let (store, dir) = device_with("readonly-relike", &[track("fakea:1", "One", 100_000)]);
+        let id = id("fakea:1");
+        store
+            .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
+            .unwrap();
+        store.sync_readonly_provider_likes("fakea", &[]).unwrap();
+        assert!(liked_ids(&store).is_empty());
         store
             .sync_readonly_provider_likes("fakea", std::slice::from_ref(&id))
             .unwrap();
