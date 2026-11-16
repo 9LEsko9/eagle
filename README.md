@@ -15,5 +15,6 @@ Rust 1.92+. [Зависимости Linux](docs/development.md).
 - [Десктоп](docs/desktop.md) · [CLI и кэш](docs/cli.md)
 - [Движок, проверки и замеры](docs/engine.md)
 - [Разработка](docs/development.md) · [Логирование](docs/logging.md)
+- [Релизы / Releases](docs/releases.md)
 
 [GPL-3.0-or-later](LICENSE) с [разрешением для магазинов приложений](EXCEPTIONS.md).
