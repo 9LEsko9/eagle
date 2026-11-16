@@ -26,7 +26,7 @@ Desktop playback accepts finite unencrypted AAC HLS playlists with whole segment
 and an optional initialization map. Master playlists, byte ranges and
 discontinuities are unsupported. Segments load on demand with at most one in
 memory; seeking reopens and decodes from the start when fast seeking is
-unavailable. The CLI playback path does not support HLS.
+unavailable. CLI playback supports HLS, but `--save` and `--download-only` do not save it.
 
 Search and collection rows and the player panel credit the uploader and link the
 provider’s logo to the original work, or to the uploader profile for a private track. This integration remains experimental.
@@ -59,7 +59,7 @@ Eagle проверит его через веб-API и сохранит в си�
 диапазоны байтов и разрывы не поддерживаются. Сегменты загружаются по мере
 чтения, в памяти хранится не более одного сегмента; если быстрый переход не
 поддерживается, выполняется повторное открытие и декодирование с начала. CLI
-не воспроизводит HLS.
+воспроизводит HLS, но `--save` и `--download-only` не сохраняют его.
 
 В строках поиска и медиатеки и в панели плеера указан автор загрузки; логотип
 провайдера ведёт на оригинал или профиль автора для приватного трека. Интеграция остаётся экспериментальной.
