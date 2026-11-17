@@ -1161,6 +1161,9 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .retain(|id, _| all.iter().any(|p| p.signed_in && p.id == *id));
             *bridge.services.statuses.borrow_mut() = all;
             bridge.services.publish(ui);
+            bridge
+                .queue
+                .set_providers(ui.global::<Ui>().get_providers());
         }
     }
 }

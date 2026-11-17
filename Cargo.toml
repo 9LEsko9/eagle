@@ -7,7 +7,7 @@ exclude = ["vendor/femtovg", "vendor/i-slint-renderer-femtovg", "vendor/block"]
 members = ["crates/core", "crates/provider-sdk", "crates/providers/yandex", "crates/providers/vk", "crates/providers/soundcloud", "crates/providers/_template", "crates/net", "crates/store", "crates/engine", "crates/palette", "crates/platform", "crates/app", "crates/ui", "crates/cli", "crates/desktop", "xtask", "tools/brand"]
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2024"
 rust-version = "1.92"
 publish = false

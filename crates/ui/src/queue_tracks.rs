@@ -48,7 +48,13 @@ impl QueueTracks {
     }
 
     pub(crate) fn set_providers(&self, providers: slint::ModelRc<ProviderItem>) {
+        if self.providers.borrow().iter().eq(providers.iter()) {
+            return;
+        }
         *self.providers.borrow_mut() = providers;
+        for row in self.active_rows() {
+            self.notify.row_changed(row);
+        }
     }
 
     fn range(&self) -> Range<usize> {
@@ -178,6 +184,15 @@ mod tests {
         assert_eq!(row.occurrence, "10000");
         assert_eq!(row.title, "Repeated track");
         assert_eq!(row.duration, "2:03");
+        model.set_providers(
+            std::rc::Rc::new(slint::VecModel::from(vec![ProviderItem {
+                id: "fake".into(),
+                name: "Fake Service".into(),
+                ..Default::default()
+            }]))
+            .into(),
+        );
+        assert_eq!(model.row_data(0).unwrap().source_name, "Fake Service");
         assert!(model.row_data(10_000).is_none());
         assert!(model.matching_rows("fake:1").is_empty());
         assert_eq!(model.visible(1000, 10, true).len(), 27);

@@ -97,6 +97,7 @@ mod tests {
             album_title: None,
             duration_ms: 1000,
             cover: None,
+            source_url: None,
             availability: eagle_core::Availability::Available,
             isrc: None,
         });
