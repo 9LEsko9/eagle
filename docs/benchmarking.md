@@ -27,6 +27,15 @@ flush; final process exit follows. It is separate from the sampled peak, RSS and
 dedicated GPU memory. A missing final counter or an exceeded budget fails the run.
 `windows_by_stage` records native surface geometry and scale where available.
 This memory check does not establish frame pacing or sound quality.
+For track-list rendering stress, add `--scroll`: the isolated fixture scrolls up
+and down after the idle stage. `--scroll-step` controls logical pixels per 16 ms
+tick (default 512); compare runs at the same step. `scroll_render_samples` records Slint's rendered
+frames per second and layers created in the last frame; these are not display
+presentation intervals. `scroll_max_first_row` verifies that the viewport moved.
+Compare scroll-enabled runs with each other, separately from the default memory protocol.
+When a locked session or sleeping display prevents window rendering, use
+`--scroll-offscreen` to force GPU snapshots during scrolling. This includes GPU
+readback cost and is recorded as `offscreen-readback`; compare only the same mode.
 Window size is the logical client area: on the measured 1× macOS display,
 1920×1018 corresponds to an outer window of 1920×1050. Confirm native geometry
 and scale in the report; do not compare runs with different surfaces.
@@ -46,6 +55,17 @@ and scale in the report; do not compare runs with different surfaces.
 RSS и видеопамяти. Отсутствие финального счётчика или превышение бюджета завершают
 проверку с ошибкой. `windows_by_stage` содержит доступные нативные размеры и масштаб.
 Этот тест памяти не подтверждает плавность интерфейса или качество звука.
+Для нагрузки прокруткой списка добавьте `--scroll`: после этапа idle изолированная
+fixture прокручивается вниз и вверх. `--scroll-step` задаёт логические пиксели за
+такт 16 мс (по умолчанию 512); сравнивайте прогоны с одинаковым шагом.
+`scroll_render_samples` содержит число кадров,
+отрисованных Slint за секунду, и число новых слоёв последнего кадра — это не интервалы
+показа на экране. `scroll_max_first_row` подтверждает движение списка. Сравнивайте
+такие прогоны между собой, отдельно от обычного протокола памяти.
+Если заблокированный сеанс или спящий дисплей не позволяют рисовать в окно,
+используйте `--scroll-offscreen`: прокрутка принудительно рисуется в GPU-снимки.
+Замер включает чтение результата из GPU и помечен `offscreen-readback`;
+сравнивайте только одинаковые режимы.
 Размер задаёт клиентскую область в логических пикселях: на измеренном экране macOS
 с масштабом 1× область 1920×1018 соответствует внешнему окну 1920×1050. Сверяйте
 нативную геометрию и масштаб в отчёте; разные поверхности сравнивать нельзя.

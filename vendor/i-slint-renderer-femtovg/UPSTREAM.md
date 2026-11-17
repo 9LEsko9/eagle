@@ -4,16 +4,17 @@ Source: [Slint](https://github.com/slint-ui/slint/tree/fdde7a535305d2ab2d4072dee
 crates.io archive SHA-256 `c1a430c5adbd652119a5d37673b424ce3516903e192d73848919153e503c6d4d`.
 The upstream license alternatives and their texts are preserved in `LICENSES`.
 
-The only code change is in `wgpu.rs`: macOS surfaces request maximum frame latency
-1 before configuration. WGPU's Metal backend allocates latency + 1 drawables, so
-this uses two full-size surfaces instead of three. Applying the limit after
-configuration allows a temporary third surface to inflate the lifetime peak.
+In `wgpu.rs`, macOS surfaces explicitly retain WGPU's
+default maximum frame latency of 2 before configuration. WGPU's Metal backend
+allocates latency + 1 drawables. Three drawables let CPU and GPU work overlap;
+reducing this to two saves memory at the cost of rendering throughput.
 The setting survives resize and surface recreation through the normal WGPU API.
 
 ## По-русски
 
-Исходный Slint 1.17.0 с сохранёнными лицензиями. Единственное изменение кода —
-`desired_maximum_frame_latency = 1` на macOS до настройки поверхности. WGPU/Metal
-использует latency + 1 поверхностей: две вместо трёх. Позднее изменение лимита
-не предотвращает временный пик третьей поверхности. Настройка применяется
+Исходный Slint 1.17.0 с сохранёнными лицензиями. В `wgpu.rs` явно задано
+`desired_maximum_frame_latency = 2` на macOS до настройки поверхности —
+стандартное значение WGPU. WGPU/Metal использует latency + 1 поверхностей:
+три позволяют CPU и GPU работать параллельно; сокращение до двух экономит память
+за счёт пропускной способности рендеринга. Настройка применяется
 штатным API WGPU и сохраняется при изменении размера и пересоздании поверхности.

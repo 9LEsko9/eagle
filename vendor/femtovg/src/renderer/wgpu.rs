@@ -1654,8 +1654,8 @@ impl<'a> RenderPassBuilder<'a> {
             return;
         }
         let load = std::mem::replace(&mut self.pending_load, wgpu::LoadOp::Load);
-        // Bound simultaneously retained Metal encoder resources within a frame.
-        if cfg!(target_os = "macos") && self.passes_since_submit >= 1 {
+        // Bound Metal resource retention in batches instead of stalling after every pass.
+        if cfg!(target_os = "macos") && self.passes_since_submit >= 8 {
             let next = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());

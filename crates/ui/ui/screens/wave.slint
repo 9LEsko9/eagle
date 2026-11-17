@@ -69,7 +69,7 @@ component MoodPad inherits Rectangle {
     private property <float> kx: 0.5 + Wave.reach * Wave.mood-x;
     private property <float> ky: 0.5 - Wave.reach * Wave.mood-y;
     private property <int> near: WaveText.direction(Wave.mood-x, Wave.mood-y);
-    private property <duration> field-time: touch.pressed ? (Motion.reduced ? 0ms : 60ms) : Motion.slow;
+    private property <duration> field-time: touch.pressed ? 0ms : Motion.slow;
     function move-to(x: length, y: length) {
         // Pointer position as a fraction of the pad, centred and scaled so that the ring is 1.
         if (root.width <= 0px) {
@@ -138,7 +138,7 @@ component MoodPad inherits Rectangle {
         animate color { duration: Motion.base; }
     }
     // Knob.
-    Rectangle {
+    knob := Rectangle {
         width: 28px;
         height: 28px;
         x: root.kx * root.width - 14px;
@@ -150,8 +150,9 @@ component MoodPad inherits Rectangle {
         drop-shadow-blur: 14px;
         drop-shadow-offset-y: 4px;
         drop-shadow-color: #00000024;
-        animate x { duration: touch.pressed ? (Motion.reduced ? 0ms : 70ms) : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
-        animate y { duration: touch.pressed ? (Motion.reduced ? 0ms : 70ms) : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+        // Direct manipulation follows the pointer; presets still ease into place.
+        animate x { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate y { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
         Rectangle {
             width: touch.pressed && !Motion.reduced ? 14px : 10px;
             height: self.width;

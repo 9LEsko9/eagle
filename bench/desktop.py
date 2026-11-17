@@ -56,6 +56,21 @@ def observed_gpu_api(process_log):
     return 'WGPU/Metal'
 
 
+def scroll_metrics(process_log):
+    """Slint render counts during the opt-in scroll stage, not presentation intervals."""
+    stage = None
+    samples = []
+    for line in process_log.splitlines():
+        if line.startswith('Eagle fixture stage: '):
+            stage = line.removeprefix('Eagle fixture stage: ').strip()
+        match = re.search(r'average frames per second: (\d+)', line)
+        if stage == 'scrolling' and match:
+            layers = re.search(r'\[(\d+) layers created\]', line)
+            samples.append({'rendered_frames': int(match[1]),
+                            'layers_created_last_frame': int(layers[1]) if layers else None})
+    return samples
+
+
 def app_command(binary, output, env, arguments):
     """Launch the measured desktop as a high-resolution macOS app, like an installed build."""
     bundle = output.with_suffix('.app')
@@ -74,7 +89,7 @@ def app_command(binary, output, env, arguments):
     log = str(output.with_suffix('.process.log'))
     command = ['open', '-W', '-n', '--stdout', log, '--stderr', log]
     for key, value in env.items():
-        if key == 'EAGLE_DATA_DIR' or key.startswith('Malloc') or key == 'EAGLE_PROFILE_FRAME_TIME':
+        if key in ('EAGLE_DATA_DIR', 'EAGLE_PROFILE_FRAME_TIME', 'EAGLE_FIXTURE_SCROLL_STEP', 'EAGLE_FIXTURE_SCROLL_OFFSCREEN', 'SLINT_DEBUG_PERFORMANCE') or key.startswith('Malloc'):
             command.extend(['--env', key + '=' + value])
     return [*command, str(bundle), '--args', *arguments], executable
 
@@ -153,6 +168,9 @@ def main():
     parser.add_argument('--software', action='store_true')
     parser.add_argument('--renderer', choices=['skia', 'femtovg-wgpu', 'software'], default=None)
     parser.add_argument('--reuse-fixture', action='store_true')
+    parser.add_argument('--scroll', action='store_true', help='Add a deterministic track-list scroll stage')
+    parser.add_argument('--scroll-offscreen', action='store_true', help='Render scroll frames through GPU snapshots (implies --scroll)')
+    parser.add_argument('--scroll-step', type=int, default=512, help='Logical pixels per 16 ms scroll tick')
     parser.add_argument('--artwork', choices=['repeated', 'unique'], default='unique')
     parser.add_argument('--runs', type=int, default=3)
     parser.add_argument('--timeout', type=float, default=120)
@@ -166,6 +184,10 @@ def main():
     parser.add_argument('--launch-mode', choices=('app', 'direct'), default='app',
                         help='Launch Services app bundle (default), or direct CLI diagnostic')
     args = parser.parse_args()
+    if args.scroll_offscreen:
+        args.scroll = True
+    if not 1 <= args.scroll_step <= 65535:
+        parser.error('scroll-step must be in 1..65535')
     if args.runs < 1 or args.timeout <= 0:
         parser.error('runs and timeout must be positive')
     if args.window_size is not None and not (800 <= args.window_size[0] <= 7680
@@ -190,6 +212,10 @@ def main():
                        '--artwork', args.artwork, '--prepare-timeout', str(args.prepare_timeout)]
             if args.max_peak_mb is not None:
                 command.extend(['--max-peak-mb', str(args.max_peak_mb)])
+            if args.scroll:
+                command.extend(['--scroll', '--scroll-step', str(args.scroll_step)])
+            if args.scroll_offscreen:
+                command.append('--scroll-offscreen')
             for option, values in (('--window-size', args.window_size),
                                    ('--window-position', args.window_position)):
                 if values is not None:
@@ -265,10 +291,19 @@ def main():
         'plateau_tail_seconds': 1,
         'valid_smoke': False,
         'windows_by_stage': {},
+        'scroll_max_first_row': 0,
+        'scroll_step_pixels': args.scroll_step if args.scroll else None,
+        'scroll_render_mode': 'offscreen-readback' if args.scroll_offscreen else 'window',
         'samples': [],
     }
     # Logs stay with this measurement, outside both normal data and movable storage.
     env = dict(os.environ, EAGLE_DATA_DIR=str(root.with_name(root.name + '-runtime') / 'data'))
+    if args.scroll:
+        command.append('--fixture-scroll-smoke')
+        env['SLINT_DEBUG_PERFORMANCE'] = 'refresh_lazy,console'
+        env['EAGLE_FIXTURE_SCROLL_STEP'] = str(args.scroll_step)
+        if args.scroll_offscreen:
+            env['EAGLE_FIXTURE_SCROLL_OFFSCREEN'] = '1'
     app_executable = None
     if args.launch_mode == 'app':
         command, app_executable = app_command(binary, output, env, command[1:])
@@ -314,6 +349,9 @@ def main():
                     window = json.loads((root / 'fixture-window.json').read_text())
                     if window.get('stage') == stage:
                         result['windows_by_stage'][stage] = window
+                        if stage == 'scrolling' and window.get('visible_track_rows'):
+                            result['scroll_max_first_row'] = max(
+                                result['scroll_max_first_row'], window['visible_track_rows'][0])
                 except (FileNotFoundError, json.JSONDecodeError):
                     pass
                 if previous != stage:
@@ -344,6 +382,12 @@ def main():
             result['queue_entries_after'] = fixture_queue_entries(root)
             if renderer == 'femtovg-wgpu':
                 result['actual_graphics_api'] = observed_gpu_api(output.with_suffix('.process.log').read_text())
+            if args.scroll:
+                result['scroll_render_samples'] = scroll_metrics(output.with_suffix('.process.log').read_text())
+                if sum(sample['rendered_frames'] > 0 for sample in result['scroll_render_samples']) < 2:
+                    raise RuntimeError('Scroll stage did not yield enough render samples')
+                if result['scroll_max_first_row'] == 0:
+                    raise RuntimeError('Track-list viewport did not move during scroll stage')
             result['allocator_environment'] = dict(
                 line.split('=', 1) for line in (root / 'fixture-allocator.env').read_text().splitlines()
             )

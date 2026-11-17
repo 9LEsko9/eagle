@@ -439,7 +439,10 @@ fn run_inner(
         if !root.join(".eagle-fixture").is_file() {
             return Err("smoke requires --fixture-root".into());
         }
-        Some(smoke::Smoke::start(root)?)
+        Some(smoke::Smoke::start(
+            root,
+            std::env::args().any(|arg| arg == "--fixture-scroll-smoke"),
+        )?)
     } else {
         None
     };
@@ -903,6 +906,7 @@ fn record_fixture_window(root: &std::path::Path, stage: &str) {
             "queue_entries": shell.window.as_ref().map(|ui| {
                 ui.global::<Library>().get_queue_order().row_count()
             }),
+            "visible_track_rows": bridge::fixture_visible_rows(),
             "player_status": shell.window.as_ref().map(|ui| {
                 format!("{:?}", ui.global::<Player>().get_status())
             }),
@@ -1159,9 +1163,61 @@ mod tests {
             }
         }
     }
+    fn wave_drag_tracks_pointer_without_animation_delay() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        let ui = DesktopWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280., 880.));
+        ui.global::<Ui>().set_signed_in(true);
+        ui.global::<Ui>().set_route(Route::Radio);
+        ui.global::<Wave>()
+            .set_dots(Rc::new(VecModel::from(pad_dots())).into());
+        ui.show().unwrap();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(1));
+        slint::platform::update_timers_and_animations();
+
+        let pad = ElementHandle::find_by_element_type_name(&ui, "MoodPad")
+            .next()
+            .unwrap();
+        let knob = ElementHandle::find_by_element_id(&ui, "MoodPad::knob")
+            .next()
+            .unwrap();
+        let origin = pad.absolute_position();
+        let size = pad.size();
+        let centre =
+            slint::LogicalPosition::new(origin.x + size.width / 2., origin.y + size.height / 2.);
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position: centre,
+            button: PointerEventButton::Left,
+        });
+        for (dx, dy) in [(0.15, 0.), (-0.1, 0.12), (0.05, -0.2)] {
+            let pointer = slint::LogicalPosition::new(
+                centre.x + dx * size.width,
+                centre.y + dy * size.height,
+            );
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position: pointer });
+            slint::platform::update_timers_and_animations();
+            let position = knob.absolute_position();
+            let knob_size = knob.size();
+            assert!(ui.global::<Wave>().get_dragging());
+            assert!(
+                (position.x + knob_size.width / 2. - pointer.x).abs() < 0.5
+                    && (position.y + knob_size.height / 2. - pointer.y).abs() < 0.5,
+                "knob lagged behind the pointer without advancing animation time"
+            );
+        }
+        let pointer = knob.absolute_position();
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position: pointer,
+            button: PointerEventButton::Left,
+        });
+        assert!(!ui.global::<Wave>().get_dragging());
+    }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        wave_drag_tracks_pointer_without_animation_delay();
         page_composition_stays_aligned_across_routes();
         search_runs_while_typing_and_keeps_the_player_bar();
         loading_indicators_wait_for_the_delay();
