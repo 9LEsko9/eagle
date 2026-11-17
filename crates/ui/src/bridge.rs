@@ -1925,7 +1925,8 @@ pub(super) mod tests {
         let ui = DesktopWindow::new().unwrap();
         ui.global::<Ui>().set_route(Route::Search);
         let root = std::env::temp_dir().join(format!("eagle-ui-search-{}", std::process::id()));
-        let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
+        let session =
+            eagle_app::session::Session::start_with_providers(root, vec![], |_| {}).unwrap();
         let bridge = Bridge {
             services: Services::default(),
             rows: Rc::new(VecModel::default()),
@@ -2031,7 +2032,8 @@ pub(super) mod tests {
         ui.global::<Ui>().set_route(Route::Search);
         let root =
             std::env::temp_dir().join(format!("eagle-ui-search-delta-{}", std::process::id()));
-        let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
+        let session =
+            eagle_app::session::Session::start_with_providers(root, vec![], |_| {}).unwrap();
         let bridge = Bridge {
             services: Services::default(),
             rows: Rc::new(VecModel::default()),
@@ -2156,7 +2158,8 @@ pub(super) mod tests {
     pub(crate) fn structural_changes_and_cover_toggle_release_artwork() {
         let ui = DesktopWindow::new().unwrap();
         let root = std::env::temp_dir().join(format!("eagle-ui-covers-{}", std::process::id()));
-        let session = eagle_app::session::Session::start(root, |_| {}).unwrap();
+        let session =
+            eagle_app::session::Session::start_with_providers(root, vec![], |_| {}).unwrap();
         let rows = Rc::new(VecModel::default());
         let bridge = Bridge {
             services: Services::default(),
