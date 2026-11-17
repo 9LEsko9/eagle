@@ -130,7 +130,9 @@ fn apply_wave(ui: &DesktopWindow, bridge: &Bridge, state: WaveState) {
         .map(|item| format!("t:{}", item.id))
         .collect();
     wave.set_active(state.current.is_some());
-    wave.set_played(Rc::new(VecModel::from(played)).into());
+    if !wave.get_played().iter().eq(played.iter().cloned()) {
+        wave.set_played(Rc::new(VecModel::from(played)).into());
+    }
     wave.set_has_next(next.is_some());
     wave.set_next(next.unwrap_or_default());
     wave.set_why(state.why.into());
@@ -784,10 +786,12 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 .set_queue_order(Rc::new(VecModel::from(items)).into());
         }
         Event::Queue(tracks) => {
-            let keys = tracks
+            let queue = ui.global::<Library>().get_queue();
+            let known: HashMap<String, slint::Image> = queue
                 .iter()
-                .map(|t| format!("t:{}", t.id))
-                .collect::<Vec<_>>();
+                .filter(|item| item.cover.size().width > 0)
+                .map(|item| (item.id.to_string(), item.cover))
+                .collect();
             let ids = bridge.queue_ids.borrow();
             let start = bridge
                 .queue_current
@@ -807,6 +811,9 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                         },
                         ui,
                     );
+                    if let Some(cover) = known.get(item.id.as_str()) {
+                        item.cover = cover.clone();
+                    }
                     item.occurrence = ids
                         .get(start + index)
                         .map_or_else(String::new, u64::to_string)
@@ -814,8 +821,26 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                     item
                 })
                 .collect::<Vec<_>>();
-            ui.global::<Library>()
-                .set_queue(Rc::new(VecModel::from(items)).into());
+            let keys = items
+                .iter()
+                .filter(|item| item.cover.size().width == 0)
+                .map(|item| format!("t:{}", item.id))
+                .collect::<Vec<_>>();
+            if let Some(model) = queue.as_any().downcast_ref::<VecModel<TrackItem>>() {
+                for (index, item) in items.iter().enumerate() {
+                    if index >= model.row_count() {
+                        model.push(item.clone());
+                    } else if model.row_data(index).as_ref() != Some(item) {
+                        model.set_row_data(index, item.clone());
+                    }
+                }
+                while model.row_count() > items.len() {
+                    model.remove(model.row_count() - 1);
+                }
+            } else {
+                ui.global::<Library>()
+                    .set_queue(Rc::new(VecModel::from(items)).into());
+            }
             if ui.global::<Ui>().get_list_covers()
                 && ui.global::<Ui>().get_panel_open()
                 && !keys.is_empty()
@@ -894,6 +919,10 @@ fn apply(ui: &DesktopWindow, event: Event, bridge: &Bridge) {
                 if player.get_track_id().as_str() != track.id.to_string() {
                     *anchor.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     player.set_shown(0.);
+                    let next = ui.global::<Wave>().get_next();
+                    if next.id.as_str() == track.id.to_string() && next.cover.size().width > 0 {
+                        player.set_cover(next.cover);
+                    }
                     // Keep the displayed artwork until the replacement is decoded.
                     if track.cover.is_none() {
                         player.set_cover(slint::Image::default());
@@ -1308,14 +1337,20 @@ pub(super) fn bind(ui: &DesktopWindow, sender: CommandSender) {
     });
     let tx = sender.clone();
     actions.on_add_track_to_playlist(move |id, revision, track, album| {
-        if let (Ok(id), Ok(revision), Ok(track_id), Ok(album_id)) =
-            (id.parse(), revision.parse(), track.parse(), album.parse())
-        {
-            let _ = tx.send(Command::AddTrackToPlaylist {
-                id,
-                revision,
-                entry: Box::new(eagle_core::PlaylistTrack { track_id, album_id }),
-            });
+        if let (Ok(id), Ok(track_id), Ok(album_id)) = (id.parse(), track.parse(), album.parse()) {
+            let entry = Box::new(eagle_core::PlaylistTrack { track_id, album_id });
+            let command = if revision.is_empty() {
+                Command::AppendToPlaylist { id, entry }
+            } else if let Ok(revision) = revision.parse() {
+                Command::AddTrackToPlaylist {
+                    id,
+                    revision,
+                    entry,
+                }
+            } else {
+                return;
+            };
+            let _ = tx.send(command);
         }
     });
     let tx = sender.clone();
@@ -2265,6 +2300,25 @@ pub(super) mod tests {
             bridge.images.borrow().is_empty(),
             "cancelled artwork must not be converted to Slint"
         );
+        ui.global::<Ui>().set_panel_open(true);
+        apply(
+            &ui,
+            Event::Queue(vec![item("1").track, item("2").track]),
+            &bridge,
+        );
+        bridge.thumbnail(&ui, "t:yandex:2", &cover);
+        let upcoming = ui.global::<Library>().get_queue();
+        apply(&ui, Event::Queue(vec![item("2").track]), &bridge);
+        assert!(std::ptr::eq(
+            upcoming.as_any(),
+            ui.global::<Library>().get_queue().as_any()
+        ));
+        assert_eq!(
+            upcoming.row_data(0).unwrap().cover.size().width,
+            1,
+            "upcoming artwork must survive a track change"
+        );
+        ui.global::<Ui>().set_panel_open(false);
         let entries = vec![(1, item("1").track), (2, item("2").track)];
         apply(
             &ui,

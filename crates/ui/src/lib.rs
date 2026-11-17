@@ -1099,9 +1099,65 @@ mod tests {
         ui.global::<Ui>().set_route(Route::Library);
         step(0);
     }
+    fn page_composition_stays_aligned_across_routes() {
+        for width in [560., 760., 1280., 1920.] {
+            for panel in [false, true] {
+                let ui = DesktopWindow::new().unwrap();
+                ui.window().set_size(slint::LogicalSize::new(width, 880.));
+                ui.global::<Motion>().set_reduced(true);
+                ui.global::<Ui>().set_signed_in(true);
+                ui.global::<Ui>().set_panel_open(panel);
+                ui.global::<Library>().set_title("Composition".into());
+                ui.show().unwrap();
+                let mut reference: Option<f32> = None;
+                for route in [Route::Library, Route::Search, Route::Radio, Route::Settings] {
+                    ui.global::<Ui>().set_route(route);
+                    slint::platform::update_timers_and_animations();
+                    let title = ElementHandle::find_by_element_type_name(&ui, "PageTitle")
+                        .next()
+                        .unwrap();
+                    let position = title.absolute_position();
+                    let expected_x = if width < 860. { 24. } else { 248. };
+                    assert!(
+                        (position.x - expected_x).abs() < 0.5,
+                        "width={width}, panel={panel}, route={route:?}, x={}",
+                        position.x
+                    );
+                    if let Some(y) = reference {
+                        assert!(
+                            (position.y - y).abs() < 0.5,
+                            "width={width}, panel={panel}, route={route:?}, y={}, expected={y}",
+                            position.y
+                        );
+                    } else {
+                        reference = Some(position.y);
+                    }
+                    assert!(position.x + title.size().width <= width + 0.5);
+                }
+                let mut detail_reference: Option<(f32, f32)> = None;
+                for route in [Route::Album, Route::Playlist, Route::Artist] {
+                    ui.global::<Ui>().set_route(route);
+                    slint::platform::update_timers_and_animations();
+                    let title = ElementHandle::find_by_element_type_name(&ui, "PageTitle")
+                        .next()
+                        .unwrap();
+                    let position = title.absolute_position();
+                    if let Some((x, y)) = detail_reference {
+                        assert!(
+                            (position.x - x).abs() < 0.5 && (position.y - y).abs() < 0.5,
+                            "detail header moved: width={width}, panel={panel}, route={route:?}, position={position:?}, expected=({x},{y})"
+                        );
+                    } else {
+                        detail_reference = Some((position.x, position.y));
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn accessible_actions_delta_and_hidden_player_timer() {
         i_slint_backend_testing::init_integration_test_with_mock_time();
+        page_composition_stays_aligned_across_routes();
         search_runs_while_typing_and_keeps_the_player_bar();
         loading_indicators_wait_for_the_delay();
         player_bar_centre_is_independent_of_title();
@@ -1202,6 +1258,8 @@ mod tests {
         bridge::tests::structural_changes_and_cover_toggle_release_artwork();
         grid_tests::visible_cards_keep_source_actions();
         let ui = DesktopWindow::new().unwrap();
+        // This scenario exercises the desktop sidebar; compact navigation has its own tests.
+        ui.window().set_size(slint::LogicalSize::new(1280., 880.));
         let rows = Rc::new(VecModel::from(vec![TrackItem {
             source_url: Default::default(),
             source_logo: Default::default(),

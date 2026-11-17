@@ -216,6 +216,10 @@ pub enum Command {
         revision: u64,
         entry: Box<PlaylistTrack>,
     },
+    AppendToPlaylist {
+        id: TrackId,
+        entry: Box<PlaylistTrack>,
+    },
     /// One coherent state reply, ordered before subsequent worker events.
     Snapshot,
     Downloads,
@@ -1209,17 +1213,7 @@ impl Worker {
             if let Some(position) = &self.last_position {
                 (self.emit)(Event::Position(position.clone()));
             }
-            if self.ui_attached
-                && let Some(track) = &self.player.track
-                && let Some(catalog) = &self.catalog
-            {
-                let _ = catalog.send(CatalogRequest::Cover(
-                    track.clone(),
-                    CoverTarget::Player,
-                    0,
-                    self.cover_generation,
-                ));
-            }
+            self.request_player_cover();
             self.request(Command::Collections)?;
             self.request(Command::Library)?;
             (self.emit)(Event::Providers(self.providers.statuses()));
@@ -1302,6 +1296,7 @@ impl Worker {
                                 Ok(CatalogReply::PlaylistChanged(..)
                                     | CatalogReply::PlaylistFailed(_)
                                     | CatalogReply::PlaylistEdited(..)
+                                    | CatalogReply::PlaylistAppended(..)
                                     | CatalogReply::RadioResult(..))
                             )
                         {
@@ -1314,6 +1309,7 @@ impl Worker {
                                 Ok(CatalogReply::PlaylistChanged(..)
                                     | CatalogReply::PlaylistFailed(_)
                                     | CatalogReply::PlaylistEdited(..)
+                                    | CatalogReply::PlaylistAppended(..)
                                     | CatalogReply::RadioResult(..))
                             )
                         {
@@ -1422,6 +1418,17 @@ impl Worker {
                             Ok(CatalogReply::Liked(id, liked)) => self.apply_liked(id, liked),
                             Ok(CatalogReply::PlaylistChanged(collections, created, deleted)) => {
                                 self.playlist_changed(generation, collections, created, deleted)?;
+                            }
+                            Ok(CatalogReply::PlaylistAppended(id, error)) => {
+                                self.playlist_edit_busy = false;
+                                (self.emit)(Event::PlaylistMutationBusy(false));
+                                if let Some(error) = error {
+                                    (self.emit)(Event::Error(error));
+                                } else if self.view == View::Playlist
+                                    && self.playlist_id.as_ref() == Some(&id)
+                                {
+                                    self.command(Command::Playlist(id))?;
+                                }
                             }
                             Ok(CatalogReply::PlaylistFailed(message)) => {
                                 (self.emit)(Event::PlaylistMutationBusy(false));
@@ -2028,6 +2035,36 @@ impl Worker {
         if !updates.is_empty() {
             (self.emit)(Event::Library(updates));
         }
+        self.emit_wave();
+    }
+    fn request_player_cover(&self) {
+        if !self.ui_attached {
+            return;
+        }
+        let Some(track) = &self.player.track else {
+            return;
+        };
+        let id = track.id.clone();
+        let tx = self.tx.clone();
+        let generation = self.cover_generation;
+        self.covers.request(vec![crate::covers::Job {
+            key: format!("now:{id}"),
+            context: id.provider().to_owned(),
+            stem: id.to_string().replace(':', "_"),
+            uri: track.cover.clone(),
+            size: 600,
+            reply: Some(Arc::new(move |cover| {
+                let _ = tx.send(Message::Catalog(
+                    0,
+                    Box::new(Ok(CatalogReply::Cover(
+                        CoverTarget::Player,
+                        id.clone(),
+                        cover,
+                        generation,
+                    ))),
+                ));
+            })),
+        }]);
     }
     /// Maps UI keys to cover jobs using what is currently listed.
     fn thumbnails(&self, keys: Vec<String>) {
@@ -2074,6 +2111,11 @@ impl Worker {
         if account == self.account {
             match result {
                 Ok(session) => {
+                    if let Err(error) = self.store.put_tracks(&session.batch.tracks) {
+                        self.radio_notice = Some(error.to_string());
+                        (self.emit)(Event::Error(error.to_string()));
+                        return;
+                    }
                     // A restart only takes over while the wave is still what plays.
                     let replace = replace && self.wave_active();
                     let refill = !start
@@ -2331,17 +2373,7 @@ impl Worker {
             }
             self.view_generation += 1;
             self.covers.invalidate();
-            if self.ui_attached
-                && let Some(track) = &self.player.track
-                && let Some(catalog) = &self.catalog
-            {
-                let _ = catalog.send(CatalogRequest::Cover(
-                    track.clone(),
-                    CoverTarget::Player,
-                    0,
-                    self.cover_generation,
-                ));
-            }
+            self.request_player_cover();
             self.header_job = None;
             self.playlist_snapshot = None;
             self.busy = true;
@@ -2411,6 +2443,22 @@ impl Worker {
                 {
                     self.playlist_edit_notice = None;
                 }
+            }
+            Command::AppendToPlaylist { id, entry } => {
+                if self.playlist_edit_busy {
+                    return Err("изменение плейлиста уже выполняется".into());
+                }
+                self.catalog
+                    .as_ref()
+                    .ok_or("каталог остановлен")?
+                    .send(CatalogRequest::AppendPlaylist(
+                        self.view_generation,
+                        id,
+                        entry,
+                    ))
+                    .map_err(|_| "каталог остановлен")?;
+                self.playlist_edit_busy = true;
+                (self.emit)(Event::PlaylistMutationBusy(true));
             }
             Command::AddTrackToPlaylist {
                 id,
@@ -2534,17 +2582,7 @@ impl Worker {
                 self.storage()?;
                 self.network_policy()?;
                 (self.emit)(Event::Downloads(self.store.downloads(&self.account)?));
-                if self.ui_attached
-                    && let Some(track) = &self.player.track
-                    && let Some(catalog) = &self.catalog
-                {
-                    let _ = catalog.send(CatalogRequest::Cover(
-                        track.clone(),
-                        CoverTarget::Player,
-                        0,
-                        self.cover_generation,
-                    ));
-                }
+                self.request_player_cover();
                 if self.ui_attached {
                     if let Some(job) = self.header_job.clone() {
                         self.covers.request(vec![job]);
@@ -3271,16 +3309,7 @@ impl Worker {
         state.track = Some(track.clone());
         state.bitrate_kbps = None;
         state.status = State::Loading;
-        if self.ui_attached
-            && let Some(catalog) = &self.catalog
-        {
-            let _ = catalog.send(CatalogRequest::Cover(
-                track,
-                CoverTarget::Player,
-                0,
-                self.cover_generation,
-            ));
-        }
+        self.request_player_cover();
         (self.emit)(Event::Player(self.player.clone()));
         self.emit_queue();
         Ok(())
@@ -3310,8 +3339,6 @@ impl Worker {
                 self.current = current;
                 self.last_position = None;
                 self.restored_position = Duration::ZERO;
-                self.emit_queue();
-                self.wave_track_changed();
                 if let Some(track) = self.queue.get(self.current).cloned() {
                     let bitrate = self
                         .audio_bitrates
@@ -3322,18 +3349,11 @@ impl Worker {
                     state.liked = self.queue_likes.contains(&track.id);
                     state.track = Some(track.clone());
                     state.bitrate_kbps = bitrate;
-                    if self.ui_attached
-                        && let Some(catalog) = &self.catalog
-                    {
-                        let _ = catalog.send(CatalogRequest::Cover(
-                            track,
-                            CoverTarget::Player,
-                            0,
-                            self.cover_generation,
-                        ));
-                    }
+                    self.request_player_cover();
                     (self.emit)(Event::Player(self.player.clone()));
                 }
+                self.emit_queue();
+                self.wave_track_changed();
             }
             eagle_engine::Event::StateChanged(status) => {
                 if let Some(anchor) = &mut self.last_position {
@@ -3345,6 +3365,13 @@ impl Worker {
                 (self.emit)(Event::Player(self.player.clone()));
             }
             eagle_engine::Event::Position(anchor) => {
+                // Audio markers include device latency; a delayed anchor from the previous
+                // track must not rewind the visible track after a newer marker arrived.
+                if self.last_position.as_ref().is_some_and(|last| {
+                    last.track != anchor.track && last.audible_at > anchor.audible_at
+                }) {
+                    return;
+                }
                 let Some(track) = self.engine_queue.get(anchor.track as usize).cloned() else {
                     return;
                 };
@@ -3361,9 +3388,9 @@ impl Worker {
                     state.liked = self.queue_likes.contains(&track.id);
                     state.bitrate_kbps = self.audio_bitrates.get(&occurrence).copied().flatten();
                     state.source_provider = self.audio_sources.get(&occurrence).cloned();
+                    (self.emit)(Event::Player(self.player.clone()));
                     self.emit_queue();
                     self.wave_track_changed();
-                    (self.emit)(Event::Player(self.player.clone()));
                 }
                 let repeated = self.history_marker.take().is_some_and(|(index, previous)| {
                     index == anchor.track
@@ -3438,6 +3465,7 @@ enum CatalogRequest {
     RefreshPlaylist(u64, TrackId),
     Cover(Arc<Track>, CoverTarget, u64, u64),
     ClearCovers,
+    AppendPlaylist(u64, TrackId, Box<PlaylistTrack>),
     /// Sends the due likes; `online` also makes the deferred ones due (the network came back).
     FlushLikes {
         online: bool,
@@ -3450,6 +3478,7 @@ enum CatalogReply {
     Collections(Vec<Collection>),
     PlaylistChanged(Vec<Collection>, Option<Playlist>, Option<TrackId>),
     PlaylistFailed(String),
+    PlaylistAppended(TrackId, Option<String>),
     PlaylistEdited(
         Option<PlaylistSnapshot>,
         Option<Vec<LibraryItem>>,
@@ -3580,7 +3609,8 @@ impl Catalog {
                             | CatalogRequest::RadioMore(generation, _, _, _) => *generation,
                             CatalogRequest::Dislike(_) => 0,
                             CatalogRequest::EditPlaylist(generation, _, _) => *generation,
-                            CatalogRequest::RefreshPlaylist(generation, _) => *generation,
+                            CatalogRequest::RefreshPlaylist(generation, _)
+                            | CatalogRequest::AppendPlaylist(generation, _, _) => *generation,
                             CatalogRequest::Cover(_, _, generation, _) => *generation,
                             CatalogRequest::FlushLikes { .. } => 0,
                             CatalogRequest::ClearCovers => unreachable!(),
@@ -3932,6 +3962,33 @@ impl Catalog {
                     None => Err(eagle_core::ProviderError::Auth.into()),
                 };
                 Ok(CatalogReply::RadioResult(account, false, result))
+            }
+            CatalogRequest::AppendPlaylist(generation, id, entry) => {
+                let result = (|| -> Result<Option<String>> {
+                    let snapshot = self.provider_for(&id)?.playlist_snapshot(&id)?;
+                    if snapshot.playlist.id != id {
+                        return Err("провайдер вернул другой плейлист".into());
+                    }
+                    let at = snapshot.playlist.tracks.len();
+                    match self.request(CatalogRequest::EditPlaylist(
+                        generation,
+                        snapshot,
+                        PlaylistEdit::Insert {
+                            at,
+                            tracks: vec![*entry],
+                        },
+                    ))? {
+                        CatalogReply::PlaylistEdited(_, _, error) => Ok(error),
+                        _ => Err("неожиданный ответ изменения плейлиста".into()),
+                    }
+                })();
+                Ok(CatalogReply::PlaylistAppended(
+                    id,
+                    match result {
+                        Ok(error) => error,
+                        Err(error) => Some(error.to_string()),
+                    },
+                ))
             }
             CatalogRequest::RefreshPlaylist(_, id) => {
                 let message = "плейлист изменился; обновите список и повторите действие".to_owned();
@@ -4798,6 +4855,16 @@ mod delta_tests {
             })
         };
         worker.engine_event(position(1));
+        worker.engine_event(eagle_engine::Event::Position(PositionAnchor {
+            track: 0,
+            position: Duration::from_secs(5),
+            audible_at: Instant::now() - Duration::from_secs(1),
+            state: State::Playing,
+        }));
+        assert_eq!(
+            worker.current, 1,
+            "late old anchor must not rewind the wave"
+        );
         let first: String = worker
             .store
             .read()
@@ -5299,6 +5366,27 @@ mod delta_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn fresh_wave_tracks_can_be_liked_before_they_have_played() {
+        let (mut worker, _requests, root) = wave_worker("fresh-like", 2);
+        let track = (*row(73, false).track).clone();
+        worker.radio_finished(
+            "a".into(),
+            true,
+            Ok(RadioSession {
+                id: "fresh".into(),
+                batch: RadioBatch {
+                    id: None,
+                    tracks: vec![track.clone()],
+                },
+            }),
+        );
+        worker.store.like(&track.id, true, &[]).unwrap();
+        assert!(worker.store.is_liked(&track.id).unwrap());
+        assert_eq!(worker.store.liked_tracks(&[]).unwrap()[0].id, track.id);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn the_feed_shows_two_previous_tracks_with_likes_and_the_next_one() {
         let (mut worker, _catalog_rx, root) = wave_worker("feed", 5);
         worker.current = 3;
@@ -5568,10 +5656,6 @@ mod delta_tests {
         worker.command(Command::UiAttached(true)).unwrap();
         assert_ne!(worker.cover_generation, old_generation);
         worker.command(Command::Snapshot).unwrap();
-        assert!(matches!(
-            catalog_rx.try_recv(),
-            Ok(CatalogRequest::Cover(_, CoverTarget::Player, _, _))
-        ));
         assert!(matches!(
             catalog_rx.try_recv(),
             Ok(CatalogRequest::Cover(_, CoverTarget::Collection, _, _))
@@ -6691,8 +6775,19 @@ mod sync_tests {
                 return Err(PlaylistEditError::Uncertain);
             }
             let mut result = snapshot.clone();
-            if let PlaylistEdit::Delete { from, to } = edit {
-                result.playlist.tracks.drain(from..to);
+            match edit {
+                PlaylistEdit::Delete { from, to } => {
+                    result.playlist.tracks.drain(from..to);
+                }
+                PlaylistEdit::Insert { at, tracks } => {
+                    for entry in tracks.into_iter().rev() {
+                        let mut track = result.playlist.tracks[0].clone();
+                        track.id = entry.track_id;
+                        track.album = Some(entry.album_id);
+                        result.playlist.tracks.insert(at, track);
+                    }
+                }
+                _ => {}
             }
             result.revision += 1;
             Ok(result)
@@ -6809,6 +6904,71 @@ mod sync_tests {
                 .unwrap();
             let stored: Playlist = serde_json::from_str(&json).unwrap();
             assert_eq!(stored.tracks.len(), rows.len());
+            let root = c.root.clone();
+            drop(c);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn append_fetches_current_revision_and_preserves_existing_tracks() {
+        use eagle_provider_sdk::testkit::fake_track;
+        for mode in [0, 1, 2, 3] {
+            let mut c = catalog(false);
+            let id: TrackId = "yandex:1_13".parse().unwrap();
+            let provider = Arc::new(EditFixture {
+                snapshot: PlaylistSnapshot {
+                    playlist: Playlist {
+                        id: id.clone(),
+                        title: "test".into(),
+                        tracks: vec![fake_track("yandex", "1", "one", "artist", 1000)],
+                        cover: None,
+                    },
+                    revision: 8,
+                },
+                mode,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            c.providers = registry(provider.clone());
+            let CatalogReply::PlaylistAppended(target, error) = c
+                .request(CatalogRequest::AppendPlaylist(
+                    99,
+                    id.clone(),
+                    Box::new(PlaylistTrack {
+                        track_id: "yandex:2".parse().unwrap(),
+                        album_id: "yandex:10".parse().unwrap(),
+                    }),
+                ))
+                .unwrap()
+            else {
+                panic!("append result expected");
+            };
+            assert_eq!(target, id);
+            assert_eq!(error.is_some(), mode != 0);
+            assert_eq!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(mode != 3)
+            );
+            if mode == 0 {
+                let json: String = c
+                    .store
+                    .read()
+                    .unwrap()
+                    .query_row(
+                        "SELECT json FROM playlists WHERE id=?1",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let playlist: Playlist = serde_json::from_str(&json).unwrap();
+                assert_eq!(
+                    playlist
+                        .tracks
+                        .iter()
+                        .map(|t| t.id.to_string())
+                        .collect::<Vec<_>>(),
+                    ["yandex:1", "yandex:2"]
+                );
+            }
             let root = c.root.clone();
             drop(c);
             std::fs::remove_dir_all(root).unwrap();

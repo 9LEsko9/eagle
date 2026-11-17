@@ -89,7 +89,7 @@ export component SkeletonRows inherits Rectangle {
 export component SkeletonGrid inherits Rectangle {
     in property <bool> round;
     in property <int> rows: 2;
-    private property <length> gap: 20px;
+    private property <length> gap: 24px;
     private property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
     private property <length> art: (self.width - (columns - 1) * gap) / columns;
     // Cut off like SkeletonRows when the window is short.
