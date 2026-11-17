@@ -24,26 +24,27 @@ pub(crate) struct QueueTracks {
 impl QueueTracks {
     pub(crate) fn reset(&self, entries: Vec<(Option<u64>, Arc<Track>)>) {
         let old = self.entries.borrow();
-        let known: HashMap<usize, Image> = self
+        let known: HashMap<TrackId, Image> = self
             .images
             .borrow()
             .iter()
             .filter_map(|(row, image)| {
                 old.get(*row)
-                    .map(|(_, track)| (Arc::as_ptr(track) as usize, image.clone()))
+                    .map(|(_, track)| (track.id.clone(), image.clone()))
             })
             .collect();
         drop(old);
-        *self.images.borrow_mut() = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(row, (_, track))| {
+        *self.entries.borrow_mut() = entries;
+        let entries = self.entries.borrow();
+        *self.images.borrow_mut() = self
+            .active_rows()
+            .filter_map(|row| {
                 known
-                    .get(&(Arc::as_ptr(track) as usize))
+                    .get(&entries[row].1.id)
                     .map(|image| (row, image.clone()))
             })
             .collect();
-        *self.entries.borrow_mut() = entries;
+        drop(entries);
         self.notify.reset();
     }
 
