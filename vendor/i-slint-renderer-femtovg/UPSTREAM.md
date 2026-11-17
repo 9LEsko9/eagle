@@ -10,6 +10,11 @@ allocates latency + 1 drawables. Three drawables let CPU and GPU work overlap;
 reducing this to two saves memory at the cost of rendering throughput.
 The setting survives resize and surface recreation through the normal WGPU API.
 
+In `itemrenderer.rs`, fully transparent subtrees skip drawing and release their
+cached layer. This prevents hidden controls in virtualized lists from allocating
+offscreen textures and issuing GPU passes when rows are created during scrolling.
+Positive opacity still follows the upstream compositing path, including fades.
+
 ## По-русски
 
 Исходный Slint 1.17.0 с сохранёнными лицензиями. В `wgpu.rs` явно задано
@@ -18,3 +23,9 @@ The setting survives resize and surface recreation through the normal WGPU API.
 три позволяют CPU и GPU работать параллельно; сокращение до двух экономит память
 за счёт пропускной способности рендеринга. Настройка применяется
 штатным API WGPU и сохраняется при изменении размера и пересоздании поверхности.
+
+В `itemrenderer.rs` полностью прозрачные поддеревья пропускают отрисовку и
+освобождают свой кэшированный слой. Скрытые кнопки виртуального списка больше
+не создают текстуры и GPU-проходы при появлении строк во время прокрутки.
+При положительной прозрачности, включая плавные переходы, используется исходный
+путь композитинга.
