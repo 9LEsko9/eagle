@@ -1830,6 +1830,7 @@ pub(super) mod tests {
             row_window: Cell::new((0, 0)),
             card_window: Cell::new((0, 0)),
             images: RefCell::new(HashMap::new()),
+            queue: Rc::new(crate::queue_tracks::QueueTracks::default()),
             queue_ids: RefCell::new(Vec::new()),
             queue_current: Cell::new(None),
         };
@@ -1884,6 +1885,7 @@ pub(super) mod tests {
             row_window: Cell::new((0, 0)),
             card_window: Cell::new((0, 0)),
             images: RefCell::new(HashMap::new()),
+            queue: Rc::new(crate::queue_tracks::QueueTracks::default()),
             queue_ids: RefCell::new(Vec::new()),
             queue_current: Cell::new(None),
         };
