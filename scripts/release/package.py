@@ -21,13 +21,18 @@ TARGETS = {
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
 
 
-def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
+def package(target: str, version: str, bin_dir: Path, output: Path, app_only: bool = False) -> Path:
     if target not in TARGETS:
         raise ValueError(f"unsupported target: {target}")
     match = VERSION.fullmatch(version)
     if not match or (match.group(4) and any(part.isdigit() and len(part) > 1 and part[0] == "0" for part in match.group(4).split("."))):
         raise ValueError(f"invalid semantic version: {version}")
     platform = TARGETS[target]
+    if app_only and platform != "macos":
+        raise ValueError("--app-only requires a macOS target")
+    app = output / "Eagle.app"
+    if app_only and app.exists():
+        raise FileExistsError(f"refusing to overwrite existing bundle: {app}")
     extension = ".exe" if platform == "windows" else ""
     output.mkdir(parents=True, exist_ok=True)
     suffix = ".tar.gz" if platform == "linux" else ".zip"
@@ -44,6 +49,9 @@ def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
             (contents / "MacOS").mkdir(parents=True)
             (contents / "Resources").mkdir()
             shutil.move(stage / "eagle-desktop", contents / "MacOS" / "eagle-desktop")
+            shutil.move(stage / "eagle-cli", contents / "MacOS" / "eagle-cli")
+            for name in ("LICENSE", "EXCEPTIONS.md"):
+                shutil.move(stage / name, contents / "Resources" / name)
             shutil.copyfile(ROOT / "assets/brand/out/desktop/eagle.icns", contents / "Resources/eagle.icns")
             info = {
                 "CFBundleDevelopmentRegion": "en",
@@ -52,6 +60,7 @@ def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
                 "CFBundleIdentifier": "app.eagle.music",
                 "CFBundleInfoDictionaryVersion": "6.0",
                 "CFBundleName": "Eagle",
+                "CFBundleDisplayName": "Eagle",
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": ".".join(match.group(i) for i in range(1, 4)),
                 "CFBundleGetInfoString": version,
@@ -60,6 +69,11 @@ def package(target: str, version: str, bin_dir: Path, output: Path) -> Path:
             }
             with (contents / "Info.plist").open("wb") as f:
                 plistlib.dump(info, f)
+            if app_only:
+                shutil.copytree(contents.parent, app)
+                for name in ("eagle-desktop", "eagle-cli"):
+                    (app / "Contents" / "MacOS" / name).chmod(0o755)
+                return app
         if platform == "linux":
             with tarfile.open(archive, "w:gz") as tar:
                 for path in sorted(stage.iterdir()):
@@ -88,9 +102,10 @@ def main() -> None:
     parser.add_argument("--version", required=True)
     parser.add_argument("--bin-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--app-only", action="store_true", help="write a standalone unsigned Eagle.app instead of an archive (macOS only)")
     args = parser.parse_args()
     try:
-        print(package(args.target, args.version, args.bin_dir, args.output))
+        print(package(args.target, args.version, args.bin_dir, args.output, args.app_only))
     except (ValueError, OSError) as error:
         parser.exit(1, f"error: {error}\n")
 

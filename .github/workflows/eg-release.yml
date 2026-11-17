@@ -102,6 +102,10 @@ jobs:
           unzip -q "${archive[0]}" -d signed
           app=$(find signed -type d -name Eagle.app -print -quit)
           test -n "$app"
+          test -x "$app/Contents/MacOS/eagle-desktop"
+          test -x "$app/Contents/MacOS/eagle-cli"
+          test -f "$app/Contents/Resources/LICENSE"
+          test -f "$app/Contents/Resources/EXCEPTIONS.md"
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
           rm "${archive[0]}"

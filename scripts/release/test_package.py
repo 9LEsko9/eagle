@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import stat
 from pathlib import Path
 import plistlib
 import tarfile
@@ -54,9 +56,32 @@ class PackagingTest(unittest.TestCase):
                 self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
                 self.assertEqual(info["CFBundleExecutable"], "eagle-desktop")
                 self.assertIn("Eagle.app/Contents/Resources/eagle.icns", zf.namelist())
-                self.assertIn("EXCEPTIONS.md", zf.namelist())
-                for name in ("Eagle.app/Contents/MacOS/eagle-desktop", "eagle-cli"):
+                self.assertEqual({name.split("/")[0] for name in zf.namelist()}, {"Eagle.app"})
+                self.assertIn("Eagle.app/Contents/Resources/LICENSE", zf.namelist())
+                self.assertIn("Eagle.app/Contents/Resources/EXCEPTIONS.md", zf.namelist())
+                for name in ("Eagle.app/Contents/MacOS/eagle-desktop", "Eagle.app/Contents/MacOS/eagle-cli"):
                     self.assertEqual((zf.getinfo(name).external_attr >> 16) & 0o777, 0o755)
+
+    def test_standalone_app_is_complete_and_executable(self):
+        app = package.package("aarch64-apple-darwin", "1.2.3", self.bin, self.root / "out", app_only=True)
+        self.assertEqual(list(app.parent.iterdir()), [app])
+        contents = app / "Contents"
+        info = plistlib.loads((contents / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleExecutable"], "eagle-desktop")
+        for name in ("eagle-desktop", "eagle-cli"):
+            binary = contents / "MacOS" / name
+            self.assertEqual(binary.read_bytes(), b"binary")
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o755)
+        for name in ("LICENSE", "EXCEPTIONS.md", "eagle.icns"):
+            self.assertTrue((contents / "Resources" / name).is_file())
+        with self.assertRaises(FileExistsError):
+            package.package("aarch64-apple-darwin", "1.2.3", self.bin, self.root / "out", app_only=True)
+
+    def test_standalone_app_rejects_other_platforms(self):
+        for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                package.package(target, "1.2.3", self.bin, self.root / "out", app_only=True)
 
     def test_mac_prerelease_metadata(self):
         archive = package.package("aarch64-apple-darwin", "1.2.3-rc.1+build.4", self.bin, self.root / "out")
