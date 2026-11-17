@@ -16,7 +16,7 @@ pub use eagle_net::policy::NetworkStatus;
 pub use eagle_store::DownloadState;
 use eagle_store::{Cache, Store};
 use std::{
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, mpsc},
@@ -748,6 +748,10 @@ impl Drop for Session {
         }
     }
 }
+type SourceFactory = dyn Fn(&Track, u64) -> std::result::Result<eagle_engine::Source, eagle_engine::SourceError>
+    + Send
+    + Sync;
+
 struct Worker {
     store: Arc<Store>,
     cache: Arc<Cache>,
@@ -758,6 +762,7 @@ struct Worker {
     engine: Option<Engine>,
     engine_events: Option<thread::JoinHandle<()>>,
     engine_generation: u64,
+    source_factory: OnceCell<Arc<SourceFactory>>,
     audio_bitrates: HashMap<u64, Option<u32>>,
     /// Provider id of the copy that plays, per queue occurrence.
     audio_sources: HashMap<u64, String>,
@@ -928,6 +933,7 @@ impl Worker {
             engine: None,
             engine_events: None,
             engine_generation: 0,
+            source_factory: OnceCell::new(),
             audio_bitrates: HashMap::new(),
             audio_sources: HashMap::new(),
             tx,
@@ -986,35 +992,7 @@ impl Worker {
         let Some(saved) = self.store.playback(&self.profile)? else {
             return Ok(());
         };
-        // Entries retain the original order; order contains occurrence IDs, not track IDs.
-        let entries: std::collections::HashMap<_, _> = saved
-            .entries
-            .iter()
-            .map(|entry| (entry.id, Arc::new(entry.track.clone())))
-            .collect();
-        self.queue_original = saved
-            .entries
-            .iter()
-            .map(|e| entries[&e.id].clone())
-            .collect();
-        self.queue_ids = entries
-            .iter()
-            .map(|(id, track)| (Arc::as_ptr(track) as usize, *id))
-            .collect();
-        // The queue belongs to the profile; radio contexts of another account are dropped
-        // and their tracks stay in the queue as ordinary entries.
-        self.queue_radio = saved
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .radio
-                    .clone()
-                    .filter(|context| context.account == self.account)
-                    .map(|context| (entry.id, context))
-            })
-            .collect();
-        self.next_queue_id = saved
+        let next_queue_id = saved
             .entries
             .iter()
             .map(|e| e.id)
@@ -1022,6 +1000,28 @@ impl Worker {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or("исчерпаны идентификаторы очереди")?;
+        // Move decoded metadata into the queue instead of cloning every restored track.
+        let mut entries = HashMap::with_capacity(saved.entries.len());
+        let mut original = Vec::with_capacity(saved.entries.len());
+        let mut ids = HashMap::with_capacity(saved.entries.len());
+        let mut radio = HashMap::new();
+        for entry in saved.entries {
+            let track = entry.track;
+            ids.insert(Arc::as_ptr(&track) as usize, entry.id);
+            original.push(track.clone());
+            // Other accounts' radio contexts are dropped; their tracks stay in the queue.
+            if let Some(context) = entry
+                .radio
+                .filter(|context| context.account == self.account)
+            {
+                radio.insert(entry.id, context);
+            }
+            entries.insert(entry.id, track);
+        }
+        self.queue_original = original;
+        self.queue_ids = ids;
+        self.queue_radio = radio;
+        self.next_queue_id = next_queue_id;
         self.queue = saved.order.iter().map(|id| entries[id].clone()).collect();
         self.current = saved
             .current
@@ -1101,7 +1101,7 @@ impl Worker {
                 .iter()
                 .map(|track| eagle_store::PlaybackEntry {
                     id: self.occurrence_id(track),
-                    track: (**track).clone(),
+                    track: track.clone(),
                     radio: self.queue_radio.get(&self.occurrence_id(track)).cloned(),
                 })
                 .collect(),
@@ -1996,6 +1996,7 @@ impl Worker {
     }
     fn stop_engine(&mut self) {
         self.engine_generation = self.engine_generation.wrapping_add(1);
+        self.source_factory.take();
         self.engine.take();
         if let Some(worker) = self.engine_events.take() {
             let _ = worker.join();
@@ -3243,27 +3244,46 @@ impl Worker {
         if self.providers.for_track(&track.id).is_none() {
             return Err("провайдер недоступен".into());
         }
-        let bitrate_tx = self.tx.clone();
-        let source_tx = self.tx.clone();
-        let generation = self.engine_generation;
+        let factory = self
+            .source_factory
+            .get_or_init(|| {
+                let providers = self.providers.clone();
+                let store = self.store.clone();
+                let cache = self.cache.clone();
+                let net = self.net.clone();
+                let account_provider = providers.account_provider().map(|p| p.info().id.to_owned());
+                let account = self.account.clone();
+                let tx = self.tx.clone();
+                let generation = self.engine_generation;
+                // Account and generation belong to this queue, even if opening happens much later.
+                Arc::new(move |track: &Track, occurrence| {
+                    let bitrate_tx = tx.clone();
+                    let source_tx = tx.clone();
+                    crate::source::SourceContext {
+                        providers: providers.clone(),
+                        store: store.clone(),
+                        cache: cache.clone(),
+                        net: net.clone(),
+                        account_provider: account_provider.clone(),
+                        account: account.clone(),
+                        requested: track.id.clone(),
+                        on_bitrate: Arc::new(move |bitrate| {
+                            let _ =
+                                bitrate_tx.send(Message::Bitrate(generation, occurrence, bitrate));
+                        }),
+                        on_source: Arc::new(move |id| {
+                            let _ =
+                                source_tx.send(Message::Source(generation, occurrence, id.clone()));
+                        }),
+                    }
+                    .choose()
+                })
+            })
+            .clone();
         let occurrence = self.occurrence_id(track);
-        Ok(crate::source::lazy_source(crate::source::SourceContext {
-            providers: self.providers.clone(),
-            store: self.store.clone(),
-            cache: self.cache.clone(),
-            net: self.net.clone(),
-            account_provider: self
-                .providers
-                .account_provider()
-                .map(|p| p.info().id.to_owned()),
-            account: self.account.clone(),
-            requested: track.id.clone(),
-            on_bitrate: Arc::new(move |bitrate| {
-                let _ = bitrate_tx.send(Message::Bitrate(generation, occurrence, bitrate));
-            }),
-            on_source: Arc::new(move |id| {
-                let _ = source_tx.send(Message::Source(generation, occurrence, id.clone()));
-            }),
+        let track = track.clone();
+        Ok(crate::source::lazy_source(move || {
+            factory(&track, occurrence)
         }))
     }
     fn play_current(&mut self) -> Result<()> {
@@ -3287,6 +3307,7 @@ impl Worker {
             .cloned()
             .collect();
         self.engine_generation = self.engine_generation.wrapping_add(1);
+        self.source_factory.take();
         for item in &self.engine_queue {
             engine.enqueue(self.source(item)?)?;
         }
@@ -4979,6 +5000,67 @@ mod delta_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn restoring_large_shuffled_queue_preserves_occurrences_and_owned_radio() {
+        let root = std::env::temp_dir().join(format!("eg-large-restore-{}", std::process::id()));
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.catalog.take();
+        worker.catalog_worker.take().unwrap().join().unwrap();
+        worker.account = "owned".into();
+        let order: Vec<_> = (1..=10_000).rev().collect();
+        worker
+            .store
+            .save_playback(
+                &worker.profile,
+                eagle_store::PlaybackState {
+                    entries: (1..=10_000)
+                        .map(|id| eagle_store::PlaybackEntry {
+                            id,
+                            track: row(((id - 1) % 37 + 1) as u32, false).track,
+                            radio: (id <= 2).then(|| eagle_store::RadioContext {
+                                account: if id == 1 { "owned" } else { "other" }.into(),
+                                session_id: "session".into(),
+                                batch_id: Some("batch".into()),
+                            }),
+                        })
+                        .collect(),
+                    order: order.clone(),
+                    current: Some(5_001),
+                    position_ms: 500,
+                    shuffle: true,
+                    repeat: 2,
+                },
+            )
+            .unwrap();
+        worker.restore_playback().unwrap();
+        assert_eq!(worker.queue.len(), 10_000);
+        assert_eq!(worker.current, 4_999);
+        assert_eq!(worker.next_queue_id, 10_001);
+        assert_eq!(worker.occurrence_id(&worker.queue[worker.current]), 5_001);
+        assert_eq!(worker.queue_original[0].id, worker.queue_original[37].id);
+        assert!(!Arc::ptr_eq(
+            &worker.queue_original[0],
+            &worker.queue_original[37]
+        ));
+        assert_eq!(worker.occurrence_id(&worker.queue_original[0]), 1);
+        assert_eq!(worker.occurrence_id(&worker.queue_original[37]), 38);
+        assert_eq!(worker.queue_radio.len(), 1);
+        assert_eq!(worker.queue_radio[&1].account, "owned");
+        assert_eq!(worker.restored_position, Duration::from_millis(500));
+        assert!(worker.player.shuffle);
+        assert_eq!(worker.player.repeat, Repeat::One);
+        worker.checkpoint().unwrap();
+        let saved = worker.store.playback(&worker.profile).unwrap().unwrap();
+        assert_eq!(saved.order, order);
+        assert_eq!(saved.entries.len(), 10_000);
+        assert_eq!(saved.current, Some(5_001));
+        assert_eq!(saved.position_ms, 500);
+        assert_eq!(saved.entries[0].radio.as_ref().unwrap().account, "owned");
+        assert!(saved.entries[1].radio.is_none());
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn startup_with_another_accounts_radio_queue_keeps_tracks_instead_of_failing() {
         let root = std::env::temp_dir().join(format!("eg-foreign-radio-{}", std::process::id()));
         let (tx, _) = mpsc::channel();
@@ -5793,6 +5875,64 @@ mod delta_tests {
         drop(worker);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn source_factory_shares_a_generation_and_preserves_its_account_snapshot() {
+        let root =
+            std::env::temp_dir().join(format!("eagle-source-snapshot-{}", std::process::id()));
+        let (tx, messages) = mpsc::channel();
+        let mut worker = Worker::new(root.clone(), Arc::new(|_| {}), tx).unwrap();
+        worker.account = "a".into();
+        let track = row(1, false).track;
+        worker.queue = vec![track.clone()];
+        worker.queue_original = worker.queue.clone();
+        worker.assign_occurrences().unwrap();
+        let occurrence = worker.occurrence_id(&track);
+        let generation = worker.engine_generation;
+        let mut map = eagle_store::RangeMap::new(4);
+        worker
+            .cache
+            .write_chunk(
+                &worker.store,
+                &track.id,
+                Quality::High,
+                &mut map,
+                0,
+                b"test",
+            )
+            .unwrap();
+        worker
+            .cache
+            .pin(&worker.store, &track.id, Quality::High, true)
+            .unwrap();
+        worker
+            .store
+            .record_audio_owner("a", &track.id.to_string())
+            .unwrap();
+
+        let source = worker.source(&track).unwrap();
+        let factory = worker.source_factory.get().unwrap().clone();
+        let _other = worker.source(&track).unwrap();
+        assert!(Arc::ptr_eq(&factory, worker.source_factory.get().unwrap()));
+        worker.stop_engine();
+        assert!(worker.source_factory.get().is_none());
+        worker.account = "b".into();
+        let next = worker.source(&track).unwrap();
+        assert!(!Arc::ptr_eq(&factory, worker.source_factory.get().unwrap()));
+        let interrupt = || eagle_engine::Interrupt {
+            generation: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            expected: 0,
+            preload: false,
+            seeking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        assert!(source.open_reader(interrupt()).is_ok());
+        assert!(messages.try_iter().any(|message| matches!(message,
+            Message::Source(g, o, id) if g == generation && o == occurrence && id == track.id)));
+        assert!(next.open_reader(interrupt()).is_err());
+        drop((source, next, factory, _other));
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn local_open_checks_current_account_rights_after_source_creation() {
         let root = std::env::temp_dir().join(format!("eagle-access-open-{}", std::process::id()));

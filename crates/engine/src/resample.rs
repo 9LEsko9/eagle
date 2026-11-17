@@ -6,6 +6,7 @@ use rubato::{FftFixedIn, Resampler};
 pub(crate) struct Converter {
     resampler: FftFixedIn<f32>,
     input: [Vec<f32>; 2],
+    block: Vec<Vec<f32>>,
     input_rate: u32,
     output_rate: u32,
     input_frames: u64,
@@ -17,9 +18,11 @@ impl Converter {
         let resampler = FftFixedIn::new(input_rate as usize, output_rate as usize, 1024, 2, 2)
             .map_err(|e| Error::Decode(e.to_string()))?;
         let skip = resampler.output_delay();
+        let block = resampler.output_buffer_allocate(true);
         Ok(Self {
             resampler,
             input: [Vec::new(), Vec::new()],
+            block,
             input_rate,
             output_rate,
             input_frames: 0,
@@ -36,14 +39,18 @@ impl Converter {
         let mut output = Vec::new();
         while self.input[0].len() >= self.resampler.input_frames_next() {
             let n = self.resampler.input_frames_next();
-            let block = self
+            let (_, written) = self
                 .resampler
-                .process(&[&self.input[0][..n], &self.input[1][..n]], None)
+                .process_into_buffer(
+                    &[&self.input[0][..n], &self.input[1][..n]],
+                    &mut self.block,
+                    None,
+                )
                 .map_err(|e| Error::Decode(e.to_string()))?;
             for channel in &mut self.input {
                 channel.drain(..n);
             }
-            self.append(&block, &mut output);
+            self.append(written, &mut output);
         }
         Ok(output)
     }
@@ -51,12 +58,11 @@ impl Converter {
         (self.input_frames * self.output_rate as u64 + self.input_rate as u64 / 2)
             / self.input_rate as u64
     }
-    fn append(&mut self, block: &[Vec<f32>], output: &mut Vec<[f32; 2]>) {
-        let skip = self.skip.min(block[0].len());
+    fn append(&mut self, written: usize, output: &mut Vec<[f32; 2]>) {
+        let skip = self.skip.min(written);
         self.skip -= skip;
-        let take =
-            (self.target() - self.output_frames).min((block[0].len() - skip) as u64) as usize;
-        output.extend((skip..skip + take).map(|i| [block[0][i], block[1][i]]));
+        let take = (self.target() - self.output_frames).min((written - skip) as u64) as usize;
+        output.extend((skip..skip + take).map(|i| [self.block[0][i], self.block[1][i]]));
         self.output_frames += take as u64;
     }
     pub fn remaining(&self) -> u64 {
@@ -64,22 +70,22 @@ impl Converter {
     }
     pub fn finish(&mut self) -> Result<Vec<[f32; 2]>, Error> {
         let mut output = Vec::new();
-        let input = if self.input[0].is_empty() {
-            None
-        } else {
-            Some(self.input.as_slice())
-        };
-        let block = self
-            .resampler
-            .process_partial(input, None)
-            .map_err(|e| Error::Decode(e.to_string()))?;
-        self.append(&block, &mut output);
-        while self.output_frames < self.target() {
-            let block = self
+        loop {
+            let n = self.resampler.input_frames_next();
+            for channel in &mut self.input {
+                channel.resize(n, 0.);
+            }
+            let (_, written) = self
                 .resampler
-                .process_partial::<Vec<f32>>(None, None)
+                .process_into_buffer(&self.input, &mut self.block, None)
                 .map_err(|e| Error::Decode(e.to_string()))?;
-            self.append(&block, &mut output);
+            self.append(written, &mut output);
+            for channel in &mut self.input {
+                channel.clear();
+            }
+            if self.output_frames >= self.target() {
+                break;
+            }
         }
         Ok(output)
     }
@@ -88,6 +94,47 @@ impl Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reused_output_matches_allocating_resampler_through_partial_tail() {
+        for (from, to) in [(8_000, 44_100), (44_100, 48_000), (48_000, 44_100)] {
+            for len in [1, 127, 1024, from + 13] {
+                let input: Vec<_> = (0..len)
+                    .map(|i| [(i as f32 * 0.04).sin(), (i as f32 * 0.07).cos()])
+                    .collect();
+                let target = (len as u64 * to as u64 + from as u64 / 2) / from as u64;
+                let mut reference = FftFixedIn::<f32>::new(from, to, 1024, 2, 2).unwrap();
+                let delay = reference.output_delay();
+                let mut expected = Vec::new();
+                let mut offset = 0;
+                while expected.len() < target as usize + delay {
+                    let n = reference.input_frames_next();
+                    let mut padded = [vec![0.; n], vec![0.; n]];
+                    for (index, frame) in input.iter().skip(offset).take(n).enumerate() {
+                        padded[0][index] = frame[0];
+                        padded[1][index] = frame[1];
+                    }
+                    offset = (offset + n).min(input.len());
+                    let block = reference.process(&padded, None).unwrap();
+                    expected.extend(block[0].iter().zip(&block[1]).map(|(&l, &r)| [l, r]));
+                }
+                let expected = &expected[delay..delay + target as usize];
+                let mut converter = Converter::new(from as u32, to as u32).unwrap();
+                let addresses = [converter.block[0].as_ptr(), converter.block[1].as_ptr()];
+                let mut actual = Vec::new();
+                for chunk in input.chunks(331) {
+                    for channel in &mut converter.block {
+                        channel.fill(f32::NAN);
+                    }
+                    actual.extend(converter.push(chunk).unwrap());
+                }
+                actual.extend(converter.finish().unwrap());
+                assert_eq!(actual, expected);
+                assert_eq!(converter.block[0].as_ptr(), addresses[0]);
+                assert_eq!(converter.block[1].as_ptr(), addresses[1]);
+            }
+        }
+    }
     #[test]
     fn trims_delay_and_tail_and_preserves_frame_count_in_both_directions() {
         for (from, to) in [(44_100, 48_000), (48_000, 44_100)] {

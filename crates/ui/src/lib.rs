@@ -25,6 +25,8 @@ mod media;
 mod native_window;
 mod notification;
 mod preferences;
+mod queue_model;
+mod queue_tracks;
 mod renderer;
 pub use renderer::Renderer;
 mod smoke;
@@ -588,35 +590,11 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
     slint::select_bundled_translation("ru")?;
     if renderer == Renderer::Software {
         log::info!(target: "eagle_ui", "rendering API: software");
-    } else {
-        let gpu_root = root.clone();
-        if ui
-            .window()
-            .set_rendering_notifier(move |state, api| {
-                if matches!(state, slint::RenderingState::RenderingSetup) {
-                    let api = match api {
-                        slint::GraphicsAPI::WGPU29 { device, .. } => {
-                            format!("WGPU/{:?}", device.adapter_info().backend)
-                        }
-                        slint::GraphicsAPI::NativeOpenGL { .. } => "OpenGL".to_owned(),
-                        slint::GraphicsAPI::WebGL { .. } => "WebGL".to_owned(),
-                        _ => "unknown".to_owned(),
-                    };
-                    log::info!(target: "eagle_ui", "rendering API: {api}");
-                    if fixture {
-                        let _ = std::fs::write(
-                            gpu_root.join("fixture-gpu.json"),
-                            serde_json::json!({"actual_graphics_api": api}).to_string(),
-                        );
-                    }
-                }
-            })
-            .is_err()
-        {
-            log::info!(target: "eagle_ui", "rendering API: unknown");
-        }
     }
     let preferences = preferences::Preferences::load(&root);
+    if let (Some(x), Some(y)) = (preferences.x, preferences.y) {
+        ui.window().set_position(slint::PhysicalPosition::new(x, y));
+    }
     preferences.apply(&ui);
     let rows = Rc::new(VecModel::<TrackItem>::default());
     ui.global::<Library>()
@@ -759,6 +737,14 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
                                 && i64::from(y) + 100 < i64::from(origin.y) + i64::from(size.height)
                         }) {
                             w.set_outer_position(position);
+                        } else if let Some(monitor) = w.primary_monitor() {
+                            let origin = monitor.position();
+                            w.set_outer_position(
+                                slint::winit_030::winit::dpi::PhysicalPosition::new(
+                                    origin.x.saturating_add(40),
+                                    origin.y.saturating_add(40),
+                                ),
+                            );
                         }
                     }
                     if let Some(theme) = w.theme() {
@@ -891,16 +877,35 @@ fn show_window() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 fn record_fixture_window(root: &std::path::Path, stage: &str) {
+    use slint::Model;
+    use slint::winit_030::WinitWindowAccessor;
     let value = SHELL.with(|shell| {
         let shell = shell.borrow();
         let shell = shell.as_ref()?;
         let size = shell.window.as_ref().map(|ui| ui.window().size());
+        let native = shell.window.as_ref().and_then(|ui| {
+            ui.window().with_winit_window(|window| {
+                let size = window.inner_size();
+                serde_json::json!({
+                    "surface_physical_pixels": [size.width, size.height],
+                    "scale_factor": window.scale_factor(),
+                    "position": window.outer_position().ok().map(|p| [p.x, p.y]),
+                })
+            })
+        });
         Some(serde_json::json!({
             "stage": stage,
             "surface_physical_pixels": size.map(|size| [size.width, size.height]),
             "scale_factor": shell.window.as_ref().map(|ui| ui.window().scale_factor()),
             "window_open": shell.open.load(Ordering::Acquire),
             "visible_to_user": shell.visible.load(Ordering::Acquire),
+            "native_window": native,
+            "queue_entries": shell.window.as_ref().map(|ui| {
+                ui.global::<Library>().get_queue_order().row_count()
+            }),
+            "player_status": shell.window.as_ref().map(|ui| {
+                format!("{:?}", ui.global::<Player>().get_status())
+            }),
         }))
     });
     if let Some(value) = value {

@@ -203,6 +203,7 @@ export global Actions {
     callback like-collection();
     // On-screen ranges (first index, count) so artwork loads only for what is visible.
     callback visible-rows(int, int);
+    callback queue-visible(int, int);
     callback list-covers-changed();
     callback visible-cards(int, int);
 }

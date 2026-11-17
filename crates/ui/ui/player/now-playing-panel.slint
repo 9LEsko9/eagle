@@ -188,6 +188,9 @@ export component NowPlayingCard inherits Rectangle {
             if Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
             ListView {
                 vertical-stretch: 1;
+                init => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
+                changed viewport-y => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
+                changed visible-height => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
                 for item in Library.queue : Rectangle {
                     height: 44px;
                     background: touch.has-hover ? Player.colors.tx.with-alpha(0.08) : transparent;

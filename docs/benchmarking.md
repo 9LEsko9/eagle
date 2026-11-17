@@ -1,6 +1,55 @@
 # Методика и исторические замеры
 
 Нужен Python 3.9+.
+
+## Desktop GPU memory / Память GPU-интерфейса
+
+```sh
+cargo build --release -p eagle-desktop
+python3 bench/desktop.py --binary target/release/eagle-desktop \
+  --fixture-root /tmp/eagle-gpu-budget --output /tmp/eagle-gpu-budget.json \
+  --renderer femtovg-wgpu --window-size 1920 1018 --window-position 0 30 \
+  --max-peak-mb 90
+```
+
+The macOS fixture contains 10,000 queued tracks, 10,000 likes and 1,000 saved tracks;
+all counts are checked before and after the run. It exercises playback, pause,
+window destruction and repeated reopening. Use fresh fixture roots for independent
+runs. Compare release builds on the same machine with the same window size, scale,
+artwork mode and allocator environment; avoid concurrent builds and profiling.
+The default `--launch-mode app` packages the supplied binary as an isolated macOS
+app and starts it through Launch Services. `--launch-mode direct` measures a direct
+CLI launch separately; do not pool these results. App reports contain the launcher
+exit status, while completion is validated by the app's fresh final peak file.
+`--max-peak-mb` checks whole-process physical footprint in decimal MB, including
+startup. It uses the kernel lifetime peak recorded after UI teardown and logger
+flush; final process exit follows. It is separate from the sampled peak, RSS and
+dedicated GPU memory. A missing final counter or an exceeded budget fails the run.
+`windows_by_stage` records native surface geometry and scale where available.
+This memory check does not establish frame pacing or sound quality.
+Window size is the logical client area: on the measured 1× macOS display,
+1920×1018 corresponds to an outer window of 1920×1050. Confirm native geometry
+and scale in the report; do not compare runs with different surfaces.
+
+На macOS fixture содержит очередь из 10 000 треков, 10 000 лайков и 1 000 офлайн-треков;
+состав проверяется до и после прогона. Проверяются воспроизведение,
+пауза, уничтожение окна и повторные открытия. Для независимых прогонов нужны новые
+каталоги. Сравнивайте release-сборки на одной машине при одинаковых размере окна,
+масштабе, режиме обложек и настройках allocator; без параллельных сборок и профайлеров.
+По умолчанию `--launch-mode app` упаковывает бинарник в изолированный macOS app bundle
+и запускает его через Launch Services. `--launch-mode direct` отдельно измеряет
+прямой CLI-запуск; результаты этих режимов нельзя смешивать. Для `.app` записывается
+код выхода launcher, а завершение проверяется по свежему финальному файлу пика приложения.
+`--max-peak-mb` проверяет физическую память всего процесса в десятичных МБ, включая
+запуск. Используется системный максимум, записанный после завершения UI и сброса
+логов; затем процесс выходит. Это отдельная метрика от наблюдавшегося максимума,
+RSS и видеопамяти. Отсутствие финального счётчика или превышение бюджета завершают
+проверку с ошибкой. `windows_by_stage` содержит доступные нативные размеры и масштаб.
+Этот тест памяти не подтверждает плавность интерфейса или качество звука.
+Размер задаёт клиентскую область в логических пикселях: на измеренном экране macOS
+с масштабом 1× область 1920×1018 соответствует внешнему окну 1920×1050. Сверяйте
+нативную геометрию и масштаб в отчёте; разные поверхности сравнивать нельзя.
+
 `cargo xtask bench --scenario store` измеряет 1000 записей SQLite, открытый
 кэш и 100 RGB-миниатюр 64×64 в памяти, без сети. Сравнивайте с `--scenario idle`
 на той же машине. Это фиксированная синтетическая нагрузка, а не пользовательская

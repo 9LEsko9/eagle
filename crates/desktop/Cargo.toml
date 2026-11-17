@@ -13,3 +13,6 @@ license = "GPL-3.0-or-later"
 eagle-app = { path = "../app" }
 eagle-ui = { path = "../ui" }
 eagle-platform = { path = "../platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
