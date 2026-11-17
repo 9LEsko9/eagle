@@ -174,11 +174,11 @@ export component NowPlayingCard inherits Rectangle {
             }
             if Player.source-url != "" : Rectangle {
                 height: 32px;
-                background: #121212;
+                background: transparent;
                 accessible-role: button;
                 accessible-label: Player.source;
                 accessible-action-default => { Actions.open-url(Player.source-url); }
-                Image { source: Player.source-logo; width: 120px; height: 15px; x: 6px; y: (parent.height - self.height) / 2; image-fit: contain; }
+                Image { colorize: Player.colors.tx; source: Player.source-logo; width: 96px; height: 22px; x: 6px; y: (parent.height - self.height) / 2; image-fit: contain; }
                 TouchArea { mouse-cursor: pointer; clicked => { Actions.open-url(Player.source-url); } }
             }
             Text {
@@ -188,6 +188,9 @@ export component NowPlayingCard inherits Rectangle {
             if Library.queue.length == 0 : Text { text: @tr("Очередь пуста"); color: Player.colors.tx2; font-size: Type.meta; }
             ListView {
                 vertical-stretch: 1;
+                init => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
+                changed viewport-y => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
+                changed visible-height => { Actions.queue-visible(floor(-self.viewport-y / 44px), ceil(self.visible-height / 44px) + 1); }
                 for item in Library.queue : Rectangle {
                     height: 44px;
                     background: touch.has-hover ? Player.colors.tx.with-alpha(0.08) : transparent;
@@ -224,7 +227,7 @@ export component NowPlayingCard inherits Rectangle {
 export component NowPlayingPanel inherits Rectangle {
     width: Ui.panel-open ? 336px : 0px;
     clip: true;
-    animate width { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; easing: Ui.panel-open ? cubic-bezier(0.2, 0.9, 0.25, 1.05) : cubic-bezier(0.2, 0, 0, 1); }
+
     private property <float> lifetime: Ui.panel-open ? 1 : 0;
     animate lifetime { duration: Ui.panel-open ? Motion.panel-in : Motion.panel-out; }
     if Ui.panel-open || root.lifetime > 0 : NowPlayingCard { x: 0; y: 16px; height: parent.height - 32px; }

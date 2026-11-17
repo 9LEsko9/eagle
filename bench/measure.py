@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 eagle contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Idle baseline. Python 3.9+ is required on the measurement host."""
+"""Resource and offline decode measurements. Python 3.9+ is required."""
 import argparse
 import csv
 import ctypes as C
@@ -300,12 +300,58 @@ def measure_playback(binary, data_dir, track_id, seconds, sample, metric):
     print(path)
 
 
+def decode_result(output):
+    """Validate allocation traffic without presenting it as resident memory."""
+    import io
+    rows = list(csv.DictReader(io.StringIO(output)))
+    if len(rows) != 1:
+        raise ValueError('Decode benchmark must return exactly one result')
+    row = rows[0]
+    result = {key: int(row[key]) for key in
+              ('iterations', 'frames', 'allocations', 'allocated_bytes', 'input_rate', 'output_rate')}
+    result['seconds'] = float(row['seconds'])
+    import math
+    if (any(result[key] <= 0 for key in ('iterations', 'frames', 'input_rate', 'output_rate'))
+            or result['allocations'] < 0 or result['allocated_bytes'] < 0
+            or not math.isfinite(result['seconds']) or result['seconds'] <= 0):
+        raise ValueError('Invalid decode counters')
+    return result
+
+
+def measure_decode(binary, audio, iterations, output_rate):
+    import hashlib
+    import json
+    audio = audio.resolve(strict=True)
+    command = [str(binary), str(audio), str(iterations)]
+    if output_rate is not None:
+        command.append(str(output_rate))
+    process = subprocess.run(command, capture_output=True, text=True, check=True)
+    result = decode_result(process.stdout)
+    if result['iterations'] != iterations or (output_rate is not None and result['output_rate'] != output_rate):
+        raise ValueError('Decode benchmark did not run the requested workload')
+    result.update(scenario='decode', os=platform.platform(), machine=platform.machine(),
+                  binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                  audio_sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
+                  git_revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                  git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True)),
+                  rustc=subprocess.check_output(['rustc', '-Vv'], text=True),
+                  allocation_units='Rust global allocator requested bytes, including reallocations; excludes native-library allocations; not live heap or physical footprint',
+                  timing='offline decode loop after one warmup; counting allocator enabled; no audio output or network')
+    output = Path('bench/results') / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.decode.json')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2) + '\n')
+    print(output)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=float, default=60)
-    parser.add_argument('--scenario', choices=['idle', 'info', 'store', 'track', 'playback', 'sync', 'scroll'], default='idle')
+    parser.add_argument('--scenario', choices=['idle', 'info', 'store', 'track', 'playback', 'sync', 'scroll', 'decode'], default='idle')
+    parser.add_argument('--audio', type=Path, help='synthetic local audio for offline decode measurement')
+    parser.add_argument('--iterations', type=int, default=100, help='whole-track repetitions for decode')
+    parser.add_argument('--output-rate', type=int, help='resample decode output to this sample rate')
     parser.add_argument('--data-dir', type=Path, help='existing cache directory for playback measurement')
-    parser.add_argument('--binary', type=Path, help='prebuilt CLI, e.g. a baseline build')
+    parser.add_argument('--binary', type=Path, help='prebuilt CLI, or decode_bench for the decode scenario')
     parser.add_argument('--track', help='yandex:<track ID>; uses the existing keyring token')
     args = parser.parse_args()
     if args.scenario in ('track', 'playback') and not args.track:
@@ -314,6 +360,18 @@ def main():
         parser.error('--scenario playback requires --data-dir with a complete cached track')
     if not 0 < args.seconds <= 86400:
         parser.error('--seconds must be in (0, 86400]')
+    if args.scenario == 'decode':
+        if not args.audio or args.iterations <= 0 or (args.output_rate is not None and args.output_rate <= 0):
+            parser.error('decode requires --audio, positive iterations and output rate')
+        if args.binary:
+            binary = args.binary.resolve(strict=True)
+        else:
+            subprocess.run(['cargo', 'build', '--release', '--locked', '-p', 'eagle-engine',
+                            '--example', 'decode_bench'], check=True)
+            target = Path(os.environ.get('CARGO_TARGET_DIR', 'target'))
+            binary = (target / 'release' / 'examples' / ('decode_bench' + ('.exe' if platform.system() == 'Windows' else ''))).resolve(strict=True)
+        measure_decode(binary, args.audio, args.iterations, args.output_rate)
+        return
     system = platform.system()
     sample, metric = {'Linux': (linux_sample, 'pss_bytes'),
                       'Darwin': (mac_sample, 'phys_footprint_bytes'),

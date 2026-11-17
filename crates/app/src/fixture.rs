@@ -89,7 +89,7 @@ pub fn seed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .enumerate()
                 .map(|(n, track)| eagle_store::PlaybackEntry {
                     id: n as u64 + 1,
-                    track: track.clone(),
+                    track: Arc::new(track.clone()),
                     radio: None,
                 })
                 .collect(),

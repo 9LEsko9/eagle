@@ -48,11 +48,24 @@ export global Type {
 // Window-width breakpoints. The window writes `width`; everything else reads the flags.
 export global Layout {
     in-out property <length> width: 1280px;
+    // Shared page geometry; detail pages use the same canvas as overview pages.
+    out property <length> page-gutter: compact ? 24px : 40px;
+    out property <length> page-top: compact ? 16px : 40px;
+    out property <length> page-gap: 24px;
+    out property <length> canvas-max: 1248px;
+    out property <length> title-height: ceil((compact ? 40px : 48px) * Type.scale / 8px) * 8px;
+    public pure function content-width(panel-open: bool) -> length {
+        return min(canvas-max, width - (compact ? 0px : 208px)
+            - (panel-open && !narrow ? 336px : 0px) - page-gutter * 2);
+    }
+    public pure function cover-size(panel-open: bool) -> length {
+        return panel-open && !narrow ? 112px : 160px;
+    }
     // The sidebar becomes a drawer behind a menu button.
     out property <bool> compact: width < 860px;
     // The «Сейчас играет» panel floats over the content once a docked column (336 px)
     // would leave the track list narrower than 460 px.
-    out property <bool> narrow: width - (compact ? 0px : 208px) - 336px - (compact ? 40px : 80px) < 460px;
+    out property <bool> narrow: width - (compact ? 0px : 208px) - 336px - page-gutter * 2 < 460px;
     // The player bar drops shuffle, repeat and the volume slider.
     out property <bool> tight: width < 720px;
     // Large windows get roomier gutters.

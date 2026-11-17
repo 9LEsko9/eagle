@@ -98,13 +98,15 @@ pub(crate) struct SourceContext {
 
 /// A source that picks its copy on first open (on the decoder thread) and keeps it afterwards,
 /// so reopening after a seek reads the same file and cache entry.
-pub(crate) fn lazy_source(ctx: SourceContext) -> eagle_engine::Source {
+pub(crate) fn lazy_source(
+    choose: impl Fn() -> Result<eagle_engine::Source, eagle_engine::SourceError> + Send + Sync + 'static,
+) -> eagle_engine::Source {
     let chosen: Mutex<Option<eagle_engine::Source>> = Mutex::new(None);
     eagle_engine::Source::new(move |interrupt| {
         let source = {
             let mut slot = chosen.lock().unwrap_or_else(|p| p.into_inner());
             if slot.is_none() {
-                *slot = Some(ctx.choose()?);
+                *slot = Some(choose()?);
             }
             slot.clone()
         }
@@ -114,7 +116,7 @@ pub(crate) fn lazy_source(ctx: SourceContext) -> eagle_engine::Source {
 }
 
 impl SourceContext {
-    fn choose(&self) -> Result<eagle_engine::Source, eagle_engine::SourceError> {
+    pub(crate) fn choose(&self) -> Result<eagle_engine::Source, eagle_engine::SourceError> {
         let stored = |id: &TrackId| {
             [Quality::High, Quality::Standard]
                 .into_iter()
@@ -243,7 +245,83 @@ mod tests {
     use super::*;
     use eagle_core::{Account, Provider};
     use eagle_provider_sdk::testkit::{FakeProvider, fake_track};
-    use std::sync::Arc;
+    use std::{
+        io::{Cursor, Read},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        },
+    };
+
+    fn interrupt() -> eagle_engine::Interrupt {
+        eagle_engine::Interrupt {
+            generation: Arc::new(AtomicU32::new(0)),
+            expected: 0,
+            preload: false,
+            seeking: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn unopened_sources_do_not_build_their_context() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sources: Vec<_> = (0..10_000)
+            .map(|_| {
+                let calls = calls.clone();
+                lazy_source(move || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(eagle_engine::Source::new(|_| {
+                        Ok(Box::new(Cursor::new(vec![7])))
+                    }))
+                })
+            })
+            .collect();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(sources[4_321].open_reader(interrupt()).is_ok());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn lazy_source_retries_failed_choice_and_keeps_the_chosen_source_on_reopen() {
+        let choices = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let source = lazy_source({
+            let choices = choices.clone();
+            let opens = opens.clone();
+            move || {
+                if choices.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err("temporary choice failure".into());
+                }
+                let opens = opens.clone();
+                Ok(eagle_engine::Source::new(move |interrupt| {
+                    assert!(interrupt.seeking.load(Ordering::Relaxed));
+                    if opens.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return Err("temporary open failure".into());
+                    }
+                    Ok(Box::new(Cursor::new(vec![1, 2, 3])))
+                }))
+            }
+        });
+        let seeking = || {
+            let request = interrupt();
+            request.seeking.store(true, Ordering::Relaxed);
+            request
+        };
+        assert!(source.open_reader(seeking()).is_err());
+        assert_eq!(choices.load(Ordering::Relaxed), 1);
+        assert!(source.open_reader(seeking()).is_err());
+        for _ in 0..2 {
+            let mut bytes = Vec::new();
+            source
+                .open_reader(seeking())
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            assert_eq!(bytes, [1, 2, 3]);
+        }
+        assert_eq!(choices.load(Ordering::Relaxed), 2);
+        assert_eq!(opens.load(Ordering::Relaxed), 3);
+    }
 
     fn signed_in(providers: &Providers) {
         for p in providers.all() {

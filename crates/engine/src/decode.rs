@@ -48,6 +48,7 @@ pub(crate) struct Opus {
     gain: f32,
     serial: u32,
     damaged: u64,
+    samples: Vec<f32>,
 }
 
 impl Decoder {
@@ -227,7 +228,10 @@ impl Decoder {
     pub(crate) fn next_reference(&mut self) -> Result<Option<Chunk>, Error> {
         match self {
             Self::Symphonia(decoder) => decoder.next_reference(),
-            Self::Opus(decoder) => decoder.next(),
+            Self::Opus(decoder) => {
+                decoder.samples.fill(0.);
+                decoder.next()
+            }
         }
     }
 }
@@ -472,6 +476,7 @@ impl Opus {
             gain,
             serial,
             damaged: 0,
+            samples: vec![0.; 5760 * channels],
         })
     }
     fn next(&mut self) -> Result<Option<Chunk>, Error> {
@@ -488,8 +493,10 @@ impl Opus {
                     "цепочки Ogg Opus пока не поддерживаются",
                 ));
             }
-            let mut samples = vec![0f32; 5760 * self.channels];
-            let count = match self.decoder.decode_float(&packet.data, &mut samples, false) {
+            let count = match self
+                .decoder
+                .decode_float(&packet.data, &mut self.samples, false)
+            {
                 Ok(n) => n,
                 Err(_) => {
                     self.damaged += 1;
@@ -508,7 +515,7 @@ impl Opus {
             };
             let skip = self.pre_skip.saturating_sub(start).min(count as u64) as usize;
             let keep = end.saturating_sub(start).min(count as u64) as usize;
-            let frames = samples[..keep * self.channels]
+            let frames = self.samples[..keep * self.channels]
                 .chunks_exact(self.channels)
                 .skip(skip)
                 .map(|s| [s[0] * self.gain, s[self.channels - 1] * self.gain])
@@ -556,6 +563,42 @@ mod buffer_tests {
             frames += chunk.frames.len();
         }
         assert!(frames > 80_000, "decoded {frames} frames");
+    }
+
+    #[test]
+    fn opus_reuses_scratch_without_reading_stale_samples() {
+        for channels in [1, 2] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/tone-48000-{channels}.opus"));
+            let open = || Opus::open(Box::new(std::fs::File::open(&path).unwrap())).unwrap();
+            let mut reused = open();
+            let mut zeroed = open();
+            let address = reused.samples.as_ptr();
+            let mut packets = 0;
+            let mut frames = 0;
+            loop {
+                reused.samples.fill(f32::NAN);
+                zeroed.samples.fill(0.);
+                let actual = reused.next().unwrap();
+                let expected = zeroed.next().unwrap();
+                assert_eq!(actual.is_some(), expected.is_some());
+                let Some(actual) = actual else { break };
+                let expected = expected.unwrap();
+                assert_eq!(actual.frames, expected.frames);
+                assert!(
+                    actual
+                        .frames
+                        .iter()
+                        .flatten()
+                        .all(|sample| sample.is_finite())
+                );
+                assert_eq!(reused.samples.as_ptr(), address);
+                packets += 1;
+                frames += actual.frames.len();
+            }
+            assert!(packets > 1);
+            assert_eq!(frames, 12_000);
+        }
     }
 
     #[test]

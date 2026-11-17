@@ -86,6 +86,20 @@ class PlaybackCacheTests(unittest.TestCase):
                 spawn.assert_not_called()
 
 
+class DecodeResultTests(unittest.TestCase):
+    def test_decode_traffic_and_timing_must_be_valid(self):
+        header = 'iterations,frames,seconds,allocations,allocated_bytes,input_rate,output_rate\n'
+        row = '10,480000,0.2,500,10000,48000,44100\n'
+        result = measure.decode_result(header + row)
+        self.assertEqual(result['allocated_bytes'], 10000)
+        self.assertEqual(result['output_rate'], 44100)
+        for invalid in ('', header + row + row,
+                        header + row.replace('0.2', 'nan'),
+                        header + row.replace('500,10000', '-1,10000')):
+            with self.assertRaises(ValueError):
+                measure.decode_result(invalid)
+
+
 class WakeupDeltaTests(unittest.TestCase):
     def test_native_counters_are_separate_from_radio_wakeups(self):
         start = (0, 0, None, {'package_idle_wakeups': 2, 'interrupt_wakeups': 7})

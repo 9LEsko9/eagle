@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { Theme, Type, Layout } from "../globals/theme.slint";
+
+// A shared baseline and reserved line box for every page, including loading states.
+export component PageTitle inherits Text {
+    height: Layout.title-height;
+    color: Theme.t.tx;
+    font-size: Layout.compact ? Type.title : Type.display;
+    font-weight: 700;
+    letter-spacing: -0.8px;
+    vertical-alignment: center;
+    overflow: elide;
+    accessible-role: text;
+}

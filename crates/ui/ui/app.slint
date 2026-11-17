@@ -76,6 +76,9 @@ export component DesktopWindow inherits Window {
     preferred-height: 880px;
     min-width: 560px;
     min-height: 480px;
+    // Content limits must not resize the native window when navigating between screens.
+    max-width: 100000px;
+    max-height: 100000px;
     background: Theme.t.bg;
     default-font-family: "Inter";
     default-font-size: Type.body;
@@ -107,9 +110,9 @@ export component DesktopWindow inherits Window {
                 if !Layout.compact : Sidebar { }
                 VerticalLayout {
                     min-width: 0px;
-                    padding-left: Layout.compact ? 20px : 40px;
-                    padding-right: Layout.compact ? 20px : 40px;
-                    padding-top: Layout.compact ? 12px : 40px;
+                    padding-left: Layout.page-gutter;
+                    padding-right: Layout.page-gutter;
+                    padding-top: Layout.page-top;
                     padding-bottom: 0px;
                     spacing: Layout.compact ? 8px : 16px;
                     if Layout.compact : HorizontalLayout {

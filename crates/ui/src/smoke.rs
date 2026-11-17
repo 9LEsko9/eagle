@@ -34,9 +34,7 @@ impl Smoke {
                             "idle" => crate::fixture_command(Command::Open(View::Saved)),
                             "playing" => {
                                 crate::fixture_command(Command::Volume(0.05));
-                                if let Ok(id) = "fixture:1".parse() {
-                                    crate::fixture_command(Command::Play(id));
-                                }
+                                crate::fixture_command(Command::Resume);
                             }
                             "paused" => crate::fixture_command(Command::Pause),
                             "closed" | "closed-again" | "closed-playing" => crate::close_window(),
@@ -49,6 +47,12 @@ impl Smoke {
                             _ => {}
                         }
                         crate::record_fixture_window(&root, stage);
+                        for delay in [500, 2_000, 4_000] {
+                            let settled_root = root.clone();
+                            slint::Timer::single_shot(Duration::from_millis(delay), move || {
+                                crate::record_fixture_window(&settled_root, stage);
+                            });
+                        }
                         if let Err(error) = std::fs::write(root.join("smoke-stage"), stage) {
                             log::warn!("fixture smoke marker: {error}");
                         }

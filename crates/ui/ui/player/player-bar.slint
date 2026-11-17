@@ -10,6 +10,9 @@ import { SeekSlider } from "../components/slider.slint";
 export component PlayerBar inherits Rectangle {
     private property <bool> tight: Layout.width < 835px;
     private property <float> unmuted: 0.7;
+    private property <length> title-width: max(0px,
+        (Layout.width - clamp(Layout.width * 0.42, root.tight ? 200px : 320px, 560px)
+            - (root.tight ? 48px : 84px)) / 2 - (root.tight ? 60px : 104px));
     // The wave screen is open and the wave is what plays.
     private property <bool> on-wave: Ui.route == Route.radio && Wave.active;
     pure function clock(seconds: float) -> string {
@@ -36,17 +39,16 @@ export component PlayerBar inherits Rectangle {
                 Cover { image: Player.cover; fg: Player.colors.tx; clicked => { Ui.panel-open = !Ui.panel-open; } }
             }
             VerticalLayout {
-                horizontal-stretch: 1;
-                min-width: 0px;
+                width: root.title-width;
                 spacing: 1px;
                 alignment: center;
                 // Title opens the album, artist opens the artist page.
                 Rectangle {
-                    preferred-width: title-text.preferred-width;
-                    min-width: 0px;
-                    height: title-text.preferred-height;
+                    width: root.title-width;
+                    height: Type.body * 1.4;
                     title-text := Text {
                         width: parent.width;
+                        height: parent.height;
                         text: Player.title == "" ? @tr("Ничего не играет") : Player.title;
                         color: Player.colors.tx;
                         font-size: Type.body;
@@ -62,11 +64,11 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
                 Rectangle {
-                    preferred-width: artist-text.preferred-width;
-                    min-width: 0px;
-                    height: artist-text.preferred-height;
+                    width: root.title-width;
+                    height: Type.meta * 1.4;
                     artist-text := Text {
                         width: parent.width;
+                        height: parent.height;
                         text: root.on-wave ? @tr("Моя волна · ") + Player.artist : Player.artist;
                         color: artist-touch.has-hover ? Player.colors.tx : Player.colors.tx2;
                         font-size: Type.meta;

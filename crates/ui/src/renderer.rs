@@ -40,16 +40,19 @@ impl Renderer {
         Ok(selected.unwrap_or_default())
     }
     pub fn select(self) -> Result<(), slint::PlatformError> {
-        slint::BackendSelector::new()
+        let selector = slint::BackendSelector::new()
             .backend_name("winit".into())
-            .renderer_name(self.name().into())
-            .select()
-            .map_err(|error| {
-                slint::PlatformError::from(format!(
-                    "Unable to initialize {}: {error}. Try --software.",
-                    self.name()
-                ))
-            })
+            .renderer_name(self.name().into());
+        let selector = match self {
+            Self::FemtoVgWgpu => selector.require_wgpu_29(Default::default()),
+            Self::Software => selector,
+        };
+        selector.select().map_err(|error| {
+            slint::PlatformError::from(format!(
+                "Unable to initialize {}: {error}. Try --software.",
+                self.name()
+            ))
+        })
     }
 }
 #[cfg(test)]

@@ -102,7 +102,7 @@ export component CardGrid inherits Rectangle {
     in property <[CardItem]> cards;
     in property <length> top;
     in property <length> view-height;
-    private property <length> gap: 20px;
+    private property <length> gap: 24px;
     out property <int> columns: max(2, floor((self.width + gap) / (176px + gap)));
     private property <length> art: (self.width - (columns - 1) * gap) / columns;
     out property <length> row-height: art + 52px + gap;

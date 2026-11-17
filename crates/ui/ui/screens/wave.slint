@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import { PageTitle } from "../components/page-title.slint";
 // «Моя волна»: a pad that tunes the mood, a novelty slider, and the feed of what plays.
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Motion, Layout } from "../globals/theme.slint";
@@ -149,8 +150,8 @@ component MoodPad inherits Rectangle {
         drop-shadow-blur: 14px;
         drop-shadow-offset-y: 4px;
         drop-shadow-color: #00000024;
-        animate x { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
-        animate y { duration: touch.pressed ? 0ms : Motion.slow; easing: cubic-bezier(0.2, 0.9, 0.25, 1.1); }
+        animate x { duration: touch.pressed ? (Motion.reduced ? 0ms : 70ms) : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate y { duration: touch.pressed ? (Motion.reduced ? 0ms : 70ms) : Motion.slow; easing: cubic-bezier(0.2, 0, 0, 1); }
         Rectangle {
             width: touch.pressed && !Motion.reduced ? 14px : 10px;
             height: self.width;
@@ -199,13 +200,14 @@ component MoodPad inherits Rectangle {
 component Console inherits VerticalLayout {
     // The pad takes the free height (two columns); otherwise it is a fixed square.
     in property <bool> fill;
-    spacing: 14px;
+    private property <bool> presets-open;
+    spacing: 16px;
     pad-cell := Rectangle {
         vertical-stretch: root.fill ? 1 : 0;
-        min-height: root.fill ? 160px : min(root.width, 440px);
-        max-height: root.fill ? 100000px : min(root.width, 440px);
+        min-height: root.fill ? 160px : min(root.width, 320px);
+        max-height: root.fill ? 100000px : min(root.width, 320px);
         MoodPad {
-            x: 0px;
+            x: (parent.width - self.width) / 2;
             y: 0px;
             width: min(parent.width, parent.height);
             height: self.width;
@@ -246,9 +248,13 @@ component Console inherits VerticalLayout {
             }
         }
     }
-    HorizontalLayout {
+    TextButton {
+        text: root.presets-open ? @tr("Скрыть настройки") : @tr("Быстрые настройки");
+        clicked => { root.presets-open = !root.presets-open; }
+    }
+    if root.presets-open : VerticalLayout {
         vertical-stretch: 0;
-        spacing: 8px;
+        spacing: 4px;
         alignment: start;
         accessible-role: groupbox;
         accessible-label: @tr("Быстрые настройки");
@@ -261,8 +267,7 @@ component Console inherits VerticalLayout {
         ] : TextButton {
             text: preset.name;
             height: 32px;
-            primary: abs(preset.x - Wave.mood-x) < 0.1 && abs(preset.y - Wave.mood-y) < 0.1 && abs(preset.n - Wave.novelty) < 0.06;
-            outline: !self.primary;
+            outline: true;
             clicked => {
                 Wave.mood-x = preset.x;
                 Wave.mood-y = preset.y;
@@ -308,31 +313,26 @@ component Feed inherits VerticalLayout {
     // Shown only after the shared loading delay, so a quick start does not flash a skeleton.
     private property <bool> starting: Loading.radio && !Wave.active;
     spacing: 0px;
-    if Wave.active && Wave.played.length > 0 : VerticalLayout {
-        spacing: 0px;
-        Caption { text: @tr("БЫЛО"); height: 22px; }
-        for track in Wave.played : FeedLine { track: track; opacity: 0.5; }
-    }
     if Wave.active : Rectangle {
         // The card of the current track.
-        height: card.preferred-height + 32px;
+        height: card.preferred-height + 16px;
         Rectangle {
-            y: 12px;
-            height: parent.height - 32px;
+            y: 0px;
+            height: parent.height - 16px;
             border-radius: 24px;
             background: Wave.colors.card;
             animate background { duration: Motion.slow; }
         }
         card := VerticalLayout {
-            y: 12px;
-            height: parent.height - 32px;
-            padding: 22px;
-            spacing: 20px;
+            y: 0px;
+            height: parent.height - 16px;
+            padding: 24px;
+            spacing: 24px;
             HorizontalLayout {
-                spacing: 22px;
+                spacing: 24px;
                 Rectangle {
-                    width: 152px;
-                    height: 152px;
+                    width: Layout.compact ? 96px : 128px;
+                    height: self.width;
                     drop-shadow-blur: 30px;
                     drop-shadow-offset-y: 10px;
                     drop-shadow-color: #00000024;
@@ -343,7 +343,7 @@ component Feed inherits VerticalLayout {
                     min-width: 0px;
                     alignment: end;
                     Caption { text: @tr("СЕЙЧАС"); }
-                    Text { text: Player.title; color: Theme.t.tx; font-size: 26px * Type.scale; font-weight: 700; letter-spacing: -0.6px; wrap: word-wrap; accessible-role: text; }
+                    Text { text: Player.title; color: Theme.t.tx; font-size: 26px * Type.scale; font-weight: 700; letter-spacing: -0.6px; overflow: elide; height: 64px; accessible-role: text; }
                     Rectangle { height: 4px; }
                     Text { text: Player.artist; color: Theme.t.tx2; font-size: 15px * Type.scale; overflow: elide; }
                 }
@@ -379,7 +379,7 @@ component Feed inherits VerticalLayout {
     if Wave.active && Wave.has-next : VerticalLayout {
         spacing: 0px;
         HorizontalLayout {
-            Caption { text: @tr("ДАЛЬШЕ"); height: 22px; }
+            Caption { text: @tr("ДАЛЬШЕ"); height: 24px; }
             Rectangle { horizontal-stretch: 1; }
             Text { text: @tr("через ") + WaveText.clock(Player.length - Player.shown); color: Theme.t.tx2; font-size: Type.small; vertical-alignment: center; }
         }
@@ -392,16 +392,16 @@ component Feed inherits VerticalLayout {
             border-radius: 24px;
             background: Wave.colors.card;
             VerticalLayout {
-                padding: 22px;
-                spacing: 14px;
+                padding: 24px;
+                spacing: 16px;
                 HorizontalLayout {
-                    spacing: 22px;
+                    spacing: 24px;
                     Bone { width: 152px; height: 152px; border-radius: 14px; }
                     VerticalLayout {
                         alignment: end;
                         spacing: 10px;
                         Bone { width: 70px; height: 10px; }
-                        Bone { height: 22px; }
+                        Bone { height: 24px; }
                         Bone { width: 120px; height: 14px; }
                     }
                 }
@@ -413,35 +413,36 @@ component Feed inherits VerticalLayout {
         border-radius: 24px;
         background: Wave.colors.card;
         hint := VerticalLayout {
-            padding: 22px;
-            spacing: 6px;
+            padding: 24px;
+            spacing: 8px;
             Text { text: @tr("Волна ещё не играет"); color: Theme.t.tx; font-size: Type.lead; font-weight: 700; wrap: word-wrap; }
             Text { text: @tr("Выберите настроение и нажмите «Слушать волну». Для новых рекомендаций нужно подключение к сети."); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
         }
     }
-    Rectangle { height: 10px; }
+    Rectangle { height: 8px; }
     Text {
         text: Ui.radio-notice != "" ? Ui.radio-notice : Wave.note;
         color: Theme.t.tx2;
         font-size: Type.small;
         wrap: word-wrap;
-        min-height: 18px;
+        min-height: 24px;
         accessible-role: text;
     }
 }
 
 export component WaveScreen inherits VerticalLayout {
     // Decided from the window, not from this screen's own width: that would loop through the layout.
-    private property <length> content: Layout.width - (Layout.compact ? 40px : (Layout.wide ? 96px : 64px) + 208px) - (Ui.panel-open && !Layout.narrow ? 336px : 0px);
+    width: Layout.content-width(Ui.panel-open);
+    private property <length> content: Layout.content-width(Ui.panel-open);
     private property <bool> wide: root.content >= 900px;
-    spacing: Layout.compact ? 16px : 24px;
+    spacing: Layout.page-gap;
     HorizontalLayout {
         spacing: 16px;
         VerticalLayout {
             horizontal-stretch: 1;
             min-width: 0px;
-            spacing: 6px;
-            Text { text: @tr("Моя волна"); color: Theme.t.tx; font-size: Layout.compact ? Type.title : Type.display; font-weight: 700; letter-spacing: -0.8px; overflow: elide; accessible-role: text; }
+            spacing: 8px;
+            PageTitle { text: @tr("Моя волна"); }
             Text { text: @tr("Тяни точку к настроению — волна подстроится со следующего трека"); color: Theme.t.tx2; font-size: Type.meta; wrap: word-wrap; }
         }
         VerticalLayout {
@@ -483,8 +484,9 @@ export component WaveScreen inherits VerticalLayout {
         VerticalLayout {
             spacing: 24px;
             padding-bottom: 8px;
+            if Wave.active : Feed { }
             Console { fill: false; }
-            Feed { }
+            if !Wave.active : Feed { }
         }
     }
 }

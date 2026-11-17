@@ -56,7 +56,7 @@ export component TextButton inherits Rectangle {
         enabled: root.enabled;
         key-pressed(e) => { if e.text == " " || e.text == "\n" { if !root.busy { root.clicked(); } return accept; } return reject; }
     }
-    touch := TouchArea { enabled: root.enabled; clicked => { if !root.busy { root.clicked(); } } }
+    touch := TouchArea { mouse-cursor: root.enabled && !root.busy ? pointer : default; enabled: root.enabled; clicked => { if !root.busy { root.clicked(); } } }
 }
 
 // Text-only sidebar item.
@@ -88,7 +88,7 @@ export component NavItem inherits Rectangle {
     focus := FocusScope {
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
     }
-    touch := TouchArea { clicked => { root.clicked(); } }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // Row inside a popup menu.
@@ -113,5 +113,5 @@ export component MenuItem inherits Rectangle {
         key-pressed(e) => { if e.text == " " || e.text == "\n" { root.clicked(); return accept; } return reject; }
     }
     Text { x: 10px; width: parent.width - 20px; text: root.text; color: root.enabled ? Theme.t.tx : Theme.t.tx2; font-size: Type.meta; font-weight: 500; vertical-alignment: center; overflow: elide; }
-    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    touch := TouchArea { mouse-cursor: root.enabled ? pointer : default; enabled: root.enabled; clicked => { root.clicked(); } }
 }
