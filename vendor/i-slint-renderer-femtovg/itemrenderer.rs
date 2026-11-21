@@ -635,6 +635,11 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         _size: LogicalSize,
     ) -> RenderingResult {
         let opacity = opacity_item.opacity();
+        // Hidden controls in newly created list rows must not allocate or render GPU layers.
+        if opacity <= 0.0 {
+            self.layer_cache.release(item_rc);
+            return RenderingResult::ContinueRenderingWithoutChildren;
+        }
         if Opacity::need_layer(item_rc, opacity) {
             self.render_and_blend_layer(opacity, item_rc)
         } else {

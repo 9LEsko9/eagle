@@ -325,8 +325,8 @@ impl FemtoVGRenderer<WGPUBackend> {
 
         #[cfg(target_os = "macos")]
         {
-            // Metal keeps latency + 1 full-size drawables. Configure two before allocating them.
-            surface_config.desired_maximum_frame_latency = 1;
+            // Three drawables let CPU and GPU overlap during scrolling and animations.
+            surface_config.desired_maximum_frame_latency = 2;
         }
 
         let swapchain_capabilities = surface.get_capabilities(&adapter);

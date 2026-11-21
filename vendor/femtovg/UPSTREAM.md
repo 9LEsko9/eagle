@@ -10,7 +10,8 @@ work uses WGPU 30 and cannot be substituted directly. Only
 the file-path import to the features that use it, avoiding an upstream unused
 import warning when rendering without image-loading/textlayout:
 
-- On macOS, submit and wait between render passes to bound retained Metal encoder resources.
+- On macOS, submit and wait after batches of eight render passes to bound retained
+  Metal encoder resources without synchronizing after every individual pass.
 - Start passes only when needed, while preserving clear-only passes.
 - Keep recently used macOS pipelines for up to 64 flushes; cap the cache at 512 entries.
 - Log the actual backend when creating a device-backed renderer. The isolated
@@ -26,8 +27,9 @@ before the next flush. Eagle's Slint integration follows this ordering.
 ## По-русски
 
 Это закреплённая копия femtovg 0.25.1 с исходными лицензиями MIT/Apache-2.0.
-Изменён только WGPU backend: на macOS GPU-пакеты ограничены одним render pass
-с ожиданием завершения, пустые pass не создаются, а очистки сохраняются.
+Изменён только WGPU backend: на macOS GPU-пакеты ограничены восемью render pass
+с ожиданием завершения между пакетами, а не после каждого pass.
+Пустые pass не создаются, а очистки сохраняются.
 Кэш pipeline ограничен 512 записями и удерживает неиспользуемые записи не более
 64 flush. Логируется фактический backend; дополнительный rendering notifier
 Slint для этого не нужен. Диагностический флаг выше измеряет кодирование команд,

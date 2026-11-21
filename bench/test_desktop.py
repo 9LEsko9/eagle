@@ -5,15 +5,47 @@ import json
 import sqlite3
 import plistlib
 import signal
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from desktop import app_command, completed_peak, fixture_queue_entries, observed_gpu_api, percentile, summarize, terminate_app
+from desktop import app_command, completed_peak, fixture_queue_entries, observed_gpu_api, percentile, scroll_metrics, summarize, terminate_app
 
 
 class DesktopReportTest(unittest.TestCase):
+    def test_invalid_scroll_step_is_rejected_before_creating_fixture_files(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for value in ('0', '-1', '65536'):
+                result = subprocess.run([
+                    sys.executable, str(Path(__file__).with_name('desktop.py')),
+                    '--binary', str(root / 'missing-binary'),
+                    '--fixture-root', str(root / 'fixture'),
+                    '--output', str(root / 'report.json'),
+                    '--scroll-step', value,
+                ], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('scroll-step must be in 1..65535', result.stderr)
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_scroll_samples_exclude_other_stages_and_preserve_zero_frame_counts(self):
+        log = '''average frames per second: 90 details from last frame: [2 layers created]
+Eagle fixture stage: idle
+average frames per second: 10
+Eagle fixture stage: scrolling
+average frames per second: 0
+average frames per second: 57 details from last frame: [3 layers created]
+Eagle fixture stage: playing
+average frames per second: 60 details from last frame: [1 layers created]
+'''
+        self.assertEqual(scroll_metrics(log), [
+            {'rendered_frames': 0, 'layers_created_last_frame': None},
+            {'rendered_frames': 57, 'layers_created_last_frame': 3},
+        ])
+
     def test_app_launch_preserves_arguments_and_high_resolution_metadata(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -22,8 +54,12 @@ class DesktopReportTest(unittest.TestCase):
             output = root / 'report.json'
             arguments = ['--fixture-root', '/tmp/Музыка с пробелами', '--fixture-smoke']
             with patch('desktop.app_pid', return_value=None):
-                command, executable = app_command(binary, output, {'EAGLE_DATA_DIR': '/tmp/isolated'}, arguments)
+                command, executable = app_command(binary, output, {
+                    'EAGLE_DATA_DIR': '/tmp/isolated',
+                    'SLINT_DEBUG_PERFORMANCE': 'refresh_lazy,console',
+                }, arguments)
             self.assertEqual(command[-len(arguments):], arguments)
+            self.assertIn('SLINT_DEBUG_PERFORMANCE=refresh_lazy,console', command)
             self.assertEqual(executable.read_bytes(), binary.read_bytes())
             with (output.with_suffix('.app') / 'Contents' / 'Info.plist').open('rb') as file:
                 self.assertTrue(plistlib.load(file)['NSHighResolutionCapable'])

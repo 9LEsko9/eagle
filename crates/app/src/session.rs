@@ -6695,7 +6695,7 @@ mod lifecycle_tests {
             seed_like(&store, "yandex:1");
         }
         let (tx, rx) = mpsc::channel();
-        let session = Session::start(root.clone(), move |event| {
+        let session = Session::start_with_providers(root.clone(), vec![], move |event| {
             let _ = tx.send(event);
         })
         .unwrap();
@@ -6751,7 +6751,7 @@ mod lifecycle_tests {
             seed_like(&store, "yandex:1");
         }
         let (tx, rx) = mpsc::channel();
-        let session = Session::start(root.clone(), move |event| {
+        let session = Session::start_with_providers(root.clone(), vec![], move |event| {
             let _ = tx.send(event);
         })
         .unwrap();

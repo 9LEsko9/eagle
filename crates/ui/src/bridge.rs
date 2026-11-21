@@ -1739,6 +1739,14 @@ pub(super) fn retry_artwork(ui: &DesktopWindow) {
         bridge.refresh_queue(ui);
     });
 }
+pub(super) fn fixture_visible_rows() -> Option<(usize, usize)> {
+    UI_BRIDGE.with(|bridge| {
+        bridge
+            .borrow()
+            .as_ref()
+            .map(|bridge| bridge.row_window.get())
+    })
+}
 pub(super) fn clear() {
     UI_BRIDGE.with(|bridge| bridge.borrow_mut().take());
 }
